@@ -1,212 +1,191 @@
 --[[
-    Pokorenie Nebes - Custom GUI Source Code (Pure Lua/Roblox Instances)
-    Создает перетаскиваемое окно с функционалом Fly и Anti-AFK.
-    Этот код готов к вставке в C++ DLL-исполнитель.
---]]
+    ФАНТОМ-ХАБ | STANDALONE EDITION
+    Новая, улучшенная и более агрессивная версия Hub.
+    Тема: Dark/Sleek.
+]]
 
--- ====================================================================
--- 1. ИНИЦИАЛИЗАЦИЯ И СЛУЖБЫ
--- ====================================================================
+local Rayfield = (function()
+    -- =====================================================================
+    -- ШАГ 1: ВСТАВЬ СЮДА ВЕСЬ ИСХОДНЫЙ КОД ИЗ source.lua.txt
+    --
+    -- Если ты не вставил код, скрипт временно загрузит его с сервера:
+    -- =====================================================================
+    local success, result = pcall(function()
+        return loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
+    end)
+    if not success then return end
+    return result
+end)()
 
-local Player = game.Players.LocalPlayer
-local Character = Player.Character or Player.CharacterAdded:Wait()
+-- =====================================================================
+-- ШАГ 2: КОНФИГУРАЦИЯ ОКНА (DARK STYLE)
+-- =====================================================================
+
+local Window = Rayfield:CreateWindow({
+   Name = "ФАНТОМ-ХАБ | The Strongest Battlegrounds",
+   Icon = "rbxassetid://4483345998", -- Используем ID для иконки с более сильным видом
+   LoadingTitle = "Активация ФАНТОМ-протокола",
+   LoadingSubtitle = "by Meloten | Reborn",
+   ShowText = "MENU", 
+   Theme = "Midnight", -- Выбираем тёмную, насыщенную тему для агрессивного вида
+   
+   ToggleUIKeybind = "Delete", -- Меняем на более удобную кнопку для мгновенного доступа
+
+   DisableRayfieldPrompts = true, 
+   DisableBuildWarnings = true, 
+
+   ConfigurationSaving = {
+      Enabled = true,
+      FolderName = "PhantomHub_Data", -- Новое имя папки
+      FileName = "PhantomCore_Config"
+   },
+
+   Discord = { Enabled = false },
+   KeySystem = false, 
+})
+
+-- =====================================================================
+-- ШАГ 3: ЛОГИКА И ФУНКЦИИ (COMBAT & UTILS)
+-- =====================================================================
+
+local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
+local LocalPlayer = Players.LocalPlayer
 
--- Переключатели состояния
-local isFlying = false
-local isAntiAFK_Active = false
+local flySettings = { speed = 75, flying = false, bodyVel = nil }
 
--- Параметры
-local flySpeed = 75
-local defaultSpeed = 16
-local bodyVelocity = nil
-local antiAFK_Connection = nil
+-- -- ВКЛАДКА: ОСНОВНОЕ (БОЙ) --
+local CombatTab = Window:CreateTab("Combat", "swords") -- Используем иконку мечей/боя
 
--- ====================================================================
--- 2. СОЗДАНИЕ UI
--- ====================================================================
+CombatTab:CreateSection("Манипуляция движением")
 
-local screenGui = Instance.new("ScreenGui")
-screenGui.Name = "CustomExploitHub"
-screenGui.DisplayOrder = 999 
-screenGui.Parent = Player:WaitForChild("PlayerGui")
-
-local mainFrame = Instance.new("Frame")
-mainFrame.Size = UDim2.new(0, 250, 0, 180)
-mainFrame.Position = UDim2.new(0.5, -125, 0.5, -90)
-mainFrame.BackgroundColor3 = Color3.new(0.15, 0.15, 0.15) -- Темный фон
-mainFrame.BorderColor3 = Color3.new(0.05, 0.05, 0.05)
-mainFrame.BorderSizePixel = 2
-mainFrame.Parent = screenGui
-
--- Логика перетаскивания (Draggable)
-local isDragging = false
-local dragStartPos = Vector2.new(0, 0)
-
--- Захват нажатия для начала перетаскивания
-mainFrame.InputBegan:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-        isDragging = true
-        dragStartPos = UserInputService:GetMouseLocation() - mainFrame.AbsolutePosition
-    end
-end)
-
--- Освобождение нажатия для прекращения перетаскивания
-mainFrame.InputEnded:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-        isDragging = false
-    end
-end)
-
--- Обновление позиции при перетаскивании
-UserInputService.InputChanged:Connect(function(input)
-    if isDragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
-        local newPos = UserInputService:GetMouseLocation() - dragStartPos
-        mainFrame.Position = UDim2.new(0, newPos.X, 0, newPos.Y)
-    end
-end)
-
-local titleLabel = Instance.new("TextLabel")
-titleLabel.Text = "Pokorenie Nebes | Custom Hub"
-titleLabel.Size = UDim2.new(1, 0, 0, 30)
-titleLabel.Font = Enum.Font.SourceSansBold
-titleLabel.TextSize = 18
-titleLabel.TextColor3 = Color3.new(0.8, 0.8, 0.8)
-titleLabel.BackgroundColor3 = Color3.new(0.2, 0.2, 0.2) 
-titleLabel.Parent = mainFrame
-
-local buttonsFrame = Instance.new("Frame")
-buttonsFrame.Size = UDim2.new(1, 0, 1, -30)
-buttonsFrame.Position = UDim2.new(0, 0, 0, 30)
-buttonsFrame.BackgroundTransparency = 1
-buttonsFrame.Parent = mainFrame
-
-local listLayout = Instance.new("UIListLayout")
-listLayout.Padding = UDim.new(0, 10)
-listLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
-listLayout.Parent = buttonsFrame
-
--- ====================================================================
--- 3. ЛОГИКА ФУНКЦИЙ
--- ====================================================================
-
--- 3.1. Функция обновления полета (привязана к RunService)
-local function updateFlyLoop()
-    if isFlying and bodyVelocity and Player.Character and Player.Character:FindFirstChild("HumanoidRootPart") then
-        local cam = workspace.CurrentCamera
-        local velocity = Vector3.new(0, 0, 0)
+-- 1. FLIGHT MODE (ПОЛЁТ)
+CombatTab:CreateToggle({
+   Name = "Flight Mode (Полёт)",
+   CurrentValue = false,
+   Flag = "FlightMode", 
+   Callback = function(Value)
+        flySettings.flying = Value
+        local char = LocalPlayer.Character
+        if not char or not char:FindFirstChild("HumanoidRootPart") then return end
         
-        -- Управление WASD (вперед/назад)
-        if UserInputService:IsKeyDown(Enum.KeyCode.W) then
-            velocity = velocity + cam.CFrame.lookVector * flySpeed
-        elseif UserInputService:IsKeyDown(Enum.KeyCode.S) then
-            velocity = velocity - cam.CFrame.lookVector * flySpeed
-        end
-        -- Управление Пробел/Ctrl (вверх/вниз)
-        if UserInputService:IsKeyDown(Enum.KeyCode.Space) then
-            velocity = velocity + Vector3.new(0, flySpeed, 0)
-        elseif UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then
-            velocity = velocity - Vector3.new(0, flySpeed, 0)
-        end
+        local root = char.HumanoidRootPart
+        local hum = char.Humanoid
         
-        bodyVelocity.Velocity = velocity 
-    end
-end
-
--- 3.2. Переключение полета
-local function toggleFly(button)
-    local character = Player.Character
-    if not character or not character:FindFirstChild("Humanoid") or not character:FindFirstChild("HumanoidRootPart") then
-        return
-    end
-    
-    isFlying = not isFlying
-    local rootPart = character.HumanoidRootPart
-    local humanoid = character.Humanoid
-    
-    if isFlying then
-        humanoid.PlatformStand = true -- Отключение физики
-        humanoid.WalkSpeed = flySpeed 
-        
-        bodyVelocity = Instance.new("BodyVelocity")
-        bodyVelocity.MaxForce = Vector3.new(9e9, 9e9, 9e9) -- Максимальная сила
-        bodyVelocity.Velocity = Vector3.new(0, 0, 0)
-        bodyVelocity.Parent = rootPart
-        
-        RunService:BindToRenderStep("FlyMovement", Enum.RenderPriority.Character.Value + 1, updateFlyLoop)
-        button.BackgroundColor3 = Color3.new(0.2, 0.8, 0.2) -- Зеленый (ВКЛ)
-        button.Text = "Fly: ON"
-    else
-        humanoid.PlatformStand = false 
-        humanoid.WalkSpeed = defaultSpeed
-        
-        if bodyVelocity then
-            bodyVelocity:Destroy()
-            bodyVelocity = nil
+        if flySettings.flying then
+            hum.PlatformStand = true
+            
+            flySettings.bodyVel = Instance.new("BodyVelocity")
+            flySettings.bodyVel.Velocity = Vector3.zero
+            flySettings.bodyVel.MaxForce = Vector3.new(9e9, 9e9, 9e9)
+            flySettings.bodyVel.Parent = root
+            
+            -- Цикл движения, привязанный к современному планировщику задач
+            task.spawn(function()
+                while flySettings.flying and char.Parent do
+                    local cam = workspace.CurrentCamera
+                    local moveDir = Vector3.zero
+                    
+                    if UserInputService:IsKeyDown(Enum.KeyCode.W) then moveDir = moveDir + cam.CFrame.LookVector end
+                    if UserInputService:IsKeyDown(Enum.KeyCode.S) then moveDir = moveDir - cam.CFrame.LookVector end
+                    if UserInputService:IsKeyDown(Enum.KeyCode.D) then moveDir = moveDir + cam.CFrame.RightVector end
+                    if UserInputService:IsKeyDown(Enum.KeyCode.A) then moveDir = moveDir - cam.CFrame.RightVector end
+                    if UserInputService:IsKeyDown(Enum.KeyCode.Space) then moveDir = moveDir + Vector3.new(0, 1, 0) end
+                    if UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then moveDir = moveDir - Vector3.new(0, 1, 0) end
+                    
+                    if flySettings.bodyVel then
+                        -- Применяем скорость, установленную в слайдере
+                        flySettings.bodyVel.Velocity = moveDir * flySettings.speed
+                    end
+                    task.wait()
+                end
+            end)
+        else
+            if hum then hum.PlatformStand = false end
+            if flySettings.bodyVel then flySettings.bodyVel:Destroy() end
         end
-        RunService:UnbindFromRenderStep("FlyMovement")
-        button.BackgroundColor3 = Color3.new(0.3, 0.3, 0.3) -- Серый (ВЫКЛ)
-        button.Text = "Fly: OFF"
-    end
-end
+   end,
+})
 
--- 3.3. Переключение Anti-AFK
-local function toggleAntiAFK(button)
-    isAntiAFK_Active = not isAntiAFK_Active
-    
-    if isAntiAFK_Active and not antiAFK_Connection then
-        antiAFK_Connection = RunService.Heartbeat:Connect(function()
-            -- Тривиальное изменение свойства, чтобы Roblox считал игрока активным
-            Player.CameraMaxZoomDistance = Player.CameraMaxZoomDistance + 0.001 
-            Player.CameraMaxZoomDistance = Player.CameraMaxZoomDistance - 0.001
-        end)
-        button.BackgroundColor3 = Color3.new(0.2, 0.8, 0.2) 
-        button.Text = "Anti-AFK: ON"
-    elseif not isAntiAFK_Active and antiAFK_Connection then
-        antiAFK_Connection:Disconnect()
-        antiAFK_Connection = nil
-        button.BackgroundColor3 = Color3.new(0.3, 0.3, 0.3) 
-        button.Text = "Anti-AFK: OFF"
-    end
-end
-
--- ====================================================================
--- 4. СОЗДАНИЕ ИНТЕРАКТИВНЫХ ЭЛЕМЕНТОВ
--- ====================================================================
-
-local function createButton(text, callback)
-    local button = Instance.new("TextButton")
-    button.Text = text
-    button.Size = UDim2.new(0.9, 0, 0, 35)
-    button.BackgroundColor3 = Color3.new(0.3, 0.3, 0.3) 
-    button.BorderColor3 = Color3.new(0.1, 0.1, 0.1)
-    button.BorderSizePixel = 1
-    button.Font = Enum.Font.SourceSansSemibold
-    button.TextSize = 16
-    button.TextColor3 = Color3.new(1, 1, 1)
-    button.Parent = buttonsFrame
-    
-    -- Анимация наведения для красоты
-    button.MouseEnter:Connect(function()
-        if button.BackgroundColor3 == Color3.new(0.3, 0.3, 0.3) or button.BackgroundColor3 == Color3.new(0.4, 0.4, 0.4) then
-            button:TweenBackgroundColor(Color3.new(0.4, 0.4, 0.4), "Out", "Quad", 0.1, true)
+-- 2. СЛАЙДЕР СКОРОСТИ
+CombatTab:CreateSlider({
+   Name = "Flight/Walk Speed",
+   Range = {16, 250},
+   Increment = 1,
+   Suffix = "Studs/s",
+   CurrentValue = 75,
+   Flag = "SpeedSlider", 
+   Callback = function(Value)
+        flySettings.speed = Value
+        -- Обновляем скорость персонажа, если не в полёте
+        if not flySettings.flying then
+            LocalPlayer.Character.Humanoid.WalkSpeed = Value
         end
-    end)
-    button.MouseLeave:Connect(function()
-        if button.BackgroundColor3 == Color3.new(0.4, 0.4, 0.4) then
-             button:TweenBackgroundColor(Color3.new(0.3, 0.3, 0.3), "Out", "Quad", 0.1, true)
+   end,
+})
+
+-- -- ВКЛАДКА: СИСТЕМА --
+local UtilityTab = Window:CreateTab("Utility", "tool") -- Иконка инструмента
+
+UtilityTab:CreateSection("Обход и Обслуживание")
+
+-- 3. ANTI-AFK (ИМИТАЦИЯ АКТИВНОСТИ)
+UtilityTab:CreateToggle({
+   Name = "Anti-AFK (Защита от кика)",
+   CurrentValue = false,
+   Flag = "AntiAfkToggle", 
+   Callback = function(Value)
+        _G.AntiAfk = Value
+        if Value then
+            local bb = game:GetService("VirtualUser")
+            -- Привязываем к событию Idled: как только игра считает, что игрок бездействует, 
+            -- мы выполняем команду, которая сбрасывает таймер.
+            game:GetService("Players").LocalPlayer.Idled:Connect(function()
+                if _G.AntiAfk then
+                    bb:CaptureController() -- Захват ввода
+                    bb:ClickButton2(Vector2.new()) -- Имитация правого клика в случайном месте
+                    print("Anti-AFK: Активность имитирована.")
+                end
+            end)
         end
-    end)
-    
-    button.MouseButton1Click:Connect(function()
-        callback(button)
-    end)
-    return button
-end
+   end,
+})
 
--- Создаем кнопки, привязанные к функциям
-createButton("Fly: OFF", toggleFly)
-createButton("Anti-AFK: OFF", toggleAntiAFK)
+-- 4. ТУМБЛЕР ВИЗУАЛОВ (ПРОСТО ПРИМЕР)
+UtilityTab:CreateToggle({
+   Name = "ESP Boxes (Визуалы врагов)",
+   CurrentValue = false,
+   Flag = "EspBoxes", 
+   Callback = function(Value)
+        -- Здесь будет код для создания или отключения ESP-коробок
+        if Value then
+            print("Визуалы включены, требуется дополнительный скрипт для отрисовки.")
+        else
+            print("Визуалы отключены.")
+        end
+   end,
+})
 
-print("[Custom Hub] GUI Successfully Created and Initialized.")
+-- -- ВКЛАДКА: УПРАВЛЕНИЕ --
+local SettingsTab = Window:CreateTab("Settings", "settings") 
+
+SettingsTab:CreateSection("Управление Хабом")
+
+SettingsTab:CreateButton({
+   Name = "Save Configuration (Сохранить)",
+   Callback = function()
+      Rayfield:SaveConfiguration()
+      print("Настройки сохранены в PhantomCore_Config.")
+   end,
+})
+
+SettingsTab:CreateButton({
+   Name = "Destroy UI (Закрыть Хаб)",
+   Callback = function()
+      Rayfield:Destroy()
+      print("Фантом-Хаб деактивирован.")
+   end,
+})
+
+Rayfield:LoadConfiguration()
