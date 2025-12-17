@@ -1,0 +1,148 @@
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local player = Players.LocalPlayer
+
+-- Параметры Стенда
+local IDLE_OFFSET = Vector3.new(3, 2.5, 4.5) 
+local ATTACK_OFFSET = Vector3.new(0, 0, -8) 
+local ATTACK_DURATION = 1.5
+local STAND_TRANSPARENCY = 0.4
+
+local isAttacking = false
+local currentOffset = IDLE_OFFSET
+
+-- Функция создания GUI (теперь с защитой от удаления)
+local function createMobileGui()
+    if player:WaitForChild("PlayerGui"):FindFirstChild("StandMobileGUI") then
+        player.PlayerGui.StandMobileGUI:Destroy()
+    end
+
+    local screenGui = Instance.new("ScreenGui")
+    screenGui.Name = "StandMobileGUI"
+    screenGui.ResetOnSpawn = false -- Чтобы GUI не пропадал при смерти
+    screenGui.DisplayOrder = 999 -- Поверх всего
+    screenGui.Parent = player:WaitForChild("PlayerGui")
+
+    local frame = Instance.new("Frame")
+    frame.Size = UDim2.new(0, 260, 0, 70)
+    frame.Position = UDim2.new(0.5, -130, 0.7, 0) -- Чуть выше кнопок прыжка
+    frame.BackgroundTransparency = 1
+    frame.Parent = screenGui
+
+    local function createButton(index, pos)
+        local btn = Instance.new("TextButton")
+        btn.Name = "SkillBtn" .. index
+        btn.Size = UDim2.new(0, 55, 0, 55)
+        btn.Position = pos
+        btn.Text = "S" .. index
+        btn.Font = Enum.Font.BlackOpsOne
+        btn.TextSize = 25
+        btn.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+        btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+        btn.BorderSizePixel = 2
+        btn.BackgroundTransparency = 0.2
+        btn.Parent = frame
+        
+        -- Скругление углов
+        local corner = Instance.new("UICorner")
+        corner.CornerRadius = UDim.new(0, 10)
+        corner.Parent = btn
+
+        btn.MouseButton1Click:Connect(function()
+            if _G.PerformStandAttack then
+                _G.PerformStandAttack(index)
+            end
+        end)
+    end
+
+    createButton(1, UDim2.new(0, 0, 0, 0))
+    createButton(2, UDim2.new(0, 65, 0, 0))
+    createButton(3, UDim2.new(0, 130, 0, 0))
+    createButton(4, UDim2.new(0, 195, 0, 0))
+end
+
+-- Создаем кнопки сразу
+createMobileGui()
+
+local function setupStand(character)
+    local root = character:WaitForChild("HumanoidRootPart", 10)
+    if not root then return end
+
+    character.Archivable = true
+    local stand = character:Clone()
+    character.Archivable = false
+
+    -- Очистка от мусора (кубиков)
+    for _, obj in pairs(stand:GetDescendants()) do
+        if obj:IsA("BasePart") then
+            obj.Transparency = STAND_TRANSPARENCY
+            obj.CanCollide = false
+            obj.Massless = true
+        elseif obj:IsA("SelectionBox") or obj:IsA("ParticleEmitter") or obj:IsA("Trail") then
+            obj:Destroy()
+        elseif obj:IsA("Script") or obj:IsA("LocalScript") then
+            obj:Destroy()
+        end
+    end
+
+    local standRoot = stand:WaitForChild("HumanoidRootPart")
+    local standHumanoid = stand:WaitForChild("Humanoid")
+    local standAnimator = standHumanoid:FindFirstChildOfClass("Animator") or Instance.new("Animator", standHumanoid)
+    stand.Parent = workspace
+    stand.Name = "Stand_" .. player.Name
+
+    local bodyPos = Instance.new("BodyPosition", standRoot)
+    bodyPos.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+    bodyPos.P = 40000
+    
+    local bodyGyro = Instance.new("BodyGyro", standRoot)
+    bodyGyro.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
+    bodyGyro.P = 25000
+
+    -- Глобальная функция атаки
+    _G.PerformStandAttack = function(toolIndex)
+        if isAttacking then return end
+        
+        local tools = player.Backpack:GetChildren()
+        local tool = tools[toolIndex]
+        
+        if tool and tool:IsA("Tool") then
+            isAttacking = true
+            currentOffset = ATTACK_OFFSET
+            
+            local playerHumanoid = character:FindFirstChildOfClass("Humanoid")
+            
+            -- Логика перехвата анимации
+            standHumanoid:EquipTool(tool:Clone())
+            playerHumanoid:EquipTool(tool)
+            tool:Activate()
+
+            task.spawn(function()
+                task.wait(0.1)
+                for _, track in pairs(playerHumanoid:GetPlayingAnimationTracks()) do
+                    local sTrack = standAnimator:LoadAnimation(track.Animation)
+                    sTrack:Play()
+                    track:Stop()
+                end
+            end)
+            
+            task.wait(ATTACK_DURATION)
+            currentOffset = IDLE_OFFSET
+            isAttacking = false
+        end
+    end
+
+    local connection
+    connection = RunService.RenderStepped:Connect(function()
+        if not character.Parent or not root.Parent then
+            stand:Destroy()
+            connection:Disconnect()
+            return 
+        end
+        bodyPos.Position = (root.CFrame * CFrame.new(currentOffset)).Position
+        bodyGyro.CFrame = root.CFrame
+    end)
+end
+
+player.CharacterAdded:Connect(setupStand)
+if player.Character then setupStand(player.Character) end
