@@ -5,84 +5,107 @@ import string
 import os
 
 # КОНФИГ
-TOKEN = '8525811167:AAFL7VrHRolDFdHq91e1f26N7ys8qpOipbE'
-ADMIN_USERNAME = 'Gokuoriginal' 
+TOKEN = '8525811167:AAHfRATLbw6GquDcpNT-ybE0iL4aDKE6QX4'
+ADMIN_USERNAME = 'Gokuoriginal'
 
 bot = telebot.TeleBot(TOKEN)
 
-def gen_mega_name():
-    return "_" + "".join(random.choice(string.ascii_letters) for _ in range(25))
+def rnd_id(n=20):
+    return "_" + "".join(random.choice(string.ascii_letters) for _ in range(n))
 
-def encrypt_string(text):
-    key = random.randint(15, 95)
-    chars = [ord(c) ^ key for c in text]
-    v_t = gen_mega_name()
-    return f"(function() local {v_t}={{ {','.join(map(str, chars))} }} local r='' for i=1,#{v_t} do r=r..string.char({v_t}[i] ~ {key}) end return r end)()"
+def encrypt_val(val, is_str=True):
+    key = random.randint(50, 250)
+    if is_str:
+        encrypted = [ord(c) ^ key for c in val]
+        v_name = rnd_id(15)
+        return f"(function() local {v_name}={{ {','.join(map(str, encrypted))} }} local s='' for i=1,#{v_name} do s=s..string.char({v_name}[i] ~ {key}) end return s end)()"
+    else:
+        return f"({val + key} - {key})"
 
-def meloten_core(source):
-    # Защита строк
-    source = re.sub(r'"(.*?)"', lambda m: encrypt_string(m.group(1)), source)
-    source = re.sub(r"'(.*?)'", lambda m: encrypt_string(m.group(1)), source)
+def build_vm(source):
+    # 1. Очистка кода от лишних пробелов и комментариев (минимальная)
+    source = re.sub(r'--\[\[.*?\]\]', '', source, flags=re.DOTALL)
+    source = re.sub(r'--.*', '', source)
     
-    junk = "\n".join([f"local {gen_mega_name()} = {random.randint(100, 9999)}" for _ in range(10)])
-    entry_point = gen_mega_name()
+    # 2. Шифруем все строки
+    source = re.sub(r'"(.*?)"', lambda m: encrypt_val(m.group(1)), source)
+    source = re.sub(r"'(.*?)'", lambda m: encrypt_string(m.group(1)) if "encrypt_string" in globals() else encrypt_val(m.group(1)), source)
+
+    # 3. Создаем структуру VM
+    vm_table = rnd_id()
+    pc_var = rnd_id()
     
-    result = f"--[[ MELOTEN SUPREME V5 ]]\n{junk}\nlocal function {entry_point}()\n{source}\nend\n{entry_point}()"
-    return result
+    # Разбиваем код на "опкоды" (по строкам для простоты, но в структуре VM)
+    lines = [line.strip() for line in source.split('\n') if line.strip()]
+    opcodes = []
+    for i, line in enumerate(lines):
+        opcodes.append(f"[{i}] = function() {line} end")
+    
+    opcodes_str = ",\n        ".join(opcodes)
+    
+    # Финальная сборка VM
+    vm_code = f"""
+local {vm_table} = {{
+        {opcodes_str}
+}}
 
-# --- ОБРАБОТКА ФАЙЛОВ ---
+local {pc_var} = 0
+local _running = true
 
-@bot.message_handler(content_types=['document'])
-def handle_docs(message):
-    try:
-        # Проверяем расширение файла
-        file_name = message.document.file_name
-        if file_name.endswith('.lua') or file_name.endswith('.txt'):
-            status = bot.reply_to(message, f"📥 Получен файл: `{file_name}`. Начинаю магию...")
-            
-            # Скачиваем файл
-            file_info = bot.get_file(message.document.file_id)
-            downloaded_file = bot.download_file(file_info.file_path)
-            
-            # Декодируем содержимое
-            source_code = downloaded_file.decode('utf-8')
-            
-            # Обфусцируем
-            protected_code = meloten_core(source_code)
-            
-            # Сохраняем и отправляем результат
-            out_name = f"Meloten_{file_name}"
-            with open(out_name, "w", encoding="utf-8") as f:
-                f.write(protected_code)
-            
-            bot.send_document(message.chat.id, open(out_name, "rb"), caption="✅ Готово! Файл защищен.")
-            os.remove(out_name) # Удаляем временный файл с ПК
-        else:
-            bot.reply_to(message, "❌ Я принимаю только файлы с расширением .lua или .txt")
-    except Exception as e:
-        bot.send_message(message.chat.id, f"⚠️ Ошибка при обработке файла: {e}")
-
-# --- КОМАНДЫ И ТЕКСТ ---
-
-@bot.message_handler(commands=['start'])
-def welcome(message):
-    bot.reply_to(message, "👑 **Meloten Supreme V5 Online.**\nПришли Lua-код текстом или файлом (.lua, .txt)")
+--[[ MELOTEN VM CORE ]]
+while _running do
+    local _instr = {vm_table}[{pc_var}]
+    if _instr then
+        _instr()
+        {pc_var} = {pc_var} + 1
+    else
+        _running = false
+    end
+end
+"""
+    
+    # Добавляем "мусорный щит"
+    header = f"--[[ PROTECTED BY MELOTEN SUPREME VM V6 ]]\n"
+    for _ in range(10):
+        header += f"local {rnd_id()} = {random.randint(1, 999999)}\n"
+        
+    return header + vm_code
 
 @bot.message_handler(commands=['stop'])
 def stop_bot(message):
     if message.from_user.username == ADMIN_USERNAME:
-        bot.reply_to(message, "🔴 **Сервер остановлен.**")
+        bot.reply_to(message, "🛑 VM Server Offline.")
         os._exit(0)
 
-@bot.message_handler(func=lambda message: True)
-def process_text(message):
+@bot.message_handler(content_types=['document', 'text'])
+def handle_all(message):
     try:
-        status = bot.reply_to(message, "🔨 **Шифруем текст...**")
-        obf_code = meloten_core(message.text)
-        bot.edit_message_text(f"✅ **Защита наложена:**\n```lua\n{obf_code[:3000]}\n```", 
-                              message.chat.id, status.message_id, parse_mode="Markdown")
-    except Exception as e:
-        bot.send_message(message.chat.id, f"⚠️ Ошибка: {e}")
+        source_code = ""
+        original_name = "script.lua"
+        
+        if message.content_type == 'document':
+            if not message.document.file_name.endswith(('.lua', '.txt')): return
+            file_info = bot.get_file(message.document.file_id)
+            downloaded = bot.download_file(file_info.file_path)
+            source_code = downloaded.decode('utf-8')
+            original_name = message.document.file_name
+        else:
+            source_code = message.text
 
-print(f"--- БОТ ЗАПУЩЕН (V5: FILES SUPPORT) ---")
+        status = bot.reply_to(message, "🌀 **Инициализация Виртуальной Машины Meloten...**")
+        
+        # Запуск VM-обфускации
+        protected = build_vm(source_code)
+        
+        out_file = f"Meloten_VM_{original_name}"
+        with open(out_file, "w", encoding="utf-8") as f:
+            f.write(protected)
+            
+        bot.send_document(message.chat.id, open(out_file, "rb"), caption="✅ **VM Защита активирована!**\nКод теперь исполняется внутри виртуального окружения.")
+        os.remove(out_file)
+        
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ Ошибка VM: {e}")
+
+print("--- MELOTEN VM V6 IS READY ---")
 bot.polling(none_stop=True)
