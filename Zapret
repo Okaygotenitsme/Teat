@@ -4,7 +4,7 @@ import string
 import os
 
 # ================= CONFIG =================
-TOKEN = "PUT_YOUR_NEW_TOKEN_HERE"
+TOKEN = "8294241482:AAFmQzje2Tb9_2XjNYnIAPSdY_q56r-AFJ8"
 ADMIN_USERNAME = "Gokuoriginal"
 
 bot = telebot.TeleBot(TOKEN)
