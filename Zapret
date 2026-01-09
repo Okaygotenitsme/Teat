@@ -6,77 +6,83 @@ import os
 
 # КОНФИГ
 TOKEN = '8525811167:AAGU8AQdDp8H7ijUKRnSJTKltbY7hIsDUp8'
-ADMIN_USERNAME = 'Gokuoriginal' # Твой ник без собачки
+ADMIN_USERNAME = 'Gokuoriginal' 
 
 bot = telebot.TeleBot(TOKEN)
 
 def gen_mega_name():
-    """Генерирует очень длинные имена переменных"""
     return "_" + "".join(random.choice(string.ascii_letters) for _ in range(25))
 
 def encrypt_string(text):
-    """Шифрование строк через XOR (как в элитных обфускаторах)"""
     key = random.randint(15, 95)
     chars = [ord(c) ^ key for c in text]
     v_t = gen_mega_name()
-    # Создаем самовызывающуюся функцию (LVM-style)
     return f"(function() local {v_t}={{ {','.join(map(str, chars))} }} local r='' for i=1,#{v_t} do r=r..string.char({v_t}[i] ~ {key}) end return r end)()"
 
 def meloten_core(source):
-    """Главный движок обфускации"""
-    # Заменяем все строки в коде на зашифрованные блоки
+    # Защита строк
     source = re.sub(r'"(.*?)"', lambda m: encrypt_string(m.group(1)), source)
     source = re.sub(r"'(.*?)'", lambda m: encrypt_string(m.group(1)), source)
     
-    # Добавляем слои мусора
-    layers = [f"local {gen_mega_name()} = {random.randint(100, 9999)}" for _ in range(15)]
-    junk = "\n".join(layers)
-    
+    junk = "\n".join([f"local {gen_mega_name()} = {random.randint(100, 9999)}" for _ in range(10)])
     entry_point = gen_mega_name()
     
-    result = f"""--[[ 
-    MELOTEN OBFUSCATOR SUPREME V4
-    USER: {ADMIN_USERNAME}
-]]
-{junk}
-local function {entry_point}()
-    {source}
-end
-{entry_point}()
-"""
+    result = f"--[[ MELOTEN SUPREME V5 ]]\n{junk}\nlocal function {entry_point}()\n{source}\nend\n{entry_point}()"
     return result
 
-# --- КОМАНДЫ УПРАВЛЕНИЯ ---
+# --- ОБРАБОТКА ФАЙЛОВ ---
+
+@bot.message_handler(content_types=['document'])
+def handle_docs(message):
+    try:
+        # Проверяем расширение файла
+        file_name = message.document.file_name
+        if file_name.endswith('.lua') or file_name.endswith('.txt'):
+            status = bot.reply_to(message, f"📥 Получен файл: `{file_name}`. Начинаю магию...")
+            
+            # Скачиваем файл
+            file_info = bot.get_file(message.document.file_id)
+            downloaded_file = bot.download_file(file_info.file_path)
+            
+            # Декодируем содержимое
+            source_code = downloaded_file.decode('utf-8')
+            
+            # Обфусцируем
+            protected_code = meloten_core(source_code)
+            
+            # Сохраняем и отправляем результат
+            out_name = f"Meloten_{file_name}"
+            with open(out_name, "w", encoding="utf-8") as f:
+                f.write(protected_code)
+            
+            bot.send_document(message.chat.id, open(out_name, "rb"), caption="✅ Готово! Файл защищен.")
+            os.remove(out_name) # Удаляем временный файл с ПК
+        else:
+            bot.reply_to(message, "❌ Я принимаю только файлы с расширением .lua или .txt")
+    except Exception as e:
+        bot.send_message(message.chat.id, f"⚠️ Ошибка при обработке файла: {e}")
+
+# --- КОМАНДЫ И ТЕКСТ ---
 
 @bot.message_handler(commands=['start'])
 def welcome(message):
-    bot.reply_to(message, "👑 **Meloten Supreme V4 Online.**\nПришли Lua-код для защиты.")
+    bot.reply_to(message, "👑 **Meloten Supreme V5 Online.**\nПришли Lua-код текстом или файлом (.lua, .txt)")
 
 @bot.message_handler(commands=['stop'])
 def stop_bot(message):
-    # Проверка на админа
     if message.from_user.username == ADMIN_USERNAME:
-        bot.reply_to(message, "🔴 **Сервер Meloten остановлен.** До связи!")
-        print("Выключение по команде админа...")
-        os._exit(0) # Убивает процесс моментально
-    else:
-        bot.reply_to(message, "❌ У вас нет прав для этой команды.")
+        bot.reply_to(message, "🔴 **Сервер остановлен.**")
+        os._exit(0)
 
 @bot.message_handler(func=lambda message: True)
-def process_code(message):
+def process_text(message):
     try:
-        status = bot.reply_to(message, "🔨 **Шифруем...**")
+        status = bot.reply_to(message, "🔨 **Шифруем текст...**")
         obf_code = meloten_core(message.text)
-        
-        if len(obf_code) > 3500:
-            with open("meloten_out.lua", "w", encoding="utf-8") as f:
-                f.write(obf_code)
-            bot.send_document(message.chat.id, open("meloten_out.lua", "rb"), caption="📦 Код слишком мощный, держи файл!")
-        else:
-            bot.edit_message_text(f"✅ **Защита наложена:**\n```lua\n{obf_code}\n```", 
-                                  message.chat.id, status.message_id, parse_mode="Markdown")
+        bot.edit_message_text(f"✅ **Защита наложена:**\n```lua\n{obf_code[:3000]}\n```", 
+                              message.chat.id, status.message_id, parse_mode="Markdown")
     except Exception as e:
         bot.send_message(message.chat.id, f"⚠️ Ошибка: {e}")
 
-print(f"--- БОТ ЗАПУЩЕН (Админ: @{ADMIN_USERNAME}) ---")
+print(f"--- БОТ ЗАПУЩЕН (V5: FILES SUPPORT) ---")
 bot.polling(none_stop=True)
