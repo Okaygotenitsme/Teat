@@ -1,227 +1,222 @@
 import telebot
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 import random
 import string
 import os
+import re
 
 # ================== CONFIG ==================
-TOKEN = "8294241482:AAEHfAGh9rbJ_vQUy6E5rcb_jLooDN8QI0U"
+TOKEN = "8294241482:AAHV8oJ9cgIhL2FXUE2ev73mvsHpSHLvmMc"
 ADMIN_USERNAME = "Gokuoriginal"
 
 bot = telebot.TeleBot(TOKEN)
 
-# ================== UTILS ==================
-def gen(n=10):
-    return "".join(random.choice("lI1i" + string.ascii_letters) for _ in range(n))
+# Хранилище временных файлов пользователей
+user_files = {}
 
-def bx(v, k, i):
-    return (v + (i % 13)) ^ k
+# ================== CORE GENERATORS ==================
 
-# ================== SIMPLE COMPILER ==================
-def compile_lua(src):
-    ir = []
-    consts = []
-    regs = {}
+def gen_moon_var(length=12):
+    """Генерирует имена переменных в стиле MoonSec (_ngWOHRHfEJeL)"""
+    return "_" + "".join(random.choice(string.ascii_letters) for _ in range(length))
 
-    def R(x):
-        if x not in regs:
-            regs[x] = len(regs) + 1
-        return regs[x]
+def encrypt_string_to_bytes(content):
+    """Превращает скрипт в строку байтов с экранированием"""
+    key = random.randint(15, 240)
+    res = ""
+    # Шифруем XOR
+    encrypted_bytes = [ord(c) ^ key for c in content]
+    
+    # Превращаем в строку вида \123\045
+    for b in encrypted_bytes:
+        res += f"\\{b}"
+    
+    return res, key
 
-    def K(v):
-        if v not in consts:
-            consts.append(v)
-        return consts.index(v) + 1
+def generate_poly_junk():
+    """Генерирует математический мусор для while цикла"""
+    v = gen_moon_var(6)
+    ops = ['%', '*', '+', '-']
+    return f"local {v}={random.randint(1000,9999)}; while {v}<{random.randint(10000,20000)} do {v}={v}{random.choice(ops)}{random.randint(1,100)} end"
 
-    for line in src.splitlines():
-        line = line.strip()
-        if not line:
-            continue
+# ================== MOONSEC STYLE BUILDER ==================
 
-        if line.startswith("print"):
-            val = line[line.find("(")+1:line.rfind(")")]
-            if val.startswith('"') and val.endswith('"'):
-                ir.append(("LOADK", R("_tmp"), K(val.strip('"'))))
-                ir.append(("CALL", "print", R("_tmp")))
+def build_moonsec_vm(source_code, env_type):
+    # 1. Подготовка переменных
+    bytecode_str, key = encrypt_string_to_bytes(source_code)
+    
+    var_L = gen_moon_var()  # Главная функция
+    var_ByteString = gen_moon_var() # Строка с байткодом
+    var_Table = gen_moon_var() # Таблица VM
+    var_Index = gen_moon_var()
+    var_XOR = gen_moon_var()
+    var_Env = gen_moon_var()
+    
+    # 2. Настройка окружения (Environment)
+    env_setup = ""
+    if env_type == "roblox_exec":
+        # Для Roblox (Fluxus, Delta и т.д.)
+        env_setup = f"""
+        local {var_Env} = getfenv()
+        local bit = bit32 or require('bit')
+        local loadstring = loadstring or load
+        """
+        bxor_func = f"bit.bxor(a, {key})"
+    elif env_type == "studio":
+        # Для Roblox Studio (ModuleScript friendly)
+        env_setup = f"""
+        local {var_Env} = {{}}
+        local bit = bit32
+        """
+        bxor_func = f"bit32.bxor(a, {key})"
+    else: # Lua 5.1
+        # Чистый Lua 5.1 (без bit32) - эмуляция XOR
+        env_setup = f"local {var_Env} = _G"
+        bxor_func = f"(function(a,b) local p,c=1,0 while a>0 and b>0 do local ra,rb=a%2,b%2 if ra~=rb then c=c+p end a,b,p=(a-ra)/2,(b-rb)/2,p*2 end if a<b then a=b end while a>0 do local ra=a%2 if ra>0 then c=c+p end a,p=(a-ra)/2,p*2 end return c end)(a, {key})"
 
-        elif "=" in line:
-            a, b = line.split("=", 1)
-            a = a.strip()
-            b = b.strip()
-            if b.startswith('"') and b.endswith('"'):
-                ir.append(("LOADK", R(a), K(b.strip('"'))))
+    # 3. Генерация заголовка MoonSec
+    header = f"([[This file was protected with Meloten V10 (MoonSec Style)]]):gsub('.+', (function(a) {gen_moon_var(15)} = a; end));"
 
-    ir.append(("RET",))
-    return ir, consts
+    # 4. Основное тело VM (Имитация структуры файла MoonSec)
+    vm_body = f"""
+return(function(...)
+    {env_setup}
+    local {var_ByteString} = "{bytecode_str}";
+    local {var_Table} = {{}}
+    
+    -- De-serialization Loop (MoonSec Style)
+    local function {var_XOR}(a)
+        return {bxor_func}
+    end
 
-# ================== VM BUILDER ==================
-def build_vm(src):
-    ir, consts = compile_lua(src)
+    local function {var_L}()
+        local len = string.len({var_ByteString})
+        local i = 1
+        local out = ""
+        
+        -- Control Flow Flattening Simulation
+        local flow = 0
+        while i <= len do
+            if flow == 0 then
+                -- Parse byte string formatted as \\123
+                if string.sub({var_ByteString}, i, i) == "\\\\" then
+                    i = i + 1
+                    local num_str = ""
+                    while string.match(string.sub({var_ByteString}, i, i), "%d") do
+                        num_str = num_str .. string.sub({var_ByteString}, i, i)
+                        i = i + 1
+                    end
+                    if #num_str > 0 then
+                        local byte = tonumber(num_str)
+                        out = out .. string.char({var_XOR}(byte))
+                    end
+                else
+                    i = i + 1
+                end
+            end
+        end
+        return out
+    end
 
-    KEY = random.randint(40, 200)
-
-    OP = {
-        "LOADK": random.randint(20, 220),
-        "CALL":  random.randint(20, 220),
-        "RET":   random.randint(20, 220),
-        "FAKE1": random.randint(20, 220),
-        "FAKE2": random.randint(20, 220),
-        "FAKE3": random.randint(20, 220),
-    }
-
-    BC = []
-    for i, ins in enumerate(ir, 1):
-        row = [bx(OP[ins[0]], KEY, i)]
-        for a in ins[1:]:
-            if isinstance(a, int):
-                row.append(bx(a, KEY, i))
-        BC.append(row)
-
-    KC = []
-    for i, c in enumerate(consts, 1):
-        KC.append([bx(ord(ch), KEY, i) for ch in c])
-
-    # ================== HEAVY JUNK ==================
-    junk = ""
-    for _ in range(160):
-        a, b, c = gen(), gen(), gen()
-        junk += f"""
-do
- local {a} = {random.randint(100,9999)}
- local {b} = ({a} * {random.randint(2,9)}) % {random.randint(11,99)}
- local {c} = {b} - {a}
- if {c} == {random.randint(10000,20000)} then
-    while {a} < 0 do end
- end
+    -- Virtual Machine Execution
+    local _vm_code = {var_L}()
+    local _loader = loadstring or load
+    local _chunk, _err = _loader(_vm_code)
+    
+    if _chunk then
+        { "return _chunk(...)" if env_type != "studio" else "_chunk(...)" }
+    else
+        -- Fallback error handling
+        return function() end
+    end
+end)(...)
+"""
+    # 5. Добавляем "Слои мусора" (Junk Code Wrappers)
+    junk_wrapper = f"""
+local {gen_moon_var()} = 0
+while {gen_moon_var()} < 0x24e do
+    {generate_poly_junk()}
+    break
 end
 """
+    
+    final_script = header + junk_wrapper + vm_body
+    return final_script
 
-    R = gen()
-    PC = gen()
-    DEC = gen()
-    DIS = gen()
-    BCN = gen()
-    KCN = gen()
-    BXOR = gen()
+# ================== BOT HANDLERS ==================
 
-    return f'''
---[[ 
-Protected with Meloten VM v9
-MAX SECURITY + HEAVY JUNK
-]]
-
-{junk}
-
-local {BCN} = {BC}
-local {KCN} = {KC}
-local {R} = {{ [0] = {{ print = print }} }}
-local {PC} = 1
-local __key = {KEY}
-
--- XOR for Lua 5.1
-local function {BXOR}(a,b)
-    local r,p = 0,1
-    while a>0 or b>0 do
-        local aa = a%2
-        local bb = b%2
-        if aa~=bb then r=r+p end
-        a = math.floor(a/2)
-        b = math.floor(b/2)
-        p = p*2
-    end
-    return r
-end
-
-local function {DEC}(v,i)
-    return {BXOR}(v - (i % 13), __key)
-end
-
--- decode constants
-for i,t in ipairs({KCN}) do
-    local s = ""
-    for _,b in ipairs(t) do
-        s = s .. string.char({DEC}(b,i))
-    end
-    {KCN}[i] = s
-end
-
-local {DIS} = {{}}
-
-{DIS}[{OP["LOADK"]}] = function(a,b)
-    {R}[a] = {KCN}[b]
-end
-
-{DIS}[{OP["CALL"]}] = function(fn,a)
-    {R}[0][fn]({R}[a])
-end
-
-{DIS}[{OP["RET"]}] = function()
-    {PC} = 1e9
-end
-
--- fake handlers
-{DIS}[{OP["FAKE1"]}] = function() end
-{DIS}[{OP["FAKE2"]}] = function() while false do end end
-{DIS}[{OP["FAKE3"]}] = function() local _ = math.random() end
-
--- dispatcher
-while true do
-    local ins = {BCN}[{PC}]
-    if not ins then break end
-
-    local op = {DEC}(ins[1], {PC})
-    local fn = {DIS}[op]
-
-    if fn then
-        local a = ins[2] and {DEC}(ins[2], {PC})
-        local b = ins[3] and {DEC}(ins[3], {PC})
-        fn(a,b)
-    end
-
-    if ({PC} % 7) == 4 then
-        {PC} = {PC} + 1
-    end
-
-    {PC} = {PC} + 1
-end
-'''
-
-# ================== BOT ==================
 @bot.message_handler(commands=["start"])
 def start(m):
-    bot.reply_to(m, "🛡 Meloten VM v9 MAX\nКидай .lua или текст")
+    bot.reply_to(m, "🛡 **Meloten VM v10** (MoonSec Architecture)\n\nОтправь мне **.lua** файл или код текстом, и я превращу его в цифровую крепость.")
 
 @bot.message_handler(commands=["stop"])
 def stop(m):
     if m.from_user.username == ADMIN_USERNAME:
+        bot.reply_to(m, "🛑 Stopping services...")
         os._exit(0)
 
+# 1. Получение файла
 @bot.message_handler(content_types=["document"])
 def handle_doc(m):
-    f = bot.get_file(m.document.file_id)
-    src = bot.download_file(f.file_path).decode("utf-8")
-    out = build_vm(src)
+    file_info = bot.get_file(m.document.file_id)
+    downloaded = bot.download_file(file_info.file_path).decode('utf-8', errors='ignore')
+    
+    # Сохраняем код во временный словарь
+    user_files[m.chat.id] = downloaded
+    
+    # Показываем клавиатуру
+    markup = InlineKeyboardMarkup()
+    markup.row(InlineKeyboardButton("⚡ Roblox (Executor)", callback_data="roblox_exec"))
+    markup.row(InlineKeyboardButton("🛠 Roblox Studio", callback_data="studio"))
+    markup.row(InlineKeyboardButton("🌙 Lua 5.1 (Standard)", callback_data="lua51"))
+    
+    bot.reply_to(m, "⚙️ **Выберите целевую среду:**\nОт этого зависит метод загрузки и библиотеки.", reply_markup=markup)
 
-    name = "Protected_VM.lua"
-    with open(name, "w", encoding="utf-8") as fp:
-        fp.write(out)
-
-    bot.send_document(m.chat.id, open(name, "rb"))
-    os.remove(name)
-
+# 2. Получение текста (если код короткий)
 @bot.message_handler(func=lambda m: True)
 def handle_text(m):
-    if len(m.text) > 8000:
-        bot.reply_to(m, "⚠️ Большой код — пришли файлом")
+    user_files[m.chat.id] = m.text
+    
+    markup = InlineKeyboardMarkup()
+    markup.row(InlineKeyboardButton("⚡ Roblox (Executor)", callback_data="roblox_exec"))
+    markup.row(InlineKeyboardButton("🛠 Roblox Studio", callback_data="studio"))
+    markup.row(InlineKeyboardButton("🌙 Lua 5.1 (Standard)", callback_data="lua51"))
+    
+    bot.reply_to(m, "⚙️ **Выберите среду выполнения:**", reply_markup=markup)
+
+# 3. Обработка кнопок
+@bot.callback_query_handler(func=lambda call: True)
+def callback_query(call):
+    chat_id = call.message.chat.id
+    
+    if chat_id not in user_files:
+        bot.answer_callback_query(call.id, "❌ Файл не найден. Отправьте снова.")
         return
 
-    out = build_vm(m.text)
-    if len(out) > 4000:
-        with open("Protected_VM.lua", "w", encoding="utf-8") as f:
-            f.write(out)
-        bot.send_document(m.chat.id, open("Protected_VM.lua", "rb"))
-        os.remove("Protected_VM.lua")
-    else:
-        bot.reply_to(m, f"```lua\n{out}\n```", parse_mode="Markdown")
+    source_code = user_files[chat_id]
+    env_type = call.data # 'roblox_exec', 'studio', 'lua51'
+    
+    # Уведомление о начале работы
+    bot.edit_message_text("🔨 **Meloten V10 компилирует байт-код...**\n`Имитация MoonSec engine`", chat_id, call.message.message_id, parse_mode="Markdown")
+    
+    try:
+        # ЗАПУСК ОБФУСКАТОРА
+        protected_code = build_moonsec_vm(source_code, env_type)
+        
+        # Сохранение и отправка
+        filename = f"Meloten_MoonSec_{env_type}.lua"
+        with open(filename, "w", encoding="utf-8") as f:
+            f.write(protected_code)
+            
+        with open(filename, "rb") as f:
+            bot.send_document(chat_id, f, caption=f"✅ **Готово!**\nТип защиты: MoonSec V3 Style\nСреда: {env_type}")
+            
+        # Чистка
+        os.remove(filename)
+        del user_files[chat_id]
+        
+    except Exception as e:
+        bot.send_message(chat_id, f"❌ Ошибка компиляции: {e}")
 
-print("MELOTEN VM v9 MAX RUNNING")
-bot.polling(none_stop=True) 
+print("--- MELOTEN VM V10 (MOONSEC EDITION) ONLINE ---")
+bot.polling(none_stop=True)
