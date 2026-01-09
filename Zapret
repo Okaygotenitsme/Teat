@@ -5,7 +5,7 @@ import string
 import os
 
 # ================== CONFIG ==================
-TOKEN = "8294241482:AAG2snzbrnjZQ-E01C8FCjUGq3_gw-v4bv0"
+TOKEN = "8294241482:AAFdb530kTC1bx9pPIsOVUsLmbbguEkipBU"
 ADMIN_USERNAME = "Gokuoriginal"
 
 bot = telebot.TeleBot(TOKEN)
@@ -16,88 +16,87 @@ user_files = {}
 def gen_var(n=12):
     return "_" + "".join(random.choice(string.ascii_letters) for _ in range(n))
 
-def lua_syntax_check(code: str):
-    """
-    Минимальная проверка Lua:
-    - баланс скобок
-    - end / function / if / do
-    """
-    stack = 0
-    for token in code.split():
-        if token in ("function", "then", "do", "repeat"):
-            stack += 1
-        elif token in ("end", "until"):
-            stack -= 1
-    return stack == 0
+def encrypt_string_to_bytes(code: str):
+    key = random.randint(20, 240)
+    out = ""
+    for c in code:
+        out += "\\" + str(ord(c) ^ key)
+    return out, key
 
-def encrypt_to_byte_table(code: str, key: int):
-    return [(ord(c) ^ key) for c in code]
-
-def junk_block():
+def junk():
     v = gen_var(6)
     return f"""
 local {v} = {random.randint(1000,9999)}
-for i = 1, {random.randint(10,40)} do
+for i = 1, {random.randint(5,20)} do
     {v} = ({v} * {random.randint(2,9)}) % {random.randint(2000,9000)}
 end
 """
 
-# ================== OBFUSCATOR CORE ==================
+def basic_lua_check(code: str):
+    opens = code.count("function") + code.count("do") + code.count("then")
+    closes = code.count("end")
+    return opens == closes
+
+# ================== CORE ==================
 
 def build_meloten_vm(source: str, env: str):
-    if not lua_syntax_check(source):
-        raise Exception("Lua syntax error detected")
+    if not basic_lua_check(source):
+        raise Exception("Lua syntax error")
 
-    key = random.randint(20, 240)
-    byte_table = encrypt_to_byte_table(source, key)
+    enc, key = encrypt_string_to_bytes(source)
 
-    v_tbl = gen_var()
+    v_bytes = gen_var()
     v_out = gen_var()
-    v_i = gen_var()
     v_load = gen_var()
     v_env = gen_var()
+    v_xor = gen_var()
 
     if env == "roblox_exec":
-        loader = "loadstring or load"
         env_setup = "local _ENV = getfenv and getfenv() or _G"
     elif env == "studio":
-        loader = "loadstring or load"
         env_setup = "local _ENV = {}"
     else:
-        loader = "loadstring or load"
         env_setup = "local _ENV = _G"
 
-    lua_bytes = ",".join(str(b) for b in byte_table)
-
-    final = f'''
---[[ 
+    lua = f'''
+--[[
     Protected with Meloten Obfuscator
-    Author: Meloten
 ]]
 
-{junk_block()}
+{junk()}
 
 return (function(...)
     {env_setup}
 
-    local {v_tbl} = {{{lua_bytes}}}
+    local {v_bytes} = "{enc}"
     local {v_out} = ""
 
-    for {v_i} = 1, #{v_tbl} do
-        {v_out} = {v_out} .. string.char(bit32 and bit32.bxor({v_tbl}[{v_i}], {key}) or ({v_tbl}[{v_i}] ~ {key}))
+    local function {v_xor}(a, b)
+        if bit32 then
+            return bit32.bxor(a, b)
+        else
+            return a ~ b
+        end
     end
 
-    local {v_load} = {loader}
+    -- ROBLOX SAFE BYTE STRING READER
+    for num in string.gmatch({v_bytes}, "\\\\(%d+)") do
+        local b = tonumber(num)
+        {v_out} = {v_out} .. string.char({v_xor}(b, {key}))
+    end
+
+    local {v_load} = loadstring or load
     local f, err = {v_load}({v_out})
 
     if not f then
-        return warn("Meloten Obfuscator: runtime error")
+        warn("Meloten Obfuscator runtime error:", err)
+        return
     end
 
     return f(...)
 end)(...)
 '''
-    return final
+    return lua
 
 # ================== BOT ==================
 
@@ -105,14 +104,13 @@ end)(...)
 def start(m):
     bot.reply_to(
         m,
-        "🛡 **Meloten Obfuscator**\n\nОтправь `.lua` файл или код текстом.",
+        "🛡 **Meloten Obfuscator**\n\nОтправь `.lua` файл или код.",
         parse_mode="Markdown"
     )
 
 @bot.message_handler(commands=["stop"])
 def stop(m):
     if m.from_user.username == ADMIN_USERNAME:
-        bot.reply_to(m, "⛔ Bot stopped")
         os._exit(0)
 
 @bot.message_handler(content_types=["document"])
@@ -147,26 +145,22 @@ def callback(c):
         bot.answer_callback_query(c.id, "Код не найден")
         return
 
-    src = user_files[cid]
-    env = c.data
-
     try:
-        out = build_meloten_vm(src, env)
+        out = build_meloten_vm(user_files[cid], c.data)
     except Exception as e:
         bot.edit_message_text(
-            f"❌ **Ошибка**\nСкрипт нерабочий.\nПерепишите код.\n\n`{e}`",
+            f"❌ Скрипт нерабочий.\nПерепишите код.\n\n{e}",
             cid,
-            c.message.message_id,
-            parse_mode="Markdown"
+            c.message.message_id
         )
         return
 
-    name = f"Meloten_Obfuscated_{env}.lua"
+    name = f"Meloten_Obfuscated_{c.data}.lua"
     with open(name, "w", encoding="utf-8") as f:
         f.write(out)
 
     with open(name, "rb") as f:
-        bot.send_document(cid, f, caption="✅ Защита применена\nMeloten Obfuscator")
+        bot.send_document(cid, f, caption="✅ Meloten Obfuscator")
 
     os.remove(name)
     del user_files[cid]
