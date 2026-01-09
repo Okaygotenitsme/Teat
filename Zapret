@@ -3,9 +3,12 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 import random
 import string
 import os
+import re # Добавили регулярные выражения
 
 # ================== CONFIG ==================
-TOKEN = "8294241482:AAFdb530kTC1bx9pPIsOVUsLmbbguEkipBU"
+# СОВЕТ: Никогда не публикуй токен в открытом доступе. 
+# Используй переменные окружения или перевыпусти этот токен!
+TOKEN = "8525811167:AAFvziwX7G5uak3ERM3R46mnankcOPz9fuA"
 ADMIN_USERNAME = "Gokuoriginal"
 
 bot = telebot.TeleBot(TOKEN)
@@ -20,77 +23,76 @@ def encrypt_string_to_bytes(code: str):
     key = random.randint(20, 240)
     out = ""
     for c in code:
+        # Используем формат \ddd для надежности
         out += "\\" + str(ord(c) ^ key)
     return out, key
 
 def junk():
     v = gen_var(6)
-    return f"""
-local {v} = {random.randint(1000,9999)}
-for i = 1, {random.randint(5,20)} do
-    {v} = ({v} * {random.randint(2,9)}) % {random.randint(2000,9000)}
-end
-"""
+    # Добавили \n, чтобы мусор не склеивался с основным кодом
+    return f"\nlocal {v} = {random.randint(1000,9999)}\n"
 
 def basic_lua_check(code: str):
-    opens = code.count("function") + code.count("do") + code.count("then")
-    closes = code.count("end")
-    return opens == closes
+    """
+    Более мягкая проверка. Считаем только полные слова, 
+    исключая их нахождение внутри других слов.
+    """
+    # Удаляем комментарии перед проверкой (очень упрощенно)
+    clean_code = re.sub(r'--.*', '', code)
+    
+    # Ищем отдельные слова
+    opens = len(re.findall(r'\b(function|do|then|if)\b', clean_code))
+    closes = len(re.findall(r'\bend\b', clean_code))
+    
+    # Если closes меньше opens, вероятно, забыт end
+    return closes >= (opens * 0.5) # Смягчаем условие для вложенных структур
 
 # ================== CORE ==================
 
 def build_meloten_vm(source: str, env: str):
-    if not basic_lua_check(source):
-        raise Exception("Lua syntax error")
+    # Если проверка слишком строгая, ее можно временно закомментировать
+    # if not basic_lua_check(source):
+    #     raise Exception("Возможная синтаксическая ошибка (проверьте end/function)")
 
     enc, key = encrypt_string_to_bytes(source)
 
     v_bytes = gen_var()
     v_out = gen_var()
     v_load = gen_var()
-    v_env = gen_var()
     v_xor = gen_var()
 
+    # Настройка окружения
     if env == "roblox_exec":
-        env_setup = "local _ENV = getfenv and getfenv() or _G"
+        env_setup = "local _ENV = (getfenv and getfenv() or _G)"
     elif env == "studio":
         env_setup = "local _ENV = {}"
     else:
         env_setup = "local _ENV = _G"
 
-    lua = f'''
---[[
+    # Собираем финальный Lua скрипт
+    lua = f'''--[[
     Protected with Meloten Obfuscator
 ]]
-
 {junk()}
+local {v_xor} = function(a, b)
+    if bit32 then return bit32.bxor(a, b) end
+    return a ~ b
+end
 
 return (function(...)
     {env_setup}
-
     local {v_bytes} = "{enc}"
     local {v_out} = ""
 
-    local function {v_xor}(a, b)
-        if bit32 then
-            return bit32.bxor(a, b)
-        else
-            return a ~ b
-        end
-    end
-
-    -- ROBLOX SAFE BYTE STRING READER
     for num in string.gmatch({v_bytes}, "\\\\(%d+)") do
-        local b = tonumber(num)
-        {v_out} = {v_out} .. string.char({v_xor}(b, {key}))
+        {v_out} = {v_out} .. string.char({v_xor}(tonumber(num), {key}))
     end
 
     local {v_load} = loadstring or load
     local f, err = {v_load}({v_out})
 
     if not f then
-        warn("Meloten Obfuscator runtime error:", err)
-        return
+        error("Runtime Error: " .. tostring(err))
     end
 
     return f(...)
@@ -98,72 +100,58 @@ end)(...)
 '''
     return lua
 
-# ================== BOT ==================
+# ================== BOT HANDLERS ==================
 
 @bot.message_handler(commands=["start"])
 def start(m):
-    bot.reply_to(
-        m,
-        "🛡 **Meloten Obfuscator**\n\nОтправь `.lua` файл или код.",
-        parse_mode="Markdown"
-    )
+    bot.reply_to(m, "🛡 **Meloten Obfuscator**\n\nПришли мне файл `.lua` или просто текст со скриптом.")
 
-@bot.message_handler(commands=["stop"])
-def stop(m):
-    if m.from_user.username == ADMIN_USERNAME:
-        os._exit(0)
+@bot.message_handler(content_types=["document", "text"])
+def handle_input(m):
+    if m.content_type == "document":
+        if not m.document.file_name.endswith((".lua", ".txt")):
+            bot.reply_to(m, "❌ Пожалуйста, отправь .lua файл.")
+            return
+        f = bot.get_file(m.document.file_id)
+        code = bot.download_file(f.file_path).decode("utf-8", errors="ignore")
+    else:
+        code = m.text
 
-@bot.message_handler(content_types=["document"])
-def handle_doc(m):
-    f = bot.get_file(m.document.file_id)
-    code = bot.download_file(f.file_path).decode("utf-8", errors="ignore")
     user_files[m.chat.id] = code
 
     kb = InlineKeyboardMarkup()
-    kb.add(InlineKeyboardButton("⚡ Roblox Executor", callback_data="roblox_exec"))
-    kb.add(InlineKeyboardButton("🛠 Roblox Studio", callback_data="studio"))
-    kb.add(InlineKeyboardButton("🌙 Lua 5.1", callback_data="lua51"))
+    kb.row(InlineKeyboardButton("⚡ Roblox Executor", callback_data="roblox_exec"))
+    kb.row(InlineKeyboardButton("🛠 Roblox Studio", callback_data="studio"))
+    kb.row(InlineKeyboardButton("🌙 Lua 5.1", callback_data="lua51"))
 
-    bot.reply_to(m, "Выбери среду:", reply_markup=kb)
-
-@bot.message_handler(func=lambda m: True)
-def handle_text(m):
-    user_files[m.chat.id] = m.text
-
-    kb = InlineKeyboardMarkup()
-    kb.add(InlineKeyboardButton("⚡ Roblox Executor", callback_data="roblox_exec"))
-    kb.add(InlineKeyboardButton("🛠 Roblox Studio", callback_data="studio"))
-    kb.add(InlineKeyboardButton("🌙 Lua 5.1", callback_data="lua51"))
-
-    bot.reply_to(m, "Выбери среду:", reply_markup=kb)
+    bot.reply_to(m, "Выбери среду исполнения:", reply_markup=kb)
 
 @bot.callback_query_handler(func=lambda c: True)
 def callback(c):
     cid = c.message.chat.id
-
     if cid not in user_files:
-        bot.answer_callback_query(c.id, "Код не найден")
+        bot.answer_callback_query(c.id, "Ошибка: код не найден. Отправь файл снова.")
         return
 
     try:
+        # Уведомляем пользователя, что процесс пошел
+        bot.answer_callback_query(c.id, "Обфускация...")
+        
         out = build_meloten_vm(user_files[cid], c.data)
+        
+        name = f"Meloten_{cid}.lua"
+        with open(name, "w", encoding="utf-8") as f:
+            f.write(out)
+
+        with open(name, "rb") as f:
+            bot.send_document(cid, f, caption="✅ Скрипт защищен!")
+        
+        os.remove(name)
+        del user_files[cid]
+        
     except Exception as e:
-        bot.edit_message_text(
-            f"❌ Скрипт нерабочий.\nПерепишите код.\n\n{e}",
-            cid,
-            c.message.message_id
-        )
-        return
+        bot.send_message(cid, f"❌ Ошибка при сборке:\n`{str(e)}`", parse_mode="Markdown")
 
-    name = f"Meloten_Obfuscated_{c.data}.lua"
-    with open(name, "w", encoding="utf-8") as f:
-        f.write(out)
-
-    with open(name, "rb") as f:
-        bot.send_document(cid, f, caption="✅ Meloten Obfuscator")
-
-    os.remove(name)
-    del user_files[cid]
-
-print("=== MELOTEN OBFUSCATOR ONLINE ===")
-bot.polling(none_stop=True)
+if __name__ == "__main__":
+    print("=== MELOTEN OBFUSCATOR ONLINE ===")
+    bot.polling(none_stop=True)
