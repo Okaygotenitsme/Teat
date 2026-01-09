@@ -1,44 +1,64 @@
 import telebot
 import random
 import re
+import string
 
-# ЗАМЕНИ ЭТО на свой токен, который дал @BotFather
-TOKEN = 'ТВОЙ_ТОКЕН_ЗДЕСЬ' 
-
+# Твой личный токен
+TOKEN = '8525811167:AAGNt3W9eN8Jcuh5NrswWnb-QBGFQoK83a4'
 bot = telebot.TeleBot(TOKEN)
 
-# Модуль защиты №1: Запутывание чисел
-def mutate_number(n):
-    num = int(n)
-    offset = random.randint(100, 999)
-    return f"(({num + offset} - {offset}) + (5 * 0))"
+def random_name(length=12):
+    """Генерирует случайное имя переменной типа _0xabc123"""
+    chars = string.ascii_letters + string.digits
+    return "_0x" + "".join(random.choice(chars) for _ in range(length))
 
-# Модуль защиты №2: Прячем строки в HEX
-def hide_string(text):
-    return "(\"" + "".join([f"\\{ord(c)}" for c in text]) + "\")"
-
-def meloten_protect(code):
-    # Прячем числа
-    code = re.sub(r'\d+', lambda m: mutate_number(m.group()), code)
-    # Прячем строки
-    code = re.sub(r'"(.*?)"', lambda m: hide_string(m.group(1)), code)
+def encrypt_string(text):
+    """Шифрует строку через XOR и превращает в Lua-код"""
+    key = random.randint(1, 255)
+    encrypted = [ord(c) ^ key for c in text]
     
-    header = "-- [[ Meloten Obfuscator V1 ]]\n"
-    return header + code
+    # Создаем микро-декодер для каждой строки
+    var_name = random_name()
+    t_name = random_name()
+    lua_block = f"(function() local {t_name}={{ {','.join(map(str, encrypted))} }} "
+    lua_block += f"local res='' for i=1,#{t_name} do res=res..string.char(bit32.bxor({t_name}[i], {key})) end return res end)()"
+    return lua_block
+
+def meloten_ultra_obfuscate(lua_code):
+    # 1. Прячем строки
+    # Ищем всё, что в кавычках и заменяем на наш мини-декодер
+    lua_code = re.sub(r'"(.*?)"', lambda m: encrypt_string(m.group(1)), lua_code)
+    lua_code = re.sub(r"'(.*?)'", lambda m: encrypt_string(m.group(1)), lua_code)
+
+    # 2. Генерируем "Мусорный код"
+    garbage = ""
+    for _ in range(5):
+        garbage += f"local {random_name()} = {random.randint(1000, 999999)}\n"
+
+    # 3. Собираем финальный результат
+    header = f"--[[ \n  MELOTEN OBFUSCATOR ULTRA V2\n  Status: Protected\n--]]\n\n"
+    
+    final_code = header + garbage + "\n" + lua_code
+    return final_code
 
 @bot.message_handler(commands=['start'])
 def start(message):
-    bot.reply_to(message, "Meloten System Online. Пришли Lua-код!")
+    bot.reply_to(message, "⚡️ **Meloten Ultra System Online** ⚡️\nПришли мне свой Lua скрипт!")
 
 @bot.message_handler(func=lambda message: True)
-def handle_code(message):
+def handle_message(message):
+    msg = bot.reply_to(message, "⚙️ Обфускация в процессе...")
     try:
-        original = message.text
-        result = meloten_protect(original)
-        # Отправляем код в красивом блоке
-        bot.send_message(message.chat.id, f"```lua\n{result}\n```", parse_mode="Markdown")
+        source = message.text
+        # Запускаем нашу "мясорубку"
+        protected = meloten_ultra_obfuscate(source)
+        
+        # Если код слишком длинный, Telegram может его обрезать, 
+        # поэтому лучше отправлять его как блок кода
+        bot.edit_message_text(f"✅ **Готово!** Твой защищенный код:\n\n```lua\n{protected}\n```", 
+                              message.chat.id, msg.message_id, parse_mode="Markdown")
     except Exception as e:
-        bot.reply_to(message, f"Ошибка: {e}")
+        bot.edit_message_text(f"❌ Ошибка: {str(e)}", message.chat.id, msg.message_id)
 
-print("Meloten Bot запущен! Проверь Telegram.")
-bot.polling()
+print("--- MELOTEN BOT IS RUNNING ---")
+bot.polling(none_stop=True)
