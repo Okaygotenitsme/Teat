@@ -3,111 +3,136 @@ import random
 import string
 import os
 
-# ================= CONFIG =================
-TOKEN = "8294241482:AAFmQzje2Tb9_2XjNYnIAPSdY_q56r-AFJ8"
+# ================== CONFIG ==================
+TOKEN = "8294241482:AAEHfAGh9rbJ_vQUy6E5rcb_jLooDN8QI0U"
 ADMIN_USERNAME = "Gokuoriginal"
 
 bot = telebot.TeleBot(TOKEN)
 
-# ================= UTILS =================
-def gen_name(n=8):
+# ================== UTILS ==================
+def gen(n=10):
     return "".join(random.choice("lI1i" + string.ascii_letters) for _ in range(n))
 
-def rnd_opcode():
-    return random.randint(20, 220)
+def bx(v, k, i):
+    return (v + (i % 13)) ^ k
 
-# ================= SIMPLE COMPILER =================
-# Поддержка:
-#   print("text")
-#   print(variable)
-#   a = "text"
-#   a = print
-def compile_lua_to_ir(src):
+# ================== SIMPLE COMPILER ==================
+def compile_lua(src):
     ir = []
     consts = []
-    reg_map = {}
+    regs = {}
 
-    def reg(x):
-        if x not in reg_map:
-            reg_map[x] = len(reg_map) + 1
-        return reg_map[x]
+    def R(x):
+        if x not in regs:
+            regs[x] = len(regs) + 1
+        return regs[x]
 
-    def k(v):
+    def K(v):
         if v not in consts:
             consts.append(v)
         return consts.index(v) + 1
 
-    lines = [l.strip() for l in src.splitlines() if l.strip()]
-    for line in lines:
+    for line in src.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+
         if line.startswith("print"):
-            inside = line[line.find("(")+1:line.rfind(")")]
-            if inside.startswith('"'):
-                ir.append(("LOADK", reg("_tmp"), k(inside.strip('"'))))
-                ir.append(("CALL", reg("print"), reg("_tmp")))
-            else:
-                ir.append(("CALL", reg("print"), reg(inside)))
+            val = line[line.find("(")+1:line.rfind(")")]
+            if val.startswith('"') and val.endswith('"'):
+                ir.append(("LOADK", R("_tmp"), K(val.strip('"'))))
+                ir.append(("CALL", "print", R("_tmp")))
+
         elif "=" in line:
-            a,b = [x.strip() for x in line.split("=",1)]
-            if b.startswith('"'):
-                ir.append(("LOADK", reg(a), k(b.strip('"'))))
-            else:
-                ir.append(("MOVE", reg(a), reg(b)))
+            a, b = line.split("=", 1)
+            a = a.strip()
+            b = b.strip()
+            if b.startswith('"') and b.endswith('"'):
+                ir.append(("LOADK", R(a), K(b.strip('"'))))
+
     ir.append(("RET",))
     return ir, consts
 
-# ================= VM BUILDER =================
-def build_vm(source):
-    ir, consts = compile_lua_to_ir(source)
+# ================== VM BUILDER ==================
+def build_vm(src):
+    ir, consts = compile_lua(src)
 
-    # ---- opcode mutation ----
+    KEY = random.randint(40, 200)
+
     OP = {
-        "NOP":   rnd_opcode(),
-        "LOADK": rnd_opcode(),
-        "MOVE":  rnd_opcode(),
-        "CALL":  rnd_opcode(),
-        "RET":   rnd_opcode(),
+        "LOADK": random.randint(20, 220),
+        "CALL":  random.randint(20, 220),
+        "RET":   random.randint(20, 220),
+        "FAKE1": random.randint(20, 220),
+        "FAKE2": random.randint(20, 220),
+        "FAKE3": random.randint(20, 220),
     }
 
-    key = random.randint(50,200)
-
-    def enc(v,i):
-        return (v ^ key) + (i % 7)
-
-    # ---- encode bytecode ----
     BC = []
-    for i,ins in enumerate(ir,1):
-        op = OP[ins[0]]
-        row = [enc(op,i)]
+    for i, ins in enumerate(ir, 1):
+        row = [bx(OP[ins[0]], KEY, i)]
         for a in ins[1:]:
-            row.append(enc(a,i))
+            if isinstance(a, int):
+                row.append(bx(a, KEY, i))
         BC.append(row)
 
-    # ---- encode constants ----
     KC = []
-    for i,c in enumerate(consts,1):
-        encs = []
-        for ch in c:
-            encs.append(enc(ord(ch),i))
-        KC.append(encs)
+    for i, c in enumerate(consts, 1):
+        KC.append([bx(ord(ch), KEY, i) for ch in c])
 
-    # ---- Lua VM ----
-    R = gen_name()
-    PC = gen_name()
-    BCN = gen_name()
-    KCN = gen_name()
-    DIS = gen_name()
-    DEC = gen_name()
+    # ================== HEAVY JUNK ==================
+    junk = ""
+    for _ in range(160):
+        a, b, c = gen(), gen(), gen()
+        junk += f"""
+do
+ local {a} = {random.randint(100,9999)}
+ local {b} = ({a} * {random.randint(2,9)}) % {random.randint(11,99)}
+ local {c} = {b} - {a}
+ if {c} == {random.randint(10000,20000)} then
+    while {a} < 0 do end
+ end
+end
+"""
 
-    lua = f'''
--- Protected with Meloten VM v8 (MAX)
+    R = gen()
+    PC = gen()
+    DEC = gen()
+    DIS = gen()
+    BCN = gen()
+    KCN = gen()
+    BXOR = gen()
+
+    return f'''
+--[[ 
+Protected with Meloten VM v9
+MAX SECURITY + HEAVY JUNK
+]]
+
+{junk}
+
 local {BCN} = {BC}
 local {KCN} = {KC}
-local {R} = {{}}
+local {R} = {{ [0] = {{ print = print }} }}
 local {PC} = 1
-local __key = {key}
+local __key = {KEY}
+
+-- XOR for Lua 5.1
+local function {BXOR}(a,b)
+    local r,p = 0,1
+    while a>0 or b>0 do
+        local aa = a%2
+        local bb = b%2
+        if aa~=bb then r=r+p end
+        a = math.floor(a/2)
+        b = math.floor(b/2)
+        p = p*2
+    end
+    return r
+end
 
 local function {DEC}(v,i)
-    return (v - (i % 7)) ~ __key
+    return {BXOR}(v - (i % 13), __key)
 end
 
 -- decode constants
@@ -125,47 +150,45 @@ local {DIS} = {{}}
     {R}[a] = {KCN}[b]
 end
 
-{DIS}[{OP["MOVE"]}] = function(a,b)
-    {R}[a] = {R}[b]
-end
-
-{DIS}[{OP["CALL"]}] = function(a,b)
-    {R}[a]({R}[b])
+{DIS}[{OP["CALL"]}] = function(fn,a)
+    {R}[0][fn]({R}[a])
 end
 
 {DIS}[{OP["RET"]}] = function()
     {PC} = 1e9
 end
 
--- preload safe globals
-{R}[1] = print
+-- fake handlers
+{DIS}[{OP["FAKE1"]}] = function() end
+{DIS}[{OP["FAKE2"]}] = function() while false do end end
+{DIS}[{OP["FAKE3"]}] = function() local _ = math.random() end
 
--- fake CFG
+-- dispatcher
 while true do
     local ins = {BCN}[{PC}]
     if not ins then break end
 
     local op = {DEC}(ins[1], {PC})
     local fn = {DIS}[op]
+
     if fn then
-        local a = ins[2] and {DEC}(ins[2],{PC})
-        local b = ins[3] and {DEC}(ins[3],{PC})
+        local a = ins[2] and {DEC}(ins[2], {PC})
+        local b = ins[3] and {DEC}(ins[3], {PC})
         fn(a,b)
     end
 
-    if ({PC} % 7) == 3 then
+    if ({PC} % 7) == 4 then
         {PC} = {PC} + 1
     end
 
     {PC} = {PC} + 1
 end
 '''
-    return lua
 
-# ================= BOT =================
+# ================== BOT ==================
 @bot.message_handler(commands=["start"])
 def start(m):
-    bot.reply_to(m,"🛡 Meloten VM v8 MAX\nКидай .lua или текст")
+    bot.reply_to(m, "🛡 Meloten VM v9 MAX\nКидай .lua или текст")
 
 @bot.message_handler(commands=["stop"])
 def stop(m):
@@ -173,27 +196,32 @@ def stop(m):
         os._exit(0)
 
 @bot.message_handler(content_types=["document"])
-def doc(m):
+def handle_doc(m):
     f = bot.get_file(m.document.file_id)
     src = bot.download_file(f.file_path).decode("utf-8")
     out = build_vm(src)
+
     name = "Protected_VM.lua"
-    open(name,"w",encoding="utf-8").write(out)
-    bot.send_document(m.chat.id, open(name,"rb"))
+    with open(name, "w", encoding="utf-8") as fp:
+        fp.write(out)
+
+    bot.send_document(m.chat.id, open(name, "rb"))
     os.remove(name)
 
 @bot.message_handler(func=lambda m: True)
-def text(m):
+def handle_text(m):
     if len(m.text) > 8000:
-        bot.reply_to(m,"Код слишком большой, пришли файлом")
+        bot.reply_to(m, "⚠️ Большой код — пришли файлом")
         return
+
     out = build_vm(m.text)
     if len(out) > 4000:
-        open("Protected_VM.lua","w",encoding="utf-8").write(out)
-        bot.send_document(m.chat.id, open("Protected_VM.lua","rb"))
+        with open("Protected_VM.lua", "w", encoding="utf-8") as f:
+            f.write(out)
+        bot.send_document(m.chat.id, open("Protected_VM.lua", "rb"))
         os.remove("Protected_VM.lua")
     else:
-        bot.reply_to(m,f"```lua\n{out}\n```",parse_mode="Markdown")
+        bot.reply_to(m, f"```lua\n{out}\n```", parse_mode="Markdown")
 
-print("MELOTEN VM v8 MAX RUNNING")
-bot.polling(none_stop=True)
+print("MELOTEN VM v9 MAX RUNNING")
+bot.polling(none_stop=True) 
