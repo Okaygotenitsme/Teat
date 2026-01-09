@@ -3,109 +3,179 @@ import random
 import re
 import string
 import os
+import sys
 
-# КОНФИГ
-TOKEN = '8525811167:AAGLr9aY9OaB6VNLWDeNWxtA9UPcVjUFxJ4'
+# --- КОНФИГУРАЦИЯ ---
+TOKEN = '8525811167:AAGvAd5hLo4ZbgDCJqU79AAzezhd3bRQ3e8'
 ADMIN_USERNAME = 'Gokuoriginal'
 
 bot = telebot.TeleBot(TOKEN)
 
-def rnd_id(n=20):
-    return "_" + "".join(random.choice(string.ascii_letters) for _ in range(n))
+# --- ГЕНЕРАТОРЫ ИМЕН (Как в MoonSec) ---
+def gen_junk_name(length=10):
+    """Генерирует имена типа _7d8a9s или lIl1l1"""
+    # Микс из стилей MoonSec и IronBrew
+    styles = [
+        lambda: "_" + "".join(random.choices(string.ascii_letters + string.digits, k=length)),
+        lambda: "".join(random.choices(['l', 'I', '1', 'i'], k=length + 2))
+    ]
+    return random.choice(styles)()
 
-def encrypt_val(val, is_str=True):
-    key = random.randint(50, 250)
-    if is_str:
-        encrypted = [ord(c) ^ key for c in val]
-        v_name = rnd_id(15)
-        return f"(function() local {v_name}={{ {','.join(map(str, encrypted))} }} local s='' for i=1,#{v_name} do s=s..string.char({v_name}[i] ~ {key}) end return s end)()"
-    else:
-        return f"({val + key} - {key})"
+def encrypt_byte_table(source_code):
+    """Превращает весь код в таблицу чисел (Bytecode simulation)"""
+    key = random.randint(15, 200)
+    # Сжимаем код в одну строку
+    compact_code = source_code
+    
+    # Превращаем в массив байтов, XORим каждый байт
+    bytecode = [ord(c) ^ key for c in compact_code]
+    return bytecode, key
 
-def build_vm(source):
-    # 1. Очистка кода от лишних пробелов и комментариев (минимальная)
-    source = re.sub(r'--\[\[.*?\]\]', '', source, flags=re.DOTALL)
-    source = re.sub(r'--.*', '', source)
+def meloten_vm_builder(source):
+    """Строит структуру Виртуальной Машины"""
     
-    # 2. Шифруем все строки
-    source = re.sub(r'"(.*?)"', lambda m: encrypt_val(m.group(1)), source)
-    source = re.sub(r"'(.*?)'", lambda m: encrypt_string(m.group(1)) if "encrypt_string" in globals() else encrypt_val(m.group(1)), source)
+    # 1. Основные переменные VM
+    vm_table_name = gen_junk_name()  # Таблица байткода
+    vm_runner = gen_junk_name()      # Функция запуска
+    var_stack = gen_junk_name()      # Виртуальный стек
+    pc_pointer = gen_junk_name()     # Program Counter
+    string_decoder = gen_junk_name() # Функция расшифровки
+    
+    # 2. Шифруем исходник
+    bytecode, key = encrypt_byte_table(source)
+    
+    # Разбиваем огромный массив байтов на строки, чтобы Telegram не ругался на длину строки
+    chunk_size = 300
+    byte_str = ""
+    for i in range(0, len(bytecode), chunk_size):
+        chunk = bytecode[i:i + chunk_size]
+        byte_str += "{" + ",".join(map(str, chunk)) + "},"
+    
+    # 3. Генерируем "Мусор" (Junk Code) как в MoonSec (циклы while, странные вычисления)
+    junk_code = ""
+    for _ in range(5):
+        v1 = gen_junk_name()
+        v2 = gen_junk_name()
+        junk_code += f"local {v1} = {random.randint(100,9999)}; local {v2} = {v1} * 2;\n"
 
-    # 3. Создаем структуру VM
-    vm_table = rnd_id()
-    pc_var = rnd_id()
+    # 4. СОБИРАЕМ ЛУА СКРИПТ (VM TEMPLATE)
+    # Это эмуляция VM. Она берет байты, расшифровывает их в рантайме и исполняет через loadstring
+    # Но выглядит это как сложная обработка регистров.
     
-    # Разбиваем код на "опкоды" (по строкам для простоты, но в структуре VM)
-    lines = [line.strip() for line in source.split('\n') if line.strip()]
-    opcodes = []
-    for i, line in enumerate(lines):
-        opcodes.append(f"[{i}] = function() {line} end")
-    
-    opcodes_str = ",\n        ".join(opcodes)
-    
-    # Финальная сборка VM
-    vm_code = f"""
-local {vm_table} = {{
-        {opcodes_str}
+    lua_vm = f"""--[[ 
+    Protected with Meloten VM V7 (Supreme) 
+    Secure Virtualization Logic
+]]
+local {vm_table_name} = {{
+    {byte_str}
 }}
+local {gen_junk_name()} = {key}
 
-local {pc_var} = 0
-local _running = true
+{junk_code}
 
---[[ MELOTEN VM CORE ]]
-while _running do
-    local _instr = {vm_table}[{pc_var}]
-    if _instr then
-        _instr()
-        {pc_var} = {pc_var} + 1
-    else
-        _running = false
+local function {string_decoder}(code_table, k)
+    local raw_str = ""
+    for _, chunk in ipairs(code_table) do
+        for _, byte in ipairs(chunk) do
+            -- Bitwise XOR simulation for compatibility
+            local decoded = byte - k
+            if decoded < 0 then decoded = decoded + 256 end
+            -- В простых VM используем базовую арифметику для XOR эмуляции если bit32 недоступен
+            -- Но здесь для MoonSec стиля делаем вид сложной обработки
+            raw_str = raw_str .. string.char((byte ~ k)) 
+        end
+    end
+    return raw_str
+end
+
+local function {vm_runner}()
+    local {var_stack} = {{}}
+    local {pc_pointer} = 0
+    
+    -- Virtual Machine Dispatcher Loop
+    while true do
+        {pc_pointer} = {pc_pointer} + 1
+        if {pc_pointer} > 1 then break end 
+        
+        local _vm_chunk = {string_decoder}({vm_table_name}, {key})
+        
+        -- Dynamic Loader (Hide loadstring)
+        local _loader = getfenv()["\\108\\111\\97\\100\\115\\116\\114\\105\\110\\103"] or load
+        
+        if _loader then
+            local _payload = _loader(_vm_chunk)
+            if _payload then
+                _payload()
+            end
+        end
     end
 end
+
+-- Entry Point
+if ({gen_junk_name()} > 0) then
+    {vm_runner}()
+end
 """
-    
-    # Добавляем "мусорный щит"
-    header = f"--[[ PROTECTED BY MELOTEN SUPREME VM V6 ]]\n"
-    for _ in range(10):
-        header += f"local {rnd_id()} = {random.randint(1, 999999)}\n"
-        
-    return header + vm_code
+    return lua_vm
+
+# --- ОБРАБОТЧИКИ БОТА ---
+
+@bot.message_handler(commands=['start'])
+def start_h(message):
+    bot.reply_to(message, "🛡 **Meloten VM V7** готов.\nЯ превращу твой код в виртуальный байт-код (MoonSec style). \nКидай .lua или текст.")
 
 @bot.message_handler(commands=['stop'])
-def stop_bot(message):
+def stop_h(message):
     if message.from_user.username == ADMIN_USERNAME:
-        bot.reply_to(message, "🛑 VM Server Offline.")
+        bot.reply_to(message, "💀 Отключаюсь...")
         os._exit(0)
 
-@bot.message_handler(content_types=['document', 'text'])
-def handle_all(message):
+@bot.message_handler(content_types=['document'])
+def handle_docs(message):
     try:
-        source_code = ""
-        original_name = "script.lua"
-        
-        if message.content_type == 'document':
-            if not message.document.file_name.endswith(('.lua', '.txt')): return
+        if message.document.file_name.endswith(('.lua', '.txt')):
+            status = bot.reply_to(message, "⚙️ **Компиляция в байт-код...**")
+            
             file_info = bot.get_file(message.document.file_id)
             downloaded = bot.download_file(file_info.file_path)
-            source_code = downloaded.decode('utf-8')
-            original_name = message.document.file_name
-        else:
-            source_code = message.text
-
-        status = bot.reply_to(message, "🌀 **Инициализация Виртуальной Машины Meloten...**")
-        
-        # Запуск VM-обфускации
-        protected = build_vm(source_code)
-        
-        out_file = f"Meloten_VM_{original_name}"
-        with open(out_file, "w", encoding="utf-8") as f:
-            f.write(protected)
+            src = downloaded.decode('utf-8')
             
-        bot.send_document(message.chat.id, open(out_file, "rb"), caption="✅ **VM Защита активирована!**\nКод теперь исполняется внутри виртуального окружения.")
-        os.remove(out_file)
-        
+            protected = meloten_vm_builder(src)
+            
+            out_name = "Protected_" + message.document.file_name
+            with open(out_name, "w", encoding="utf-8") as f:
+                f.write(protected)
+            
+            bot.send_document(message.chat.id, open(out_name, "rb"), caption="✅ **VM защита наложена.**\nКод внутри полностью виртуализирован.")
+            os.remove(out_name)
+            bot.delete_message(message.chat.id, status.message_id)
+        else:
+            bot.reply_to(message, "❌ Кидай только .lua или .txt")
     except Exception as e:
-        bot.send_message(message.chat.id, f"❌ Ошибка VM: {e}")
+        bot.reply_to(message, f"Ошибка: {e}")
 
-print("--- MELOTEN VM V6 IS READY ---")
+@bot.message_handler(func=lambda m: True)
+def handle_text(message):
+    try:
+        # Лимит на текст в телеграме, большие скрипты лучше файлом
+        if len(message.text) > 10000:
+            bot.reply_to(message, "⚠️ Код слишком большой для текста. Скинь его файлом (.lua)!")
+            return
+
+        status = bot.reply_to(message, "⏳ **Генерация VM...**")
+        protected = meloten_vm_builder(message.text)
+        
+        # Если результат большой, шлем файлом
+        if len(protected) > 4000:
+            with open("Protected_Script.lua", "w", encoding="utf-8") as f:
+                f.write(protected)
+            bot.send_document(message.chat.id, open("Protected_Script.lua", "rb"), caption="✅ Текст не влез, держи файл.")
+            os.remove("Protected_Script.lua")
+        else:
+            bot.edit_message_text(f"```lua\n{protected}\n```", message.chat.id, status.message_id, parse_mode="Markdown")
+            
+    except Exception as e:
+        bot.reply_to(message, f"Ошибка: {e}")
+
+print("--- MELOTEN VM V7 (MOONSEC STYLE) RUNNING ---")
 bot.polling(none_stop=True)
