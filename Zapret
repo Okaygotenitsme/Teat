@@ -5,7 +5,7 @@ import string
 import os
 
 # КОНФИГ
-TOKEN = '8525811167:AAHfRATLbw6GquDcpNT-ybE0iL4aDKE6QX4'
+TOKEN = '8525811167:AAGLr9aY9OaB6VNLWDeNWxtA9UPcVjUFxJ4'
 ADMIN_USERNAME = 'Gokuoriginal'
 
 bot = telebot.TeleBot(TOKEN)
