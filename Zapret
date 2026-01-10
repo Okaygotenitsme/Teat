@@ -9,10 +9,9 @@ from aiogram.filters import Command
 from aiogram.types import BufferedInputFile
 
 # ----------------------------
-# Meloten ULTRA+ Obfuscator Bot
+# Meloten ULTRA+ Obfuscator Bot (FIXED)
 # ----------------------------
-# IMPORTANT: Replace the token placeholder before running:
-API_TOKEN = "8525811167:AAGGVCLArope5t9P1QeSYf3y_a18ykHdxy8"  # <- Замените на ваш токен
+API_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN_HERE"  # <- Вставь свой токен!
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
@@ -38,12 +37,6 @@ class MelotenUltraVM:
     def __init__(self, source: str, bind_place: bool = False):
         self.source = source
         self.bind_place = bind_place
-        # randomized internal names to avoid signatures
-        self.names = {k: _rand_name("m") for k in [
-            "MAP", "OP", "DECOY1", "DECOY2", "K", "OUT", "PC", "INV", "RUN",
-            "DERIVE", "CHK", "JUNK1", "JUNK2", "LOADF"
-        ]}
-        # reproducible salt for this build
         self._salt = random.getrandbits(32)
 
     def _generate_map(self):
@@ -54,114 +47,136 @@ class MelotenUltraVM:
     def _apply_map(self, bytes_seq, mapping):
         return [mapping[b] for b in bytes_seq]
 
-    def _xor_layer(self, bytes_seq, key32):
-        # XOR each byte with bytes of the 32-bit key (rotating)
-        out = []
-        for i, b in enumerate(bytes_seq):
-            shift = (i % 4) * 8
-            kbyte = (key32 >> shift) & 0xFF
-            out.append(b ^ kbyte)
-        return out
+    # Хелпер для симуляции 32-битного поведения Lua
+    def _d32(self, val):
+        return val & 0xFFFFFFFF
 
-    def _build_opcode_stream(self, payload_bytes):
-        # Opcodes:
-        # 1 N <N bytes>      - append N bytes
-        # 2 Delta            - key ^= Delta
-        # 3 DeriveFlag       - derive key variant
-        # 4 JunkLoopCount    - do junk loop (mutates internal derived key)
-        # 5 End
+    def _build_opcode_stream_and_encrypt(self, payload_bytes, start_key):
+        """
+        Генерирует опкоды И одновременно шифрует байты, 
+        учитывая мутации ключа, чтобы синхронизироваться с Lua VM.
+        """
         ops = []
+        current_key = start_key
+        # Разбиваем исходные байты на чанки
         chunks = list(_chunker(payload_bytes, 8, 28))
+        
+        # Счетчик записанных байт (нужен для XOR смещения)
+        outlen = 0 
+
         for chunk in chunks:
-            # insert 0..2 junk ops
+            # 1. Вставляем мусорные операции, которые меняют ключ
             for _ in range(random.randint(0, 2)):
                 if random.random() < 0.6:
-                    ops += [4, random.randint(1, 8)]
+                    loops = random.randint(1, 8)
+                    ops += [4, loops]
+                    # Симулируем изменение ключа в Python (как в Lua опкод 4)
+                    for i in range(1, loops + 1):
+                        current_key = self._d32(current_key ^ self._d32(i * 2654435761))
                 else:
-                    ops += [3, random.randint(0, 1)]
-            # append real chunk
+                    flag = random.randint(0, 1)
+                    ops += [3, flag]
+                    # Симулируем изменение ключа (как в Lua опкод 3)
+                    if flag == 1:
+                        # Логика derive_key из Lua (упрощенная симуляция для примера)
+                        # В Lua derive_key сложный, здесь упростим до XOR для стабильности
+                        # Чтобы было надежно, лучше использовать простую мутацию:
+                        current_key = self._d32((current_key * 1664525) + 1013904223)
+                    else:
+                        current_key = self._d32(current_key ^ 0x9E3779B9)
+
+            # 2. Шифруем текущий чанк текущим ключом
+            encrypted_chunk = []
+            for b in chunk:
+                # Логика byte_xor из Lua
+                shift = (outlen % 4) * 8
+                kbyte = (current_key >> shift) & 0xFF
+                xor_b = b ^ kbyte
+                encrypted_chunk.append(xor_b)
+                
+                outlen += 1
+                # Симулируем мутацию ключа внутри цикла записи (как в Lua)
+                if outlen % 37 == 0:
+                     # derive_key(bxor(key, outlen)) - упростим для стабильности:
+                     current_key = self._d32(current_key ^ outlen)
+
+            # 3. Записываем опкод добавления данных
             ops.append(1)
-            ops.append(len(chunk))
-            ops += chunk
-            # occasionally mutate key
+            ops.append(len(encrypted_chunk))
+            ops += encrypted_chunk
+
+            # 4. Иногда меняем ключ (опкод 2)
             if random.random() < 0.4:
-                ops += [2, random.randint(1, 255)]
-        ops += [5, 0]
+                delta = random.randint(1, 255)
+                ops += [2, delta]
+                current_key = self._d32(current_key ^ delta)
+
+        ops += [5, 0] # Конец
         return ops
 
     def _lua_table_literal(self, arr):
-        # return a Lua table literal for numeric array
         parts = []
         line = []
-        for i, v in enumerate(arr, start=1):
+        for v in arr:
             line.append(str(v))
             if len(line) >= 20:
-                parts.append(", ".join(line))
+                parts.append(",".join(line))
                 line = []
         if line:
-            parts.append(", ".join(line))
-        return ", ".join(parts)
+            parts.append(",".join(line))
+        return ",".join(parts)
 
     def _random_junk_block(self):
-        # return small lua junk block that occasionally changes a global-ish number
         name = _rand_name("junk")
         var = _rand_name("x")
-        body = f"""
-local function {name}()
-  local {var} = 0
-  for i=1,{random.randint(3,14)} do
-    {var} = ({var} + (i * {random.randint(2,9)}) + (i % {random.randint(2,7)})) % 65536
-  end
-  return {var}
-end
-"""
-        return textwrap.dedent(body)
+        # Простая арифметика для запутывания
+        return f"local function {name}() local {var}=0 for i=1,{random.randint(3,8)} do {var}=({var}+i)%65536 end return {var} end"
 
     def build(self) -> str:
-        # 1) original bytes
+        # 1) Исходные байты
         src_bytes = [ord(c) for c in self.source]
-        # 2) mapping
+        
+        # 2) Маппинг (перемешивание байт)
         mapping = self._generate_map()
         mapped = self._apply_map(src_bytes, mapping)
-        # 3) xor key
+        
+        # 3) Главный ключ
         xor_key = random.getrandbits(32)
-        xored = self._xor_layer(mapped, xor_key)
-        # 4) opcode stream for real payload
-        opcode_stream = self._build_opcode_stream(xored)
-        # 5) create multiple decoys (two) with different minor keys and content
-        decoy1_text = "--[[Meloten Decoy 1]] print('decoy1')"
-        decoy2_text = "--[[Meloten Decoy 2]] for i=1,3 do end"
-        dec1 = [ord(c) for c in decoy1_text]
-        dec2 = [ord(c) for c in decoy2_text]
+        
+        # 4) Генерация потока опкодов С ШИФРОВАНИЕМ ВНУТРИ
+        opcode_stream = self._build_opcode_stream_and_encrypt(mapped, xor_key)
+
+        # 5) Decoys (Обманки)
+        # Важно: Ключи в Python и Lua должны совпадать
+        decoy_key1 = self._d32(xor_key ^ 0x12345678)
+        decoy_key2 = self._d32(xor_key ^ 0x87654321)
+        
+        dec1 = [ord(c) for c in "--[[Decoy1]] print('loading...')"]
+        dec2 = [ord(c) for c in "--[[Decoy2]] wait(0.1)"]
+        
         dec1_m = self._apply_map(dec1, mapping)
         dec2_m = self._apply_map(dec2, mapping)
-        dec1_x = self._xor_layer(dec1_m, xor_key ^ 0xA5A55A5A)
-        dec2_x = self._xor_layer(dec2_m, xor_key ^ 0x5AA55AA5)
-        dec1_ops = self._build_opcode_stream(dec1_x)
-        dec2_ops = self._build_opcode_stream(dec2_x)
-        # 6) checksum of original (simple sum mod 2^32)
+        
+        dec1_ops = self._build_opcode_stream_and_encrypt(dec1_m, decoy_key1)
+        dec2_ops = self._build_opcode_stream_and_encrypt(dec2_m, decoy_key2)
+
+        # 6) Чексумма
         checksum = sum(src_bytes) & 0xFFFFFFFF
-        # 7) produce lua literals
+
+        # 7) Lua таблицы
         map_lua = self._lua_table_literal(mapping)
         op_lua = self._lua_table_literal(opcode_stream)
         d1_lua = self._lua_table_literal(dec1_ops)
         d2_lua = self._lua_table_literal(dec2_ops)
-        # 8) random junk functions
+        
         junk1 = self._random_junk_block()
         junk2 = self._random_junk_block()
-
-        # 9) unique cleanup prefix used in environment cleanup at end
         self_prefix = _rand_name("pfx")
 
-        # 10) build robust Lua VM runtime (Luau-compatible)
-        # Notes:
-        # - Use bit32.bxor for XOR where available, but fallback arithmetic if not.
-        # - Avoid unsupported operators in Luau.
-        # - Use safe detection for loadstring/load and debug functions.
-        # - Include integrity check (checksum) and optional placeId binding.
+        # 8) Lua Шаблон (Luau Compatible)
+        # Обрати внимание: использована логика bit32 для Roblox
         lua_template = f'''
---[[This script was protected with Meloten Obfuscator: http://t.me/Meloten_Obfuscator_bot]]
---[[ Meloten ULTRA VM (generated) ]]
+--[[ Meloten ULTRA VM ]]
 {junk1}
 {junk2}
 
@@ -172,229 +187,140 @@ local DECOY2 = {{{d2_lua}}}
 local XORKEY = {xor_key}
 local CHKSUM = {checksum}
 
--- helper: try to get bitwise xor; fall back if not present
-local bxor = nil
-if type(bit32) == "table" and type(bit32.bxor) == "function" then
-  bxor = bit32.bxor
-else
-  bxor = function(a,b)
-    local res = 0
-    local bit = 1
-    for i=0,31 do
-      local abit = math.floor(a / bit) % 2
-      local bbit = math.floor(b / bit) % 2
-      if abit ~= bbit then res = res + bit end
-      bit = bit * 2
+local bxor = bit32 and bit32.bxor or function(a,b)
+    -- fallback XOR implementation
+    local p,c=1,0
+    while a>0 and b>0 do
+        local ra,rb=a%2,b%2
+        if ra~=rb then c=c+p end
+        a,b,p=(a-ra)/2,(b-rb)/2,p*2
     end
-    return res
-  end
+    if a<b then a=b end
+    while a>0 do
+        local ra=a%2
+        if ra>0 then c=c+p end
+        a,p=(a-ra)/2,p*2
+    end
+    return c
 end
 
--- build inverse map at runtime
 local function build_inverse(m)
   local inv = {{}}
-  for i=1,#m do
-    inv[m[i]] = i-1
-  end
+  for i=1,#m do inv[m[i]+1] = i-1 end -- Lua arrays start at 1
   return inv
 end
 local INV = build_inverse(MAP)
 
--- safe loader detection
-local safe_load = loadstring or load
-local ok_debug = pcall(function() return debug and debug.getinfo end)
-
--- anti-hook / anti-dump checks (Luau-friendly)
-do
-  local __t = {{}}
-  while #__t < 0 do
-    break
-  end
-
-  if not ok_debug then
-    for i=1,100 do
-      local _ = math.sin(i) * math.cos(i)
-    end
-  end
-
-  local _ld = safe_load
-  local s_ok, info = pcall(function() return debug and debug.getinfo(_ld) end)
-  if s_ok and type(info) == "table" then
-    if tostring(info.what) ~= "C" and tostring(info.what) ~= "main" then
-      for i=1,300 do
-        local _ = i*i
-      end
-    end
-  end
+local function vm_xor(byte, key, idx)
+    -- idx is 0-based coming from logic
+    local shift = (idx % 4) * 8
+    local kbyte = math.floor(key / (2 ^ (idx % 4 * 8))) % 256
+    return bxor(byte, kbyte)
 end
 
--- derive runtime key: mixes XORKEY with environment and tiny loops
-local function derive_key(seed)
-  local k = seed % 0x100000000
-  local envv = 0
-  pcall(function()
-    if type(game) == "table" and type(game.PlaceId) == "number" then
-      envv = bxor(envv, math.floor(game.PlaceId)) % 0x100000000
-    end
-  end)
-  for i=1,5 do
-    k = bxor(k, (envv + i*1234567) % 0x100000000)
-  end
-  local t = 0
-  for i=1,7 do
-    t = (t + math.floor(math.abs(math.sin(i) * 100000))) % 0x100000000
-  end
-  return bxor(k, t)
-end
-
--- byte-level xor with 32-bit key (same scheme used to encode)
-local function byte_xor(byte, key, idx)
-  local shift = (idx % 4) * 8
-  local kbyte = math.floor(key / (256 ^ (idx % 4))) % 256
-  return bxor(byte, kbyte) % 256
-end
-
--- VM executor: interprets opcode stream and reconstructs byte array
 local function run_vm(op_table, seed)
-  local out = {}
+  local out = {{}}
   local pc = 1
-  local key = derive_key(seed or XORKEY)
+  local key = seed % 4294967296
   local outlen = 0
+  
   while pc <= #op_table do
     local op = op_table[pc]; pc = pc + 1
-    if op == 1 then
+    
+    if op == 1 then -- Append Bytes
       local n = op_table[pc]; pc = pc + 1
       for i=1,n do
         local b = op_table[pc]; pc = pc + 1
-        local bx = byte_xor(b, key, outlen+1) % 256
-        local orig = INV[bx] or bx
+        local val = vm_xor(b, key, outlen)
+        local orig = INV[val+1] or val
+        table.insert(out, orig)
         outlen = outlen + 1
-        out[outlen] = orig
+        
         if (outlen % 37) == 0 then
-          key = derive_key(bxor(key, outlen))
+            key = bxor(key, outlen) % 4294967296
         end
       end
-    elseif op == 2 then
+      
+    elseif op == 2 then -- Delta
       local delta = op_table[pc]; pc = pc + 1
-      key = bxor(key, delta)
-    elseif op == 3 then
+      key = bxor(key, delta) % 4294967296
+      
+    elseif op == 3 then -- Derive Type
       local flag = op_table[pc]; pc = pc + 1
       if flag == 1 then
-        key = derive_key(key)
+         key = ((key * 1664525) + 1013904223) % 4294967296
       else
-        key = bxor(key, 0x9E3779B9)
+         key = bxor(key, 0x9E3779B9) % 4294967296
       end
-    elseif op == 4 then
+      
+    elseif op == 4 then -- Junk Loop
       local loops = op_table[pc]; pc = pc + 1
       for i=1,loops do
-        key = bxor(key, (i * 2654435761) % 0x100000000)
+        key = bxor(key, (i * 2654435761) % 4294967296)
       end
-    elseif op == 5 then
+      
+    elseif op == 5 then -- End
       break
-    else
-      -- ignore unknown
     end
   end
   return out
 end
 
--- multi-decoy execution (decoys executed before main to mislead dumper)
-pcall(function()
-  local d1 = run_vm(DECOY1, bxor(XORKEY, 0x12345678))
-  local s1 = ""
-  for i=1,#d1 do s1 = s1 .. string.char(d1[i]) end
-  pcall(safe_load, s1)
-end)
-pcall(function()
-  local d2 = run_vm(DECOY2, bxor(XORKEY, 0x87654321))
-  local s2 = ""
-  for i=1,#d2 do s2 = s2 .. string.char(d2[i]) end
-  pcall(safe_load, s2)
+-- Run Decoys
+pcall(function() 
+    local d1 = run_vm(DECOY1, bxor(XORKEY, 0x12345678)) 
 end)
 
--- run main payload
-local ok, buf = pcall(function() return run_vm(OP, XORKEY) end)
-if not ok or type(buf) ~= "table" then
-  error("Meloten: VM failure")
-end
-
+-- Run Main
+local buf = run_vm(OP, XORKEY)
 local decoded = ""
 for i=1,#buf do decoded = decoded .. string.char(buf[i]) end
 
--- integrity check (simple checksum)
-local function checksum_str(s)
-  local sum = 0
-  for i=1,#s do
-    sum = (sum + string.byte(s,i)) % 0x100000000
-  end
-  return sum
+-- Checksum
+local sum = 0
+for i=1,#decoded do sum = (sum + string.byte(decoded,i)) % 4294967296 end
+
+if sum ~= CHKSUM then
+    while true do end -- Freeze if tampered
 end
 
-if checksum_str(decoded) ~= CHKSUM then
-  local try = decoded:gsub("\\r","")
-  if checksum_str(try) ~= CHKSUM then
-    for i=1,200 do local _ = i*i end
-    error("Meloten: checksum mismatch")
-  else
-    decoded = try
-  end
+local load_fn = loadstring or load
+local f, err = load_fn(decoded)
+if f then 
+    getfenv(f).script = script 
+    f() 
 end
-
--- final safe execution
-local succ, f = pcall(function() return safe_load(decoded) end)
-if succ and type(f) == "function" then
-  pcall(f)
-else
-  pcall(function() pcall(loadstring or load, decoded) end)
-end
-
--- cleanup sensitive variables in environment
-for k in pairs(_ENV) do
-  if type(k) == "string" and k:match("^" .. "{self_prefix}") then
-    _ENV[k] = nil
-  end
-end
-
--- end of generated VM
-'''.replace("{self_prefix}", self_prefix)
-
-        # Minify whitespace into a one-line style but keep newlines for readability storage
-        final = "\n".join(line.strip() for line in lua_template.splitlines() if line.strip() != "")
-        # One-liner makes static reading harder
-        final_one_liner = " ".join(final.split())
-        return final_one_liner
+'''
+        # Удаляем лишние пробелы для минификации
+        return "\\n".join([line.strip() for line in lua_template.splitlines() if line.strip()])
 
 # ----------------------------
 # Bot Handlers
 # ----------------------------
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    await message.answer(
-        "👋 Привет! Отправь `.lua` или `.txt` — я применю Meloten ULTRA VM (усиленная многоступенчатая защита).\n\n"
-        "Новостной телеграмм канал бота: @MelotenBot"
-    )
+    await message.answer("👋 Отправь .lua файл для защиты (Meloten ULTRA).")
 
 @dp.message(F.document)
 async def handle_document(message: types.Message):
     if not message.document.file_name.endswith(('.lua', '.txt')):
-        await message.answer("❌ Нужен файл с расширением .lua или .txt")
+        await message.answer("❌ Нужен файл .lua")
         return
 
-    status = await message.answer("🛡 Применяю Meloten ULTRA obfuscation — генерация может занять секунду...")
+    msg = await message.answer("⚙️ Обфускация...")
     try:
         mem = io.BytesIO()
         await bot.download(message.document, destination=mem)
-        source_code = mem.getvalue().decode('utf-8', errors='ignore')
+        src = mem.getvalue().decode('utf-8', errors='ignore')
 
-        obf = MelotenUltraVM(source_code, bind_place=True)
-        protected = obf.build()
+        obf = MelotenUltraVM(src)
+        res = obf.build()
 
-        out_name = f"Protected_{message.document.file_name}"
-        output = BufferedInputFile(protected.encode('utf-8'), filename=out_name)
-        await message.answer_document(output, caption="✅ Код обфусцирован (Meloten ULTRA VM).")
-        await status.delete()
+        out = BufferedInputFile(res.encode('utf-8'), filename=f"Protected_{message.document.file_name}")
+        await message.answer_document(out, caption="✅ Готово!")
+        await msg.delete()
     except Exception as e:
-        await message.answer(f"⚠️ Ошибка: {str(e)}")
+        await message.answer(f"Ошибка: {e}")
 
 # ----------------------------
 # Run
