@@ -4,14 +4,15 @@ import random
 import secrets
 import io
 import textwrap
+import string
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile
 
 # ----------------------------
-# Meloten ULTRA+ Obfuscator Bot (FIXED)
+# CONFIG
 # ----------------------------
-API_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN_HERE"  # <- Вставь свой токен!
+API_TOKEN = "8525811167:AAGGVCLArope5t9P1QeSYf3y_a18ykHdxy8"  # <-- Вставь токен
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
@@ -19,11 +20,28 @@ dp = Dispatcher()
 # ----------------------------
 # Utilities
 # ----------------------------
-def _rand_name(prefix="Mel"):
-    chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-    return prefix + "_" + "".join(secrets.choice(chars) for _ in range(random.randint(10, 16)))
+def _rand_var_name():
+    """Генерирует запутывающие имена переменных (Il1l, O0O0, v_AF2)"""
+    mode = random.choice(['visual', 'random', 'normal'])
+    if mode == 'visual':
+        # Визуально похожие символы
+        chars = "Il1"
+        return "".join(random.choice(chars) for _ in range(random.randint(8, 12)))
+    elif mode == 'random':
+        # Абсолютный рандом
+        chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+        return "".join(random.choice(chars) for _ in range(random.randint(6, 10)))
+    else:
+        # Похоже на обычные переменные
+        prefix = random.choice(['val', 'data', 'temp', 'idx', 'ptr', 'mem'])
+        suffix = "".join(random.choice("0123456789ABCDEF") for _ in range(4))
+        return f"{prefix}_{suffix}"
 
-def _chunker(seq, min_size=6, max_size=24):
+def _chunker(seq, min_size=50, max_size=150):
+    """
+    Увеличенный размер чанка для больших файлов.
+    Меньше оверхеда на VM = быстрее работа.
+    """
     i = 0
     while i < len(seq):
         size = random.randint(min_size, max_size)
@@ -31,164 +49,133 @@ def _chunker(seq, min_size=6, max_size=24):
         i += size
 
 # ----------------------------
-# Strong Multi-stage VM Obfuscator
+# Meloten ULTRA VM Engine
 # ----------------------------
 class MelotenUltraVM:
-    def __init__(self, source: str, bind_place: bool = False):
+    def __init__(self, source: str):
         self.source = source
-        self.bind_place = bind_place
-        self._salt = random.getrandbits(32)
-
-    def _generate_map(self):
-        arr = list(range(256))
-        random.shuffle(arr)
-        return arr
-
-    def _apply_map(self, bytes_seq, mapping):
-        return [mapping[b] for b in bytes_seq]
-
-    # Хелпер для симуляции 32-битного поведения Lua
+        self.key_seed = random.randint(1000000, 9999999)
+    
     def _d32(self, val):
         return val & 0xFFFFFFFF
 
-    def _build_opcode_stream_and_encrypt(self, payload_bytes, start_key):
+    def _build_bytecode_string(self, payload_bytes, start_key):
         """
-        Генерирует опкоды И одновременно шифрует байты, 
-        учитывая мутации ключа, чтобы синхронизироваться с Lua VM.
+        Генерирует байткод и упаковывает его в строку (String Packing).
+        Это решает проблему больших файлов.
         """
-        ops = []
+        ops = bytearray()
         current_key = start_key
-        # Разбиваем исходные байты на чанки
-        chunks = list(_chunker(payload_bytes, 8, 28))
         
-        # Счетчик записанных байт (нужен для XOR смещения)
-        outlen = 0 
-
+        # Разбиваем на большие куски, чтобы не перегружать Lua
+        chunks = list(_chunker(payload_bytes))
+        
+        outlen = 0
+        
         for chunk in chunks:
-            # 1. Вставляем мусорные операции, которые меняют ключ
-            for _ in range(random.randint(0, 2)):
-                if random.random() < 0.6:
-                    loops = random.randint(1, 8)
-                    ops += [4, loops]
-                    # Симулируем изменение ключа в Python (как в Lua опкод 4)
-                    for i in range(1, loops + 1):
-                        current_key = self._d32(current_key ^ self._d32(i * 2654435761))
-                else:
-                    flag = random.randint(0, 1)
-                    ops += [3, flag]
-                    # Симулируем изменение ключа (как в Lua опкод 3)
-                    if flag == 1:
-                        # Логика derive_key из Lua (упрощенная симуляция для примера)
-                        # В Lua derive_key сложный, здесь упростим до XOR для стабильности
-                        # Чтобы было надежно, лучше использовать простую мутацию:
-                        current_key = self._d32((current_key * 1664525) + 1013904223)
-                    else:
-                        current_key = self._d32(current_key ^ 0x9E3779B9)
-
-            # 2. Шифруем текущий чанк текущим ключом
-            encrypted_chunk = []
-            for b in chunk:
-                # Логика byte_xor из Lua
-                shift = (outlen % 4) * 8
-                kbyte = (current_key >> shift) & 0xFF
-                xor_b = b ^ kbyte
-                encrypted_chunk.append(xor_b)
-                
-                outlen += 1
-                # Симулируем мутацию ключа внутри цикла записи (как в Lua)
-                if outlen % 37 == 0:
-                     # derive_key(bxor(key, outlen)) - упростим для стабильности:
-                     current_key = self._d32(current_key ^ outlen)
-
-            # 3. Записываем опкод добавления данных
-            ops.append(1)
-            ops.append(len(encrypted_chunk))
-            ops += encrypted_chunk
-
-            # 4. Иногда меняем ключ (опкод 2)
-            if random.random() < 0.4:
+            # 1. Иногда вставляем "смену ключа" (Opcode 2)
+            if random.random() < 0.3:
                 delta = random.randint(1, 255)
-                ops += [2, delta]
+                ops.append(2) # Opcode
+                ops.append(delta)
                 current_key = self._d32(current_key ^ delta)
 
-        ops += [5, 0] # Конец
+            # 2. Вставляем мусорные операции для сбивания декомпиляторов (Opcode 4)
+            if random.random() < 0.2:
+                loops = random.randint(1, 5)
+                ops.append(4)
+                ops.append(loops)
+                # Симуляция изменения ключа
+                for i in range(1, loops + 1):
+                    current_key = self._d32(current_key ^ self._d32(i * 1664525))
+
+            # 3. Данные (Opcode 1)
+            # Заголовок: OP(1) + LEN(1 byte if <255, else logic handles blocks)
+            # Для упрощения чанки < 250 байт
+            chunk_len = len(chunk)
+            ops.append(1)
+            ops.append(chunk_len)
+            
+            for b in chunk:
+                # Шифрование на лету
+                shift = (outlen % 4) * 8
+                kbyte = (current_key >> shift) & 0xFF
+                enc_byte = b ^ kbyte
+                ops.append(enc_byte)
+                
+                outlen += 1
+                # Легкая мутация ключа каждые 37 байт
+                if outlen % 37 == 0:
+                    current_key = self._d32(current_key ^ outlen)
+
+        ops.append(5) # EOF
         return ops
 
-    def _lua_table_literal(self, arr):
-        parts = []
-        line = []
-        for v in arr:
-            line.append(str(v))
-            if len(line) >= 20:
-                parts.append(",".join(line))
-                line = []
-        if line:
-            parts.append(",".join(line))
-        return ",".join(parts)
+    def _lua_string_literal(self, byte_arr):
+        """
+        Превращает bytearray в строку Lua: "\10\255\0..."
+        Это занимает меньше памяти при парсинге, чем таблица.
+        """
+        # Используем chunks для склейки, чтобы не забить память Python
+        res = []
+        for b in byte_arr:
+            res.append(f"\\{b}")
+        return "".join(res)
 
-    def _random_junk_block(self):
-        name = _rand_name("junk")
-        var = _rand_name("x")
-        # Простая арифметика для запутывания
-        return f"local function {name}() local {var}=0 for i=1,{random.randint(3,8)} do {var}=({var}+i)%65536 end return {var} end"
+    def _generate_junk_func(self):
+        """Создает безобидную, но запутанную функцию с рандомным именем."""
+        fname = _rand_var_name()
+        v1 = _rand_var_name()
+        v2 = _rand_var_name()
+        code = f"""
+local function {fname}({v1})
+    local {v2} = 0
+    for i=1, 10 do
+        {v2} = ({v2} + i) % 255
+        if {v1} and {v1} > i then {v2} = {v2} - 1 end
+    end
+    return {v2}
+end
+"""
+        return code.strip()
 
     def build(self) -> str:
-        # 1) Исходные байты
-        src_bytes = [ord(c) for c in self.source]
+        # 1. Подготовка исходника
+        src_bytes = self.source.encode('utf-8')
         
-        # 2) Маппинг (перемешивание байт)
-        mapping = self._generate_map()
-        mapped = self._apply_map(src_bytes, mapping)
+        # 2. Основной ключ
+        master_key = random.getrandbits(32)
         
-        # 3) Главный ключ
-        xor_key = random.getrandbits(32)
+        # 3. Генерация защищенного потока (Bytecode)
+        # Мы НЕ используем маппинг массивов для больших данных, так как это медленно.
+        # Мы используем полиморфный XOR поток.
+        vm_bytecode = self._build_bytecode_string(src_bytes, master_key)
         
-        # 4) Генерация потока опкодов С ШИФРОВАНИЕМ ВНУТРИ
-        opcode_stream = self._build_opcode_stream_and_encrypt(mapped, xor_key)
+        # 4. Lua-генерация
+        payload_str = self._lua_string_literal(vm_bytecode)
+        
+        # 5. Имена переменных VM (чтобы не палиться)
+        v_data = _rand_var_name()
+        v_key = _rand_var_name()
+        v_pc = _rand_var_name()
+        v_out = _rand_var_name()
+        v_run = _rand_var_name()
+        
+        junk1 = self._generate_junk_func()
+        junk2 = self._generate_junk_func()
+        
+        # 6. Anti-Tamper Checksum (на длину байткода)
+        check_val = len(vm_bytecode)
 
-        # 5) Decoys (Обманки)
-        # Важно: Ключи в Python и Lua должны совпадать
-        decoy_key1 = self._d32(xor_key ^ 0x12345678)
-        decoy_key2 = self._d32(xor_key ^ 0x87654321)
-        
-        dec1 = [ord(c) for c in "--[[Decoy1]] print('loading...')"]
-        dec2 = [ord(c) for c in "--[[Decoy2]] wait(0.1)"]
-        
-        dec1_m = self._apply_map(dec1, mapping)
-        dec2_m = self._apply_map(dec2, mapping)
-        
-        dec1_ops = self._build_opcode_stream_and_encrypt(dec1_m, decoy_key1)
-        dec2_ops = self._build_opcode_stream_and_encrypt(dec2_m, decoy_key2)
-
-        # 6) Чексумма
-        checksum = sum(src_bytes) & 0xFFFFFFFF
-
-        # 7) Lua таблицы
-        map_lua = self._lua_table_literal(mapping)
-        op_lua = self._lua_table_literal(opcode_stream)
-        d1_lua = self._lua_table_literal(dec1_ops)
-        d2_lua = self._lua_table_literal(dec2_ops)
-        
-        junk1 = self._random_junk_block()
-        junk2 = self._random_junk_block()
-        self_prefix = _rand_name("pfx")
-
-        # 8) Lua Шаблон (Luau Compatible)
-        # Обрати внимание: использована логика bit32 для Roblox
         lua_template = f'''
---[[ Meloten ULTRA VM ]]
+--[[ Meloten ULTRA Protection // No-Junk Mode ]]
 {junk1}
-{junk2}
 
-local MAP = {{{map_lua}}}
-local OP = {{{op_lua}}}
-local DECOY1 = {{{d1_lua}}}
-local DECOY2 = {{{d2_lua}}}
-local XORKEY = {xor_key}
-local CHKSUM = {checksum}
+local {v_data} = "{payload_str}"
+local {v_key} = {master_key}
 
+-- Bitwise operations compatibility
 local bxor = bit32 and bit32.bxor or function(a,b)
-    -- fallback XOR implementation
     local p,c=1,0
     while a>0 and b>0 do
         local ra,rb=a%2,b%2
@@ -204,126 +191,125 @@ local bxor = bit32 and bit32.bxor or function(a,b)
     return c
 end
 
-local function build_inverse(m)
-  local inv = {{}}
-  for i=1,#m do inv[m[i]+1] = i-1 end -- Lua arrays start at 1
-  return inv
-end
-local INV = build_inverse(MAP)
+{junk2}
 
-local function vm_xor(byte, key, idx)
-    -- idx is 0-based coming from logic
-    local shift = (idx % 4) * 8
-    local kbyte = math.floor(key / (2 ^ (idx % 4 * 8))) % 256
-    return bxor(byte, kbyte)
-end
-
-local function run_vm(op_table, seed)
-  local out = {{}}
-  local pc = 1
-  local key = seed % 4294967296
-  local outlen = 0
-  
-  while pc <= #op_table do
-    local op = op_table[pc]; pc = pc + 1
+local function {v_run}()
+    local ptr = 1
+    local k = {v_key}
+    local out = {{}}
+    local out_idx = 0
+    local datalen = #{v_data}
     
-    if op == 1 then -- Append Bytes
-      local n = op_table[pc]; pc = pc + 1
-      for i=1,n do
-        local b = op_table[pc]; pc = pc + 1
-        local val = vm_xor(b, key, outlen)
-        local orig = INV[val+1] or val
-        table.insert(out, orig)
-        outlen = outlen + 1
+    -- Anti-Tamper: Length check
+    if datalen ~= {check_val} then return end
+
+    while ptr <= datalen do
+        local op = string.byte({v_data}, ptr); ptr = ptr + 1
         
-        if (outlen % 37) == 0 then
-            key = bxor(key, outlen) % 4294967296
+        if op == 1 then -- DATA BLOCK
+            local len = string.byte({v_data}, ptr); ptr = ptr + 1
+            for i=1, len do
+                local enc = string.byte({v_data}, ptr); ptr = ptr + 1
+                
+                -- Decrypt
+                local shift = (out_idx % 4) * 8
+                local kbyte = math.floor(k / (2 ^ shift)) % 256
+                local dec = bxor(enc, kbyte)
+                
+                table.insert(out, string.char(dec))
+                out_idx = out_idx + 1
+                
+                if (out_idx % 37) == 0 then
+                    k = bxor(k, out_idx) % 4294967296
+                end
+            end
+            
+        elseif op == 2 then -- KEY MUTATION
+            local delta = string.byte({v_data}, ptr); ptr = ptr + 1
+            k = bxor(k, delta) % 4294967296
+            
+        elseif op == 4 then -- JUNK LOOP
+            local loops = string.byte({v_data}, ptr); ptr = ptr + 1
+            for i=1, loops do
+                k = bxor(k, (i * 1664525) % 4294967296)
+            end
+            
+        elseif op == 5 then -- EOF
+            break
         end
-      end
-      
-    elseif op == 2 then -- Delta
-      local delta = op_table[pc]; pc = pc + 1
-      key = bxor(key, delta) % 4294967296
-      
-    elseif op == 3 then -- Derive Type
-      local flag = op_table[pc]; pc = pc + 1
-      if flag == 1 then
-         key = ((key * 1664525) + 1013904223) % 4294967296
-      else
-         key = bxor(key, 0x9E3779B9) % 4294967296
-      end
-      
-    elseif op == 4 then -- Junk Loop
-      local loops = op_table[pc]; pc = pc + 1
-      for i=1,loops do
-        key = bxor(key, (i * 2654435761) % 4294967296)
-      end
-      
-    elseif op == 5 then -- End
-      break
     end
-  end
-  return out
+    
+    return table.concat(out)
 end
 
--- Run Decoys
-pcall(function() 
-    local d1 = run_vm(DECOY1, bxor(XORKEY, 0x12345678)) 
-end)
-
--- Run Main
-local buf = run_vm(OP, XORKEY)
-local decoded = ""
-for i=1,#buf do decoded = decoded .. string.char(buf[i]) end
-
--- Checksum
-local sum = 0
-for i=1,#decoded do sum = (sum + string.byte(decoded,i)) % 4294967296 end
-
-if sum ~= CHKSUM then
-    while true do end -- Freeze if tampered
-end
-
-local load_fn = loadstring or load
-local f, err = load_fn(decoded)
-if f then 
-    getfenv(f).script = script 
-    f() 
+-- Execution
+local s, res = pcall({v_run})
+if s and res then
+    local f = loadstring and loadstring(res) or load(res)
+    if f then
+        getfenv(f).script = script
+        task.spawn(f)
+    end
 end
 '''
-        # Удаляем лишние пробелы для минификации
-        return "\\n".join([line.strip() for line in lua_template.splitlines() if line.strip()])
+        # Минификация (убираем лишние отступы и комментарии)
+        # Оставляем только необходимое
+        lines = [l.strip() for l in lua_template.splitlines() if l.strip() and not l.strip().startswith("--")]
+        return " ".join(lines)
 
 # ----------------------------
-# Bot Handlers
+# Handlers
 # ----------------------------
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    await message.answer("👋 Отправь .lua файл для защиты (Meloten ULTRA).")
+    await message.answer(
+        "🛡 **Meloten ULTRA v2**\n"
+        "Отправь .lua файл.\n"
+        "Поддерживает большие скрипты и скрывает мусор."
+    )
 
 @dp.message(F.document)
 async def handle_document(message: types.Message):
     if not message.document.file_name.endswith(('.lua', '.txt')):
-        await message.answer("❌ Нужен файл .lua")
+        await message.answer("❌ Формат не поддерживается.")
         return
 
-    msg = await message.answer("⚙️ Обфускация...")
+    # Если файл больше 2 МБ, предупреждаем
+    if message.document.file_size > 2 * 1024 * 1024:
+         await message.answer("❌ Файл слишком большой (лимит 2 МБ).")
+         return
+
+    status_msg = await message.answer("🔄 Анализ и шифрование (v2)...")
+
     try:
         mem = io.BytesIO()
         await bot.download(message.document, destination=mem)
-        src = mem.getvalue().decode('utf-8', errors='ignore')
+        src_code = mem.getvalue().decode('utf-8', errors='ignore')
 
-        obf = MelotenUltraVM(src)
-        res = obf.build()
+        # === ВЫПОЛНЕНИЕ В ПОТОКЕ (ЧТОБЫ НЕ ЗАВИСЛО) ===
+        def process():
+            obf = MelotenUltraVM(src_code)
+            return obf.build()
+        
+        protected_code = await asyncio.to_thread(process)
+        # ==============================================
 
-        out = BufferedInputFile(res.encode('utf-8'), filename=f"Protected_{message.document.file_name}")
-        await message.answer_document(out, caption="✅ Готово!")
-        await msg.delete()
+        out_name = f"Protected_{message.document.file_name}"
+        output = BufferedInputFile(protected_code.encode('utf-8'), filename=out_name)
+        
+        await message.answer_document(
+            output, 
+            caption=f"✅ **Успешно!**\nРазмер: {len(protected_code)} байт\nЗащита: Ultra VM + StringPacking",
+            request_timeout=120 # Увеличенный таймаут для отправки
+        )
+        await status_msg.delete()
+
     except Exception as e:
-        await message.answer(f"Ошибка: {e}")
+        await message.answer(f"⚠️ Ошибка при обработке: {e}")
+        logging.error(f"Error: {e}")
 
 # ----------------------------
-# Run
+# Main
 # ----------------------------
 async def main():
     await dp.start_polling(bot)
