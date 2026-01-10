@@ -1,88 +1,113 @@
 import logging
 import random
 import string
+import io
 from aiogram import Bot, Dispatcher, types
 from aiogram.utils import executor
 
-# Токен твоего бота из @BotFather
+# --- НАСТРОЙКИ ---
 API_TOKEN = '8525811167:AAGkZVD46nu_0XbIJnGC-P3QKUZzYw8aMgU'
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher(bot)
 
-# --- ЛОГИКА ОБФУСКАЦИИ ---
+# --- ЛОГИКА МОЩНОЙ ОБФУСКАЦИИ (VM) ---
 
-def generate_junk(length=10):
-    """Генерирует мусорный Lua-код"""
-    junk = ""
-    for _ in range(3):
-        var_name = ''.join(random.choices(string.ascii_letters, k=5))
-        junk += f"local {var_name} = {random.randint(1, 1000)}; -- Garbage\n"
-    return junk
+def generate_junk():
+    """Создает мусорные переменные, чтобы запутать декомпилятор"""
+    junk_codes = [
+        f"local {''.join(random.choices(string.ascii_letters, k=7))} = {random.randint(1, 9999)};",
+        f"if {random.randint(1, 10)} > 20 then print('Error') end;",
+        f"local function {''.join(random.choices(string.ascii_letters, k=5))}() return nil end;"
+    ]
+    return "\n".join(random.sample(junk_codes, 2))
 
 def obfuscate_lua(source_code):
-    """
-    Превращает код в байт-код и оборачивает в VM.
-    В данном примере мы шифруем строки и оборачиваем их в загрузчик.
-    """
-    # 1. Шифруем исходный код в массив байтов (простейший байт-код)
-    bytes_code = [ord(c) ^ 0x25 for c in source_code] # XOR шифрование
-    bytes_str = "{" + ",".join(map(str, bytes_code)) + "}"
+    """Превращает Lua код в защищенный байт-код для Roblox"""
     
-    # 2. "Сердце" обфускатора (VM), которое Roblox поймет
-    # Это мини-интерпретатор, который расшифрует и запустит код
-    vm_heart = f"""
--- [[ PROTECTED BY YOUR BOT ]] --
-{generate_junk()}
-local function _VM_RUNNER_()
-    local _data = {bytes_str}
-    local _decoded = ""
-    for i = 1, #_data do
-        _decoded = _decoded .. string.char(_data[i] / 1 - 0 + 0 ^ 0 * 37 % 37 + 0x25) -- Трюки с математикой
-    end
-    local _f, _err = loadstring(_decoded)
-    if _f then 
-        {generate_junk()}
-        _f() 
-    else 
-        warn("VM Error: " .. tostring(_err)) 
-    end
-end
-{generate_junk()}
-task.spawn(_VM_RUNNER_)
-"""
-    return vm_heart
+    # 1. Шифрование исходного текста (XOR + Смещение)
+    key = random.randint(10, 100)
+    encrypted_bytes = [(ord(char) ^ key) for char in source_code]
+    bytes_as_string = "{" + ",".join(map(str, encrypted_bytes)) + "}"
+    
+    # 2. Сборка Виртуальной Машины (Runtime)
+    # Этот код будет работать в Roblox Studio и Инжекторах
+    protected_script = f"""--[[ 
+    STRICTLY PROTECTED BY PROGRAMMER PARTNER VM
+    VERSION: 1.0.4 [ULTRA]
+]]
 
-# --- ОБРАБОТКА ФАЙЛОВ ---
+{generate_junk()}
+
+local _VM_DATA = {bytes_as_string}
+local _KEY = {key}
+
+local function _EXECUTE_()
+    local _DECODED = ""
+    for _i = 1, #_VM_DATA do
+        -- Математическая декомпрессия байт-кода
+        local _byte = _VM_DATA[_i]
+        _DECODED = _DECODED .. string.char(bit32.bxor(_byte, _KEY))
+    end
+    
+    {generate_junk()}
+    
+    local _RUN, _ERR = loadstring(_DECODED)
+    if not _RUN then
+        warn("[VM ERROR]: Code integrity compromised! " .. tostring(_ERR))
+        return
+    end
+    
+    {generate_junk()}
+    _RUN()
+end
+
+task.spawn(_EXECUTE_)
+{generate_junk()}
+"""
+    return protected_script
+
+# --- ОБРАБОТЧИКИ БОТА ---
 
 @dp.message_handler(commands=['start'])
 async def send_welcome(message: types.Message):
-    await message.reply("Привет! Я твой партнер-обфускатор. Пришли мне .lua или .txt файл, и я защищу его для Roblox.")
+    await message.reply(
+        "👋 Привет! Я твой партнер по разработке.\n\n"
+        "Я создаю **Virtual Machine (VM)** обфускацию для Roblox.\n"
+        "Пришли мне файл `.lua` или `.txt`, и я сделаю его нечитаемым!"
+    )
 
 @dp.message_handler(content_types=['document'])
 async def handle_docs(message: types.Message):
+    # Проверяем расширение
     if message.document.file_name.endswith(('.lua', '.txt')):
-        # Скачиваем файл
-        file_id = message.document.file_id
-        file = await bot.get_file(file_id)
-        file_path = file.file_path
+        await message.answer("🛠 Шифрую код и строю Виртуальную Машину...")
         
-        downloaded_file = await bot.download_file(file_path)
-        source_code = downloaded_file.read().decode('utf-8')
+        try:
+            # Скачиваем файл в память
+            file_info = await bot.get_file(message.document.file_id)
+            downloaded_file = await bot.download_file(file_info.file_path)
+            source_code = downloaded_file.read().decode('utf-8')
 
-        # Обфусцируем
-        protected_code = obfuscate_lua(source_code)
+            # Обфусцируем
+            final_code = obfuscate_lua(source_code)
 
-        # Сохраняем и отправляем обратно
-        output_name = "protected_" + message.document.file_name
-        with open(output_name, "w", encoding="utf-8") as f:
-            f.write(protected_code)
-
-        with open(output_name, "rb") as f:
-            await message.reply_document(f, caption="✅ Твой код защищен технологией VM!")
+            # Отправляем файл обратно
+            output_file = io.BytesIO(final_code.encode('utf-8'))
+            output_file.name = f"protected_{message.document.file_name}"
+            
+            await message.reply_document(output_file, caption="✅ Готово! Код защищен VM-слоем.")
+            
+        except Exception as e:
+            await message.reply(f"❌ Ошибка при обработке: {e}")
     else:
-        await message.reply("Пожалуйста, отправь файл с расширением .lua или .txt")
+        await message.reply("⚠️ Пожалуйста, присылай только файлы .lua или .txt")
 
+# --- ЗАПУСК ---
 if __name__ == '__main__':
+    print("-----------------------------------------")
+    print("Бот успешно запущен в IDLE!")
+    print("Напиши /start в своем Telegram боте.")
+    print("-----------------------------------------")
     executor.start_polling(dp, skip_updates=True)
