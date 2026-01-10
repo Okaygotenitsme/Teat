@@ -2,156 +2,216 @@ import asyncio
 import logging
 import random
 import string
+import zlib
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile
 
 # --- КОНФИГУРАЦИЯ ---
-API_TOKEN = '8525811167:AAGGVCLArope5t9P1QeSYf3y_a18ykHdxy8' # Не забудьте вставить свой токен
+API_TOKEN = '8525811167:AAGGVCLArope5t9P1QeSYf3y_a18ykHdxy8'
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 
-# --- ЛОГИКА ОРГАНИЗАЦИИ MOONSEC-STYLE VM ---
-
-class MelotenObfuscator:
-    def __init__(self, source):
-        self.source = source
-        self.var_table = {}  # Хранилище имен переменных
+class MoonSecReplica:
+    def __init__(self, source_code):
+        self.source = source_code
+        self.var_cache = {}
+        # Настройки генерации мусора
+        self.junk_vars = []
+        
+    def _rnd_name(self, length=None):
+        """Генерирует переменные в стиле llIll1l"""
+        if not length:
+            length = random.randint(6, 15)
+        return random.choice(['l', 'I']) + ''.join(random.choice(['l', 'I', '1']) for _ in range(length))
 
     def _get_var(self, key):
-        """Генерирует или возвращает уже созданное имя переменной (lIl1l...)"""
-        if key not in self.var_table:
-            # Генерация имен в стиле MoonSec (l + рандомные lI1)
-            length = random.randint(4, 10)
-            name = "l" + "".join(random.choice("lI1") for _ in range(length))
-            self.var_table[key] = name
-        return self.var_table[key]
+        """Возвращает консистентное имя переменной"""
+        if key not in self.var_cache:
+            self.var_cache[key] = self._rnd_name()
+        return self.var_cache[key]
 
-    def _generate_junk_math(self):
-        """Генерирует бессмысленную математику, как в Source 2"""
-        v_e = self._get_var('e')
+    def _generate_junk_math(self, v_math):
+        """Генерирует математический шум как в MoonSec V3 (Source 2)"""
         ops = ['+', '-', '*', '%']
-        val = random.randint(100, 9999)
-        mod = random.randint(1000, 99999)
-        return f"{v_e}=({v_e}{random.choice(ops)}{val})%{mod};"
+        block = ""
+        # Создаем цепочку бессмысленных вычислений
+        for _ in range(random.randint(2, 5)):
+            val = random.randint(0x100, 0xFFFF)
+            mod = random.randint(0x1000, 0xFFFF)
+            op = random.choice(ops)
+            block += f"{v_math}=({v_math}{op}{val})%{mod};"
+            
+            # Вложенный мусорный if
+            if random.random() > 0.7:
+                v_check = random.randint(100, 5000)
+                block += f"if({v_math}%{random.randint(100, 900)})>{v_check} then {v_math}=({v_math}-{random.randint(10,99)})%0x{random.randint(1000,9999):x} end;"
+        return block
 
-    def build(self):
-        # 1. Сжатие и шифрование исходного кода
-        # Мы разбиваем код на чанки и шифруем каждый байт
-        key = random.randint(150, 255)
+    def obfuscate(self):
+        # 1. Сжимаем и шифруем исходник
+        compressed = zlib.compress(self.source.encode('utf-8'))
+        # Превращаем в массив байт с диким смещением
+        key = random.randint(10000, 99999)
+        bytecode = []
+        for b in compressed:
+            # Шифрование: (Byte XOR Key) + Index
+            enc = (b ^ (key % 255))
+            bytecode.append(str(enc))
+        
+        # Переменные для VM
+        v_func_wrapper = self._get_var('wrapper')
+        v_env = self._get_var('env')
+        v_byte_table = self._get_var('byte_table')
+        v_pointer = self._get_var('pointer')
+        v_math_val = self._get_var('math_val')
+        v_str_buffer = self._get_var('str_buffer')
+        v_xor_key = self._get_var('xor_key')
+        v_final_code = self._get_var('final_code')
+        v_bit = self._get_var('bit')
+        
+        # Заголовок как в MoonSec
+        header = f"([[This file was protected with MoonSec V3]]):gsub('.+', (function(a) _ngWOHRHfEJeL = a; end)); return(function(l,...)"
+        
+        # Переменные VM
+        vars_decl = f"local {v_env};local {v_byte_table};local {v_pointer};local {v_math_val}={random.randint(20000, 50000)};local {v_xor_key}={key};local {v_str_buffer}={{}};"
+        
+        # Загрузка байткода (разбиваем на части, чтобы Lua не крашнулся от длины строки)
+        payload_str = ",".join(bytecode)
+        table_loader = f"{v_byte_table}={{ {payload_str} }};"
+        
+        # Основной цикл VM
+        vm_loop = f"while {v_math_val} < {random.randint(900000, 999999)} do "
+        
+        # Генерируем "Control Flow Flattening"
+        # Реальная логика прячется среди мусора
+        vm_loop += self._generate_junk_math(v_math_val)
+        
+        # Блок дешифровки
+        # Мы используем условие с % 2 ~= 0 чтобы запутать
+        vm_loop += f"if {v_math_val}%2~=0 then "
+        vm_loop += self._generate_junk_math(v_math_val)
+        vm_loop += f"else "
+        
+        # Реальная логика цикла
+        vm_loop += (
+            f"local {self._rnd_name()} = 0;"
+            f"for {self._rnd_name()} = 1, #{v_byte_table} do "
+            f"local b = {v_byte_table}[{self._rnd_name()}];"
+            f"table.insert({v_str_buffer}, string.char(bit32 and bit32.bxor(b, {v_xor_key}%255) or (b ~ ({v_xor_key}%255)) ));"
+            f"end; break;" # Прерываем while после расшифровки
+        )
+        
+        vm_loop += "end end " # Закрываем if/else и while
+        
+        # Финализация: распаковка zlib (эмуляция через loadstring, так как на чистом Lua zlib нет, 
+        # но мы используем трюк: мы просто защищаем строку, а не сжимаем в коде, чтобы работало везде)
+        
+        # ВАЖНО: Так как в чистом Lua нет zlib декомпрессии из коробки, 
+        # для совместимости мы уберем zlib сжатие из кода выше и оставим только XOR шифрование,
+        # но добавим визуального шума, чтобы код выглядел "сжатым".
+        
+        # --- ПЕРЕГЕНЕРАЦИЯ БЕЗ ZLIB (ДЛЯ СОВМЕСТИМОСТИ) ---
+        # MoonSec часто использует кастомные алгоритмы, но чтобы работало везде (SAMP, Roblox),
+        # лучше использовать чистый XOR + Table.
+        
         bytecode = []
         for char in self.source:
-            # Сложное преобразование байтов (XOR + смещение)
-            val = (ord(char) ^ key) + 5
-            bytecode.append(str(val))
+            byte = ord(char)
+            # Сложная формула шифрования
+            enc = (byte + key) % 255
+            bytecode.append(str(enc))
+        payload_str = ",".join(bytecode)
         
-        payload = "{" + ",".join(bytecode) + "}"
-
-        # 2. Имена переменных для VM
-        v_vm_func = self._get_var("vm_entry")
-        v_str_char = self._get_var("str_char")
-        v_str_byte = self._get_var("str_byte")
-        v_table_concat = self._get_var("tbl_concat")
-        v_bytecode = self._get_var("bytecode")
-        v_idx = self._get_var("idx")
-        v_decrypted = self._get_var("decrypted_table")
-        v_key = self._get_var("key")
-        v_char = self._get_var("char")
-        v_state = self._get_var("state") # Переменная состояния для Control Flow
-        v_e = self._get_var("e") # Мусорная переменная для математики
-
-        # 3. Генерация заголовка (имитация MoonSec)
-        lua_code = f"--[[This file was protected with Meloten V4 (MoonSec Style)]]\n"
+        # Собираем финальный скрипт заново
         
-        # 4. Основное тело обфускации (Control Flow Flattening)
-        # Мы создаем цикл while, который прыгает по состояниям
-        
-        lua_code += (
-            f"local {v_str_char} = string.char;"
-            f"local {v_table_concat} = table.concat;"
-            f"local {v_bytecode} = {payload};"
-            f"local {v_key} = {key};"
-            f"return (function(...)"
-            f"local {v_state} = 1;" # Начальное состояние
-            f"local {v_e} = {random.randint(10000, 99999)};" # Переменная для "мусорной" математики
-            f"local {v_idx} = 1;"
-            f"local {v_decrypted} = {{}};"
-            f"while {v_state} ~= 0 do " # Главный цикл VM
+        final_lua = (
+            f"{header} "
+            f"local {self._rnd_name()}; local {self._rnd_name()}; "
+            f"{vars_decl} "
+            f"{v_byte_table}={{ {payload_str} }}; "
+            f"{v_pointer}=1; "
+            
+            # Начало цикла обфускации
+            f"while {v_pointer} <= #{v_byte_table} do "
+            f"{v_math_val} = {v_math_val} + 1; "
+            
+            # Вставляем много мусорного кода
+            + self._generate_junk_math(v_math_val) +
+            
+            # Условие-обманка
+            f"if ({v_math_val}%0x30b4)>0x185a then "
+            + self._generate_junk_math(v_math_val) +
+            f" else "
+            
+            # Реальное действие (расшифровка одного байта)
+            f"local e = {v_byte_table}[{v_pointer}]; "
+            f"e = (e - {v_xor_key}) % 255; "
+            f"table.insert({v_str_buffer}, string.char(e)); "
+            f"{v_pointer} = {v_pointer} + 1; "
+            f"end; "
+            
+            # Еще мусор
+            f"if {v_math_val}%2 ~= 0 then " + self._generate_junk_math(v_math_val) + " end; "
+            f"end; " # Конец цикла while
+            
+            # Запуск кода
+            f"local {v_final_code} = table.concat({v_str_buffer}); "
+            f"local {v_env} = (loadstring or load)({v_final_code}); "
+            f"if {v_env} then return {v_env}(...) else return nil end; "
+            f"end)(...) "
         )
-
-        # Блок 1: Мусорная математика (имитация Source 2)
-        lua_code += f"if {v_state} == 1 then "
-        for _ in range(random.randint(2, 5)):
-            lua_code += self._generate_junk_math()
-        lua_code += f"{v_state} = 2; end;"
-
-        # Блок 2: Еще мусор + переход к дешифровке
-        lua_code += f"if {v_state} == 2 then "
-        lua_code += f"while {v_idx} <= #{v_bytecode} do "
-        lua_code += self._generate_junk_math() # Шум внутри цикла
         
-        # Логика дешифровки (обратная той, что в Python)
-        lua_code += (
-            f"local {v_char} = {v_bytecode}[{v_idx}];"
-            f"{v_char} = ({v_char} - 5);"
-            # Используем bit32 если есть, или эмуляцию XOR для совместимости 5.1+
-            f"if bit32 then {v_char} = bit32.bxor({v_char}, {v_key}) "
-            f"else {v_char} = ({v_char} ~ {v_key}) end;" # Lua 5.3+ использует ~ для XOR
-            f"{v_decrypted}[{v_idx}] = {v_str_char}({v_char});"
-            f"{v_idx} = {v_idx} + 1;"
-        )
-        lua_code += f"end; {v_state} = 3; end;"
-
-        # Блок 3: Финализация и запуск
-        lua_code += f"if {v_state} == 3 then "
-        lua_code += f"local {v_vm_func} = loadstring({v_table_concat}({v_decrypted}));"
-        lua_code += f"{v_state} = 0;" # Выход из цикла while
-        lua_code += f"return {v_vm_func}(...); end;"
-        
-        # Закрытие цикла while и функции
-        lua_code += "end end)(...)"
-
-        return lua_code
+        return final_lua
 
 # --- ОБРАБОТЧИКИ ТЕЛЕГРАМ ---
 
 @dp.message(Command("start"))
 async def start(message: types.Message):
     await message.answer(
-        "✨ **Meloten Obfuscator V4 (MoonSec Style)**\n\n"
-        "Я превращу твой код в защищенную VM-структуру с запутанным потоком управления.\n\n"
-        "Отправь .lua или .txt файл.",
+        "🛡 **MoonSec V3 Replica**\n"
+        "Отправь .lua файл, и я превращу его в кашу из байткода и мусорной математики.\n"
+        "Защита будет выглядеть 1-в-1 как твой пример.",
         parse_mode="Markdown"
     )
 
 @dp.message(F.document)
 async def handle_file(message: types.Message):
     if not message.document.file_name.endswith(('.lua', '.txt')):
-        await message.answer("❌ Ошибка! Нужен файл .lua или .txt")
+        await message.answer("❌ Кидай только .lua или .txt")
         return
 
-    msg = await message.answer("⚙️ Генерация VM байткода и запутывание потоков...")
-    
+    wait_msg = await message.answer("🔄 **Анализ структуры и генерация OpCode...**")
+
     try:
         file_info = await bot.get_file(message.document.file_id)
         file_content = await bot.download_file(file_info.file_path)
         source = file_content.read().decode('utf-8', errors='ignore')
 
-        obf = MelotenObfuscator(source)
-        final_code = obf.build()
+        # Запускаем обфускацию в отдельном потоке, чтобы не блочить бота
+        loop = asyncio.get_running_loop()
+        
+        # Функция-обертка для запуска
+        def process():
+            obfuscator = MoonSecReplica(source)
+            return obfuscator.obfuscate()
+
+        # Выполняем
+        final_code = await loop.run_in_executor(None, process)
 
         output = BufferedInputFile(
             final_code.encode('utf-8'), 
             filename=f"Protected_{message.document.file_name}"
         )
         
-        await message.answer_document(output, caption="✅ Защита уровня 'MoonSec Style' применена.")
-        await msg.delete()
+        await message.answer_document(output, caption="✅ **Защищено методом MoonSec V3 Style**")
+        await wait_msg.delete()
         
     except Exception as e:
-        await message.answer(f"❌ Ошибка: {e}")
+        logging.error(e)
+        await message.answer(f"❌ Ошибка бота: {e}")
 
 # --- ЗАПУСК ---
 if __name__ == '__main__':
