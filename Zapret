@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 # meloten_obfuscator_bot.py
-# Требуется: Python 3.8+, aiogram, (опционально) uvloop
-#
-# Replace API_TOKEN before running.
+# Требуется: Python 3.8+, aiogram
+# Перед запуском замените API_TOKEN на ваш токен.
 
 import asyncio
 import logging
@@ -10,11 +9,12 @@ import random
 import secrets
 import io
 import textwrap
+import tempfile
+import os
 from typing import List
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
-from aiogram.types import InputFile
 
 # ----------------------------
 # CONFIG
@@ -156,9 +156,8 @@ end
         junk2 = self._random_junk_block()
         clean_prefix = _rand_name("pfx")  # safe cleanup prefix
 
-        # build template (Luau-safe)
-        # note: use doubled braces {{}} when we need literal {} inside f-string; avoid later .replace hacks
-        lua_template = f'''
+        # Build template using .format and doubled braces for literal Lua braces.
+        lua_template = """
 --[[This script was protected with Meloten Obfuscator]]
 --[[ Meloten ULTRA VM (generated) ]]
 {junk1}
@@ -190,7 +189,7 @@ else
 end
 
 local function build_inverse(m)
-  local inv = {{}}
+  local inv = {{}}   -- literal empty table
   for i=1,#m do
     inv[m[i]] = i-1
   end
@@ -202,7 +201,7 @@ local safe_load = loadstring or load
 local ok_debug = pcall(function() return debug and debug.getinfo end)
 
 do
-  local __t = {{}}
+  local __t = {{}}   -- literal empty table
   while #__t < 0 do break end
   if not ok_debug then
     for i=1,80 do local _ = math.sin(i) end
@@ -241,7 +240,7 @@ local function byte_xor(byte, key, idx)
 end
 
 local function run_vm(op_table, seed)
-  local out = {{}}
+  local out = {{}}   -- literal empty table
   local pc = 1
   local key = derive_key(seed or XORKEY)
   local outlen = 0
@@ -279,7 +278,6 @@ local function run_vm(op_table, seed)
   return out
 end
 
--- run decoys (best-effort)
 pcall(function()
   local d1 = run_vm(DECOY1, bxor(XORKEY, 0x12345678))
   local s1 = ""
@@ -327,9 +325,19 @@ for k, v in pairs(_ENV) do
 end
 
 -- end of VM
-'''.replace("{clean_prefix}", clean_prefix)
+""".format(
+            junk1=junk1,
+            junk2=junk2,
+            map_lua=map_lua,
+            op_lua=op_lua,
+            d1_lua=d1_lua,
+            d2_lua=d2_lua,
+            xor_key=xor_key,
+            checksum=checksum,
+            clean_prefix=clean_prefix
+        )
 
-        # minify to single-line (makes static reading harder)
+        # minify to one line
         final = "\n".join(line.strip() for line in lua_template.splitlines() if line.strip() != "")
         final_one_liner = " ".join(final.split())
         return final_one_liner
@@ -359,45 +367,49 @@ async def handle_document(message: types.Message):
         await message.answer("❌ Поддерживаются только .lua и .txt файлы.")
         return
 
-    # quick size check if available
     if getattr(doc, "file_size", None):
         if doc.file_size > MAX_FILE_SIZE:
             await message.answer(f"❌ Файл слишком большой ({doc.file_size} bytes). Лимит {MAX_FILE_SIZE} bytes.")
             return
 
-    status = await message.answer("🛡 Запускаю Meloten ULTRA обфускацию — подожди секунду...")
+    status = await message.answer("🛡 Запускаю Meloten ULTRA обфускацию — подожди...")
+    tmp_path = None
+    temp_out_path = None
+
     try:
         mem = io.BytesIO()
-
-        # Универсальная загрузка: сначала try Document.download, потом fallback
         downloaded = False
+
+        # 1) try Document.download (common in many aiogram versions)
         try:
-            # some aiogram versions have Document.download
             if hasattr(doc, "download"):
                 await doc.download(destination=mem)  # type: ignore
                 downloaded = True
         except Exception:
             downloaded = False
 
+        # 2) try bot.get_file + bot.download_file (fallback)
         if not downloaded:
-            # fallback: use bot.get_file + bot.download_file (works for many aiogram versions)
             try:
                 file = await bot.get_file(doc.file_id)
-                # try bot.download_file (aiogram v3 style)
-                await bot.download_file(file.file_path, destination=mem)  # type: ignore
+                # some aiogram versions implement download_file
+                if hasattr(bot, "download_file"):
+                    await bot.download_file(file.file_path, destination=mem)  # type: ignore
+                else:
+                    # try message.bot.download_file
+                    await message.bot.download_file(file.file_path, destination=mem)  # type: ignore
                 downloaded = True
             except Exception:
                 downloaded = False
 
+        # 3) last-resort try: use get_file with http download via file URL (if available)
         if not downloaded:
-            # last-resort: try message.bot.get_file (compat)
             try:
-                file = await message.bot.get_file(doc.file_id)
-                await message.bot.download_file(file.file_path, destination=mem)  # type: ignore
-                downloaded = True
+                # Build file URL using bot.get_file and file_path then use bot.download_file (covered above),
+                # but if still not possible, raise.
+                raise RuntimeError("Не удалось автоматически скачать файл; несовместимая версия aiogram.")
             except Exception as e:
-                logger.exception("Failed to download file with all methods")
-                raise RuntimeError("Не удалось скачать файл (несовместимая версия aiogram).") from e
+                raise
 
         mem.seek(0)
         data = mem.getvalue()
@@ -408,16 +420,37 @@ async def handle_document(message: types.Message):
 
         source_code = data.decode("utf-8", errors="ignore")
 
-        # run obfuscator
         obf = MelotenUltraVM(source_code, bind_place=True)
         protected = obf.build()
 
-        out_name = f"Protected_{doc.file_name}"
-        out_mem = io.BytesIO(protected.encode("utf-8"))
-        out_mem.seek(0)
+        # write to temp file and send that file (this avoids InputFile abstraction problems)
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".lua")
+        tmp_path = tmp.name
+        tmp.write(protected.encode("utf-8"))
+        tmp.flush()
+        tmp.close()
 
-        input_file = InputFile(out_mem, filename=out_name)
-        await message.answer_document(input_file, caption="✅ Код обфусцирован (Meloten ULTRA VM).")
+        # send file: try bot.send_document with open file
+        out_name = f"Protected_{doc.file_name}"
+        f = open(tmp_path, "rb")
+        try:
+            # preferred: bot.send_document (aiogram v3/v2)
+            await bot.send_document(chat_id=message.chat.id, document=f, caption="✅ Код обфусцирован (Meloten ULTRA VM).")
+        except Exception:
+            # fallback to message.answer_document
+            try:
+                f.seek(0)
+                await message.answer_document(document=f, caption="✅ Код обфусцирован (Meloten ULTRA VM).")
+            except Exception:
+                # last resort: reply_document
+                f.seek(0)
+                await message.reply_document(f, caption="✅ Код обфусцирован (Meloten ULTRA VM).")
+        finally:
+            try:
+                f.close()
+            except Exception:
+                pass
+
         await status.delete()
     except Exception as e:
         logger.exception("Error while handling document")
@@ -426,6 +459,13 @@ async def handle_document(message: types.Message):
         except Exception:
             pass
         await message.answer(f"⚠️ Ошибка: {str(e)}")
+    finally:
+        # cleanup temp files
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
 
 
 # ----------------------------
