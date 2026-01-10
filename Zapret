@@ -1,34 +1,45 @@
+#!/usr/bin/env python3
+# meloten_obfuscator_bot.py
+# Требуется: Python 3.8+, aiogram, (опционально) uvloop
+#
+# Replace API_TOKEN before running.
+
 import asyncio
 import logging
 import random
 import secrets
 import io
 import textwrap
+from typing import List
+
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import InputFile
 
 # ----------------------------
-# Meloten ULTRA+ Obfuscator Bot
+# CONFIG
 # ----------------------------
-# IMPORTANT: Replace the token placeholder before running:
-API_TOKEN = "8525811167:AAGGVCLArope5t9P1QeSYf3y_a18ykHdxy8"  # <- Замените на ваш токен
+API_TOKEN = "8525811167:AAGGVCLArope5t9P1QeSYf3y_a18ykHdxy8"  # <-- замените на ваш токен
+MAX_FILE_SIZE = 200 * 1024  # 200 KB limit to avoid OOM
+ALLOWED_EXTS = (".lua", ".txt")
 
+# ----------------------------
+# Logging & bot init
+# ----------------------------
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
+logger = logging.getLogger("meloten")
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 
 # ----------------------------
 # Utilities
 # ----------------------------
-def _rand_name(prefix="Mel"):
+def _rand_name(prefix: str = "Mel") -> str:
     chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
     return prefix + "_" + "".join(secrets.choice(chars) for _ in range(random.randint(10, 16)))
 
 
-def _chunker(seq, min_size=6, max_size=24):
+def _chunker(seq: List[int], min_size: int = 6, max_size: int = 24):
     i = 0
     while i < len(seq):
         size = random.randint(min_size, max_size)
@@ -37,13 +48,12 @@ def _chunker(seq, min_size=6, max_size=24):
 
 
 # ----------------------------
-# Strong Multi-stage VM Obfuscator
+# Heavy obfuscator (multi-stage VM + decoys)
 # ----------------------------
 class MelotenUltraVM:
     def __init__(self, source: str, bind_place: bool = False):
         self.source = source
         self.bind_place = bind_place
-        # reproducible salt for this build if needed
         self._salt = random.getrandbits(32)
 
     def _generate_map(self):
@@ -72,24 +82,23 @@ class MelotenUltraVM:
         ops = []
         chunks = list(_chunker(payload_bytes, 8, 28))
         for chunk in chunks:
-            # insert 0..2 junk ops
+            # random junk ops
             for _ in range(random.randint(0, 2)):
                 if random.random() < 0.6:
-                    ops += [4, random.randint(1, 8)]
+                    ops += [4, random.randint(1, 12)]
                 else:
                     ops += [3, random.randint(0, 1)]
             # append real chunk
             ops.append(1)
             ops.append(len(chunk))
             ops += chunk
-            # occasionally mutate key
-            if random.random() < 0.4:
+            # sometimes mutate key
+            if random.random() < 0.45:
                 ops += [2, random.randint(1, 255)]
         ops += [5, 0]
         return ops
 
     def _lua_table_literal(self, arr):
-        # return a Lua table literal for numeric array (compact)
         parts = []
         line = []
         for i, v in enumerate(arr, start=1):
@@ -107,8 +116,8 @@ class MelotenUltraVM:
         body = f"""
 local function {name}()
   local {var} = 0
-  for i=1,{random.randint(3,14)} do
-    {var} = ({var} + (i * {random.randint(2,9)}) + (i % {random.randint(2,7)})) % 65536
+  for i=1,{random.randint(4,18)} do
+    {var} = ({var} + (i * {random.randint(2,12)}) + (i % {random.randint(2,9)})) % 65536
   end
   return {var}
 end
@@ -116,19 +125,17 @@ end
         return textwrap.dedent(body)
 
     def build(self) -> str:
-        # 1) original bytes
+        # original bytes
         src_bytes = [ord(c) for c in self.source]
-        # 2) mapping
         mapping = self._generate_map()
         mapped = self._apply_map(src_bytes, mapping)
-        # 3) xor key
         xor_key = random.getrandbits(32)
         xored = self._xor_layer(mapped, xor_key)
-        # 4) opcode stream for real payload
         opcode_stream = self._build_opcode_stream(xored)
-        # 5) create multiple decoys (two) with different minor keys and content
+
+        # decoys (to confuse dumpers)
         decoy1_text = "--[[Meloten Decoy 1]] print('decoy1')"
-        decoy2_text = "--[[Meloten Decoy 2]] for i=1,3 do end"
+        decoy2_text = "--[[Meloten Decoy 2]] for i=1,5 do end"
         dec1 = [ord(c) for c in decoy1_text]
         dec2 = [ord(c) for c in decoy2_text]
         dec1_m = self._apply_map(dec1, mapping)
@@ -137,22 +144,20 @@ end
         dec2_x = self._xor_layer(dec2_m, xor_key ^ 0x5AA55AA5)
         dec1_ops = self._build_opcode_stream(dec1_x)
         dec2_ops = self._build_opcode_stream(dec2_x)
-        # 6) checksum of original (simple sum mod 2^32)
+
         checksum = sum(src_bytes) & 0xFFFFFFFF
-        # 7) produce lua literals
+
         map_lua = self._lua_table_literal(mapping)
         op_lua = self._lua_table_literal(opcode_stream)
         d1_lua = self._lua_table_literal(dec1_ops)
         d2_lua = self._lua_table_literal(dec2_ops)
-        # 8) random junk functions
+
         junk1 = self._random_junk_block()
         junk2 = self._random_junk_block()
+        clean_prefix = _rand_name("pfx")  # safe cleanup prefix
 
-        # 9) unique cleanup prefix used in environment cleanup at end
-        clean_prefix = _rand_name("pfx")
-
-        # 10) build robust Lua VM runtime (Luau-compatible)
-        # note: curly braces in f-string must be doubled to render literal braces '{{' '}}'
+        # build template (Luau-safe)
+        # note: use doubled braces {{}} when we need literal {} inside f-string; avoid later .replace hacks
         lua_template = f'''
 --[[This script was protected with Meloten Obfuscator]]
 --[[ Meloten ULTRA VM (generated) ]]
@@ -166,7 +171,7 @@ local DECOY2 = {{{d2_lua}}}
 local XORKEY = {xor_key}
 local CHKSUM = {checksum}
 
--- helper: try to get bitwise xor; fall back if not present
+-- try to get fast bitwise xor, fallback to lua arithmetic
 local bxor = nil
 if type(bit32) == "table" and type(bit32.bxor) == "function" then
   bxor = bit32.bxor
@@ -184,9 +189,8 @@ else
   end
 end
 
--- build inverse map at runtime
 local function build_inverse(m)
-  local inv = {{}}               -- literal empty table
+  local inv = {{}}
   for i=1,#m do
     inv[m[i]] = i-1
   end
@@ -194,35 +198,24 @@ local function build_inverse(m)
 end
 local INV = build_inverse(MAP)
 
--- safe loader detection
 local safe_load = loadstring or load
 local ok_debug = pcall(function() return debug and debug.getinfo end)
 
--- anti-hook / anti-dump checks (Luau-friendly)
 do
-  local __t = {{}}               -- literal empty table
-  while #__t < 0 do
-    break
-  end
-
+  local __t = {{}}
+  while #__t < 0 do break end
   if not ok_debug then
-    for i=1,100 do
-      local _ = math.sin(i) * math.cos(i)
-    end
+    for i=1,80 do local _ = math.sin(i) end
   end
-
   local _ld = safe_load
   local s_ok, info = pcall(function() return debug and debug.getinfo(_ld) end)
   if s_ok and type(info) == "table" then
     if tostring(info.what) ~= "C" and tostring(info.what) ~= "main" then
-      for i=1,300 do
-        local _ = i*i
-      end
+      for i=1,200 do local _ = i*i end
     end
   end
 end
 
--- derive runtime key: mixes XORKEY with environment and tiny loops
 local function derive_key(seed)
   local k = seed % 0x100000000
   local envv = 0
@@ -231,24 +224,22 @@ local function derive_key(seed)
       envv = bxor(envv, math.floor(game.PlaceId)) % 0x100000000
     end
   end)
-  for i=1,5 do
+  for i=1,6 do
     k = bxor(k, (envv + i*1234567) % 0x100000000)
   end
   local t = 0
-  for i=1,7 do
+  for i=1,9 do
     t = (t + math.floor(math.abs(math.sin(i) * 100000))) % 0x100000000
   end
   return bxor(k, t)
 end
 
--- byte-level xor with 32-bit key (same scheme used to encode)
 local function byte_xor(byte, key, idx)
   local shift = (idx % 4) * 8
   local kbyte = math.floor(key / (256 ^ (idx % 4))) % 256
   return bxor(byte, kbyte) % 256
 end
 
--- VM executor: interprets opcode stream and reconstructs byte array
 local function run_vm(op_table, seed)
   local out = {{}}
   local pc = 1
@@ -273,11 +264,7 @@ local function run_vm(op_table, seed)
       key = bxor(key, delta)
     elseif op == 3 then
       local flag = op_table[pc]; pc = pc + 1
-      if flag == 1 then
-        key = derive_key(key)
-      else
-        key = bxor(key, 0x9E3779B9)
-      end
+      if flag == 1 then key = derive_key(key) else key = bxor(key, 0x9E3779B9) end
     elseif op == 4 then
       local loops = op_table[pc]; pc = pc + 1
       for i=1,loops do
@@ -286,13 +273,13 @@ local function run_vm(op_table, seed)
     elseif op == 5 then
       break
     else
-      -- ignore unknown
+      -- unknown op ignored
     end
   end
   return out
 end
 
--- multi-decoy execution (decoys executed before main to mislead dumper)
+-- run decoys (best-effort)
 pcall(function()
   local d1 = run_vm(DECOY1, bxor(XORKEY, 0x12345678))
   local s1 = ""
@@ -306,21 +293,15 @@ pcall(function()
   pcall(safe_load, s2)
 end)
 
--- run main payload
 local ok, buf = pcall(function() return run_vm(OP, XORKEY) end)
-if not ok or type(buf) ~= "table" then
-  error("Meloten: VM failure")
-end
+if not ok or type(buf) ~= "table" then error("Meloten: VM failure") end
 
 local decoded = ""
 for i=1,#buf do decoded = decoded .. string.char(buf[i]) end
 
--- integrity check (simple checksum)
 local function checksum_str(s)
   local sum = 0
-  for i=1,#s do
-    sum = (sum + string.byte(s,i)) % 0x100000000
-  end
+  for i=1,#s do sum = (sum + string.byte(s,i)) % 0x100000000 end
   return sum
 end
 
@@ -334,15 +315,10 @@ if checksum_str(decoded) ~= CHKSUM then
   end
 end
 
--- final safe execution
 local succ, f = pcall(function() return safe_load(decoded) end)
-if succ and type(f) == "function" then
-  pcall(f)
-else
-  pcall(function() pcall(loadstring or load, decoded) end)
-end
+if succ and type(f) == "function" then pcall(f) else pcall(function() pcall(loadstring or load, decoded) end) end
 
--- cleanup sensitive variables in environment
+-- cleanup
 local CLEAN_PREFIX = "{clean_prefix}"
 for k, v in pairs(_ENV) do
   if type(k) == "string" and k:match("^" .. CLEAN_PREFIX) then
@@ -350,67 +326,105 @@ for k, v in pairs(_ENV) do
   end
 end
 
--- end of generated VM
-'''
-        # insert chosen clean_prefix (already included via f-string), but note we used {clean_prefix} above:
-        lua_template = lua_template.replace("{clean_prefix}", clean_prefix)
+-- end of VM
+'''.replace("{clean_prefix}", clean_prefix)
 
-        # Minify whitespace into single-line output to make static analysis harder.
+        # minify to single-line (makes static reading harder)
         final = "\n".join(line.strip() for line in lua_template.splitlines() if line.strip() != "")
         final_one_liner = " ".join(final.split())
         return final_one_liner
 
 
 # ----------------------------
-# Bot Handlers
+# Bot handlers
 # ----------------------------
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     await message.answer(
-        "👋 Привет! Отправь `.lua` или `.txt` — я применю Meloten ULTRA VM (усиленная многоступенчатая защита).\n\n"
-        "Новостной телеграмм канал бота: @MelotenBot\n\n"
-        "Отправь файл с исходником (.lua или .txt), и я верну обфусцированный вариант."
+        "👋 Привет! Отправь `.lua` или `.txt` — я применю Meloten ULTRA (тяжёлая обфускация).\n\n"
+        "Новостной телеграмм канал бота: @MelotenBot"
     )
 
 
 @dp.message(Command("help"))
 async def cmd_help(message: types.Message):
-    await message.answer(
-        "Как пользоваться:\n"
-        "• Отправь файл .lua или .txt — получишь защищённый файл.\n"
-        "• /start — показать приветствие.\n"
-        "Примечание: бот добавляет обфусцированный Lua-VM-воркфлоу и небольшие декои."
-    )
+    await message.answer("Отправь .lua/.txt — получишь защищённый файл. Ограничение размера: 200KB.")
 
 
 @dp.message(F.document)
 async def handle_document(message: types.Message):
     doc = message.document
-    if not doc.file_name.lower().endswith(('.lua', '.txt')):
-        await message.answer("❌ Нужен файл с расширением .lua или .txt")
+    fname = (doc.file_name or "source").lower()
+    if not fname.endswith(ALLOWED_EXTS):
+        await message.answer("❌ Поддерживаются только .lua и .txt файлы.")
         return
 
-    status = await message.answer("🛡 Применяю Meloten ULTRA obfuscation — генерация может занять секунду...")
+    # quick size check if available
+    if getattr(doc, "file_size", None):
+        if doc.file_size > MAX_FILE_SIZE:
+            await message.answer(f"❌ Файл слишком большой ({doc.file_size} bytes). Лимит {MAX_FILE_SIZE} bytes.")
+            return
+
+    status = await message.answer("🛡 Запускаю Meloten ULTRA обфускацию — подожди секунду...")
     try:
         mem = io.BytesIO()
-        # safer download via message.document
-        await message.document.download(destination=mem)
-        mem.seek(0)
-        source_code = mem.getvalue().decode('utf-8', errors='ignore')
 
+        # Универсальная загрузка: сначала try Document.download, потом fallback
+        downloaded = False
+        try:
+            # some aiogram versions have Document.download
+            if hasattr(doc, "download"):
+                await doc.download(destination=mem)  # type: ignore
+                downloaded = True
+        except Exception:
+            downloaded = False
+
+        if not downloaded:
+            # fallback: use bot.get_file + bot.download_file (works for many aiogram versions)
+            try:
+                file = await bot.get_file(doc.file_id)
+                # try bot.download_file (aiogram v3 style)
+                await bot.download_file(file.file_path, destination=mem)  # type: ignore
+                downloaded = True
+            except Exception:
+                downloaded = False
+
+        if not downloaded:
+            # last-resort: try message.bot.get_file (compat)
+            try:
+                file = await message.bot.get_file(doc.file_id)
+                await message.bot.download_file(file.file_path, destination=mem)  # type: ignore
+                downloaded = True
+            except Exception as e:
+                logger.exception("Failed to download file with all methods")
+                raise RuntimeError("Не удалось скачать файл (несовместимая версия aiogram).") from e
+
+        mem.seek(0)
+        data = mem.getvalue()
+        if len(data) > MAX_FILE_SIZE:
+            await status.delete()
+            await message.answer(f"❌ Файл после загрузки слишком большой ({len(data)} bytes). Лимит {MAX_FILE_SIZE} bytes.")
+            return
+
+        source_code = data.decode("utf-8", errors="ignore")
+
+        # run obfuscator
         obf = MelotenUltraVM(source_code, bind_place=True)
         protected = obf.build()
 
         out_name = f"Protected_{doc.file_name}"
-        out_mem = io.BytesIO(protected.encode('utf-8'))
+        out_mem = io.BytesIO(protected.encode("utf-8"))
         out_mem.seek(0)
 
         input_file = InputFile(out_mem, filename=out_name)
         await message.answer_document(input_file, caption="✅ Код обфусцирован (Meloten ULTRA VM).")
         await status.delete()
     except Exception as e:
-        logger.exception("Ошибка при обработке документа")
-        await status.delete()
+        logger.exception("Error while handling document")
+        try:
+            await status.delete()
+        except Exception:
+            pass
         await message.answer(f"⚠️ Ошибка: {str(e)}")
 
 
@@ -418,7 +432,7 @@ async def handle_document(message: types.Message):
 # Run
 # ----------------------------
 async def main():
-    logger.info("Starting Meloten ULTRA+ Obfuscator Bot...")
+    logger.info("Meloten obfuscator bot starting...")
     await dp.start_polling(bot)
 
 
@@ -426,4 +440,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
-        logger.info("Bot stopped by user") 
+        logger.info("Bot stopped") 
