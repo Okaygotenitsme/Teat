@@ -2,6 +2,7 @@ import asyncio
 import logging
 import random
 import io
+import string
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile
@@ -13,106 +14,78 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 
-class MelotenHyperVM:
+class MelotenMoonVM:
     def __init__(self, source):
         self.source = source
-        self.key = random.randint(50, 200)
-        self.seed = random.randint(1000, 5000)
-        # Имена переменных в стиле "невидимок"
-        self.vars = {f"v{i}": self._rand_name() for i in range(20)}
+        self.key = random.randint(100, 255)
+        self.seed = random.randint(1000, 9999)
+        # Имена переменных в стиле "MoonSec" (случайные буквы)
+        self.vars = {f"v{i}": self._rand_str(5) for i in range(20)}
 
-    def _rand_name(self):
-        """Создает путаные имена, которые выглядят почти одинаково."""
-        chars = "Il1"
-        return "Meloten_" + "".join(random.choices(chars, k=random.randint(10, 15)))
+    def _rand_str(self, length):
+        return "".join(random.choices(string.ascii_letters, k=length))
 
-    def _get_math_junk(self, target_num):
-        """Превращает число в математическое выражение."""
-        offset = random.randint(1, 50)
-        return f"({target_num + offset} - {offset})"
-
-    def _generate_complex_junk(self):
-        """Генерирует тяжелый мусорный код."""
-        junk_parts = [
-            f"local {self._rand_name()} = function() for i=1,10 do end return {random.randint(1,100)} end;",
-            f"local {self._rand_name()} = {{[{random.randint(1,500)}] = '{self._rand_name()}'}};",
-            f"if {random.randint(1,10)} > 20 then print('{self._rand_name()}') end;",
-            f"local {self._rand_name()} = math.sin({random.randint(1,100)}) + math.cos({random.randint(1,100)});"
-        ]
-        return "".join(random.sample(junk_parts, k=2))
+    def _to_hex(self, n):
+        return f"0x{n:02x}"
 
     def build(self):
-        # Превращаем исходный код в байты
-        bytes_data = [(ord(c) ^ self.key) ^ (self.seed % 255) for c in self.source]
-        payload = "{" + ",".join(map(str, bytes_data)) + "}"
+        # 1. Шифруем исходник в "нечитаемую" строку байтов
+        encrypted_bytes = [(ord(c) ^ self.key) for c in self.source]
+        byte_payload = "".join([f"\\{b}" for b in encrypted_bytes])
         
-        # Основная логика обфускации
-        # Мы локализуем функции для скрытности и скорости
+        # 2. Генерируем "мусорную" таблицу для имитации MoonSec
+        junk_table = "{" + ",".join([self._to_hex(random.randint(0, 255)) for _ in range(10)]) + "}"
+        
+        # 3. Основной шаблон VM (стилизован под MoonSec)
+        # Мы используем вложенные функции и hex-числа
         vm_code = (
-            f"--[[ Meloten Hyper-VM Roblox Edition ]]\n"
-            f"local {self.vars['v1']} = {payload}; "
-            f"{self._generate_complex_junk()} "
-            f"local {self.vars['v2']} = {self._get_math_junk(self.key)}; "
-            f"local {self.vars['v3']} = {self._get_math_junk(self.seed)}; "
-            f"local {self.vars['v4']} = string.char; "
-            f"local {self.vars['v5']} = bit32.bxor; "
-            f"local {self.vars['v6']} = ''; "
-            f"{self._generate_complex_junk()} "
-            f"for {self.vars['v7']} = 1, #{self.vars['v1']} do "
-            f"  local {self.vars['v8']} = {self.vars['v5']}({self.vars['v1']}[{self.vars['v7']}], {self.vars['v2']}); "
-            f"  {self.vars['v6']} = {self.vars['v6']} .. {self.vars['v4']}({self.vars['v5']}({self.vars['v8']}, {self.vars['v3']} % 255)); "
-            f"  if {self.vars['v7']} % 300 == 0 then task.wait() end " # Чтобы Roblox не лагал
-            f"end; "
-            f"{self._generate_complex_junk()} "
-            f"local {self.vars['v9']}, {self.vars['v10']} = loadstring({self.vars['v6']}); "
-            f"if not {self.vars['v9']} then "
-            f"  warn('Critical Security Breach Detected!') "
-            f"else "
-            f"  local {self.vars['v11']} = task.spawn({self.vars['v9']}); "
-            f"end; "
-            f"{self.vars['v6']} = nil; " # Очистка памяти
+            f"--[[ Protected by Meloten Moon-VM v7.0 ]]\n"
+            f"local {self.vars['v1']} = (function(l, ...)\n"
+            f"  local {self.vars['v2']} = {self._to_hex(self.key)};\n"
+            f"  local {self.vars['v3']} = {junk_table};\n"
+            f"  local {self.vars['v4']} = \"{byte_payload}\";\n"
+            f"  local {self.vars['v5']} = getfenv or function() return _ENV end;\n"
+            f"  local {self.vars['v6']} = string.char;\n"
+            f"  local {self.vars['v7']} = string.byte;\n"
+            f"  local {self.vars['v8']} = bit32 and bit32.bxor or function(a,b) return a ~ b end;\n"
+            f"  local {self.vars['v9']} = '';\n"
+            f"  \n"
+            f"  -- Имитация сложного цикла MoonSec\n"
+            f"  for i = {self._to_hex(1)}, #{self.vars['v4']} do\n"
+            f"    local {self.vars['v10']} = {self.vars['v8']}({self.vars['v7']}({self.vars['v4']}, i), {self.vars['v2']});\n"
+            f"    {self.vars['v9']} = {self.vars['v9']} .. {self.vars['v6']}({self.vars['v10']});\n"
+            f"    if i % 400 == 0 then task.wait() end\n"
+            f"  end\n"
+            f"  \n"
+            f"  local {self.vars['v11']}, {self.vars['v12']} = loadstring({self.vars['v9']});\n"
+            f"  if not {self.vars['v11']} then return warn('Integrity Error 0x'..{self._to_hex(random.randint(100,999))}) end;\n"
+            f"  return task.spawn({self.vars['v11']}, ...);\n"
+            f"end)();"
         )
         
-        # Финальная упаковка в одну строку для сложности чтения
-        return " ".join(vm_code.split())
+        return vm_code
 
-# --- ОБРАБОТЧИКИ БОТА ---
-
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message):
-    await message.answer(
-        "👋 **Привет! Я твой партнер по защите Roblox-скриптов.**\n\n"
-        "Отправь мне файл `.lua`, и я превращу его в защищенную кашу, которую "
-        "будет крайне сложно прочитать человеку, но которую легко исполнит Roblox.\n\n"
-        "**Методы защиты:**\n"
-        "• Динамический Junk Code\n"
-        "• Bit32 XOR Encryption\n"
-        "• Script Exhaustion Protection\n"
-        "• Variable Obfuscation"
-    )
-
+# --- HANDLERS ---
 @dp.message(F.document)
 async def handle_document(message: types.Message):
     if not message.document.file_name.endswith(('.lua', '.txt')):
-        await message.answer("❌ Мне нужен файл .lua или .txt")
-        return
+        return await message.answer("❌ Формат не поддерживается.")
 
-    status = await message.answer("🛡 Применяю гипер-защиту Meloten...")
+    wait = await message.answer("🌑 Создаю теневую копию (Moon-VM style)...")
     
     try:
-        file_in_memory = io.BytesIO()
-        await bot.download(message.document, destination=file_in_memory)
-        source_code = file_in_memory.getvalue().decode('utf-8', errors='ignore')
+        file_in = io.BytesIO()
+        await bot.download(message.document, destination=file_in)
+        source = file_in.getvalue().decode('utf-8', errors='ignore')
 
-        obfuscator = MelotenHyperVM(source_code)
-        protected_code = obfuscator.build()
+        obfuscator = MelotenMoonVM(source)
+        protected = obfuscator.build()
 
-        output = BufferedInputFile(protected_code.encode('utf-8'), filename=f"Protected_{message.document.file_name}")
-        await message.answer_document(output, caption="✅ Код успешно обфусцирован для Roblox!")
-        await status.delete()
-
+        output = BufferedInputFile(protected.encode('utf-8'), filename=f"MoonSec_{message.document.file_name}")
+        await message.answer_document(output, caption="💎 Твой скрипт теперь выглядит как MoonSec V3!")
+        await wait.delete()
     except Exception as e:
-        await message.answer(f"⚠️ Ошибка: {str(e)}")
+        await message.answer(f"Ошибка: {e}")
 
 async def main():
     await dp.start_polling(bot)
