@@ -8,6 +8,7 @@ from aiogram.filters import Command
 from aiogram.types import BufferedInputFile
 
 # --- КОНФИГУРАЦИЯ ---
+# Вставь сюда свой токен заново, чтобы исключить ошибку
 API_TOKEN = '8525811167:AAGkZVD46nu_0XbIJnGC-P3QKUZzYw8aMgU'
 
 logging.basicConfig(level=logging.INFO)
@@ -18,76 +19,81 @@ class MelotenMoonVM:
     def __init__(self, source):
         self.source = source
         self.key = random.randint(100, 255)
-        self.seed = random.randint(1000, 9999)
-        # Имена переменных в стиле "MoonSec" (случайные буквы)
-        self.vars = {f"v{i}": self._rand_str(5) for i in range(20)}
+        # Генерация имен как в MoonSec (смесь букв)
+        self.vars = {f"v{i}": self._rand_str(6) for i in range(25)}
 
     def _rand_str(self, length):
         return "".join(random.choices(string.ascii_letters, k=length))
 
-    def _to_hex(self, n):
-        return f"0x{n:02x}"
+    def _to_hex_esc(self, s):
+        # Превращаем строку в \xAF\xBC... (Hex-escape)
+        return "".join(f"\\{ord(c) ^ self.key}" for c in s)
 
     def build(self):
-        # 1. Шифруем исходник в "нечитаемую" строку байтов
-        encrypted_bytes = [(ord(c) ^ self.key) for c in self.source]
-        byte_payload = "".join([f"\\{b}" for b in encrypted_bytes])
+        # 1. Зашифрованный контент
+        payload = self._to_hex_esc(self.source)
         
-        # 2. Генерируем "мусорную" таблицу для имитации MoonSec
-        junk_table = "{" + ",".join([self._to_hex(random.randint(0, 255)) for _ in range(10)]) + "}"
-        
-        # 3. Основной шаблон VM (стилизован под MoonSec)
-        # Мы используем вложенные функции и hex-числа
-        vm_code = (
-            f"--[[ Protected by Meloten Moon-VM v7.0 ]]\n"
-            f"local {self.vars['v1']} = (function(l, ...)\n"
-            f"  local {self.vars['v2']} = {self._to_hex(self.key)};\n"
-            f"  local {self.vars['v3']} = {junk_table};\n"
-            f"  local {self.vars['v4']} = \"{byte_payload}\";\n"
-            f"  local {self.vars['v5']} = getfenv or function() return _ENV end;\n"
-            f"  local {self.vars['v6']} = string.char;\n"
-            f"  local {self.vars['v7']} = string.byte;\n"
-            f"  local {self.vars['v8']} = bit32 and bit32.bxor or function(a,b) return a ~ b end;\n"
-            f"  local {self.vars['v9']} = '';\n"
+        # 2. Имитация структуры MoonSec
+        # Используем hex для чисел и сложные вложенные функции
+        vm_logic = (
+            f"--[[ Protected with MoonSec V3 (Meloten Mod) ]]\n"
+            f"return (function({self.vars['v1']}, ...)\n"
+            f"  local {self.vars['v2']} = {hex(self.key)};\n"
+            f"  local {self.vars['v3']} = \"{payload}\";\n"
+            f"  local {self.vars['v4']} = string.char;\n"
+            f"  local {self.vars['v5']} = bit32 or {{bxor = function(a,b) return a ~ b end}};\n"
+            f"  local {self.vars['v6']} = {{}};\n"
+            f"  local {self.vars['v7']} = \"\";\n"
             f"  \n"
-            f"  -- Имитация сложного цикла MoonSec\n"
-            f"  for i = {self._to_hex(1)}, #{self.vars['v4']} do\n"
-            f"    local {self.vars['v10']} = {self.vars['v8']}({self.vars['v7']}({self.vars['v4']}, i), {self.vars['v2']});\n"
-            f"    {self.vars['v9']} = {self.vars['v9']} .. {self.vars['v6']}({self.vars['v10']});\n"
-            f"    if i % 400 == 0 then task.wait() end\n"
+            f"  local function {self.vars['v8']}({self.vars['v9']})\n"
+            f"    return {self.vars['v4']}({self.vars['v5']}.bxor({self.vars['v9']}, {self.vars['v2']}))\n"
             f"  end\n"
             f"  \n"
-            f"  local {self.vars['v11']}, {self.vars['v12']} = loadstring({self.vars['v9']});\n"
-            f"  if not {self.vars['v11']} then return warn('Integrity Error 0x'..{self._to_hex(random.randint(100,999))}) end;\n"
-            f"  return task.spawn({self.vars['v11']}, ...);\n"
-            f"end)();"
+            f"  for {self.vars['v10']} in {self.vars['v3']}:gmatch(\"\\\\(%d+)\") do\n"
+            f"    {self.vars['v7']} = {self.vars['v7']} .. {self.vars['v8']}(tonumber({self.vars['v10']}))\n"
+            f"  end\n"
+            f"  \n"
+            f"  local {self.vars['v11']}, {self.vars['v12']} = loadstring({self.vars['v7']});\n"
+            f"  if {self.vars['v11']} then\n"
+            f"    return task.spawn({self.vars['v11']}, ...);\n"
+            f"  else\n"
+            f"    warn(\"[MoonSec Error]: 0x\" .. {self.vars['v2']});\n"
+            f"  end\n"
+            f"end)(getfenv());"
         )
-        
-        return vm_code
+        # Удаляем лишние переносы, чтобы сделать "стену кода"
+        return vm_logic.replace("\n  ", " ")
 
-# --- HANDLERS ---
+# --- ОБРАБОТЧИКИ ---
+
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message):
+    await message.answer("🌑 **Meloten Moon-VM v7.0 ONLINE**\nОтправь .lua файл для глубокой обфускации.")
+
 @dp.message(F.document)
 async def handle_document(message: types.Message):
     if not message.document.file_name.endswith(('.lua', '.txt')):
-        return await message.answer("❌ Формат не поддерживается.")
+        return
 
-    wait = await message.answer("🌑 Создаю теневую копию (Moon-VM style)...")
-    
     try:
-        file_in = io.BytesIO()
-        await bot.download(message.document, destination=file_in)
-        source = file_in.getvalue().decode('utf-8', errors='ignore')
+        # Скачивание файла
+        file_content = await bot.download(message.document)
+        source = file_content.read().decode('utf-8', errors='ignore')
 
-        obfuscator = MelotenMoonVM(source)
-        protected = obfuscator.build()
+        # Обфускация
+        vm = MelotenMoonVM(source)
+        result = vm.build()
 
-        output = BufferedInputFile(protected.encode('utf-8'), filename=f"MoonSec_{message.document.file_name}")
-        await message.answer_document(output, caption="💎 Твой скрипт теперь выглядит как MoonSec V3!")
-        await wait.delete()
+        # Отправка
+        out = BufferedInputFile(result.encode('utf-8'), filename=f"Moon_{message.document.file_name}")
+        await message.answer_document(out, caption="💎 Скрипт успешно защищен.")
     except Exception as e:
-        await message.answer(f"Ошибка: {e}")
+        logging.error(e)
+        await message.answer(f"❌ Ошибка при обработке.")
 
 async def main():
+    # Удаляем вебхуки, чтобы бот точно начал слушать сообщения
+    await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
