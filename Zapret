@@ -2,122 +2,132 @@ import asyncio
 import logging
 import random
 import string
+import base64
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile
 
-# --- КОНФИГУРАЦИЯ ---
 API_TOKEN = '8525811167:AAGGVCLArope5t9P1QeSYf3y_a18ykHdxy8'
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 
-class MelotenUltraVM:
+class MelotenEngine:
     def __init__(self, source):
         self.source = source
-        self.vars = {}
+        self.key = random.randint(50, 250)
+        self.v_names = {}
 
-    def _get_v(self, name):
-        """Создает невидимую переменную"""
-        if name not in self.vars:
-            self.vars[name] = "l" + "".join(random.choice("Il1") for _ in range(random.randint(8, 12)))
-        return self.vars[name]
+    def _v(self, key=None):
+        if key and key in self.v_names: return self.v_names[key]
+        name = "l" + "".join(random.choice("Il1") for _ in range(random.randint(10, 18)))
+        if key: self.v_names[key] = name
+        return name
 
-    def _gen_trash(self):
-        """Генерирует тяжелый математический мусор"""
-        v = self._get_v("junk_math")
-        ops = [f"{v}=({v}*{random.randint(2,10)})%{random.randint(1000,9999)};",
-               f"if {v}>{random.randint(100,500)} then {v}={v}-{random.randint(1,50)} end;",
-               f"for i=1,{random.randint(2,5)} do {v}=({v}+i)%{random.randint(500,1000)} end;"]
-        return "".join(random.sample(ops, random.randint(1, 3)))
+    def _generate_massive_junk(self):
+        """Генерирует огромные блоки бесполезного кода"""
+        junk = ""
+        for _ in range(random.randint(5, 10)):
+            v1, v2 = self._v(), self._v()
+            junk += f"local {v1} = function(...) local {v2} = {{...}}; return #{v2} + {random.randint(1,100)} end; "
+            junk += f"if {random.randint(1,100)} == 0 then {v1}({random.randint(1,10)}) end; "
+        return junk
+
+    def _generate_math_noise(self, var_name):
+        """Генерирует MoonSec-подобную математику"""
+        ops = ['+', '-', '*', '%']
+        noise = ""
+        for _ in range(3):
+            noise += f"{var_name} = ({var_name} {random.choice(ops)} {random.randint(100, 5000)}) % {random.randint(10000, 60000)}; "
+        return noise
 
     def build(self):
-        key = random.randint(50, 200)
-        # Шифруем код в таблицу байт со смещением
-        bytecode = [str((ord(c) ^ key) + 2) for c in self.source]
+        # Превращаем исходник в байт-код с солью
+        encoded = []
+        salt = random.randint(1, 10)
+        for char in self.source:
+            val = (ord(char) ^ self.key) + salt
+            encoded.append(str(val))
         
-        # Переменные логики
-        v_vm = self._get_v("vm")
-        v_data = self._get_v("data")
-        v_res = self._get_v("res")
-        v_step = self._get_v("step")
-        v_math = self._get_v("junk_math")
-        v_char = self._get_v("char_func")
-        v_load = self._get_v("load_func")
+        # Переменные ядра
+        v_main = self._v("main")
+        v_byte_table = self._v("bytes")
+        v_pointer = self._v("ptr")
+        v_state = self._v("state")
+        v_output = self._v("out")
+        v_math_seed = self._v("seed")
+        v_env = self._v("env")
         
-        # Заголовок
-        header = f"--[[This file was protected with Meloten Obfuscator V4]]\n"
-        header += f"local {v_char}=string.char;local {v_load}=loadstring or load;"
+        # Сборка "Огромного кода"
+        lua = f"--[[ Protected by Meloten Obfuscator V4 (ULTRA EDITION) ]]\n"
+        lua += f"local {v_env} = {{ {self._generate_massive_junk()} }}; "
+        lua += f"local {v_byte_table} = {{ {','.join(encoded)} }}; "
+        lua += f"local {v_output} = {{}}; "
+        lua += f"local {v_pointer} = 1; "
+        lua += f"local {v_math_seed} = {random.randint(1000, 9000)}; "
+        lua += f"local {v_state} = {random.randint(1, 5)};\n"
         
-        # Начало структуры
-        vm_code = f"local {v_data} = {{{','.join(bytecode)}}};"
-        vm_code += f"local {v_math} = {random.randint(1000, 5000)};"
-        vm_code += f"local {v_res} = {{}};"
+        # Главный Dispatcher (VM)
+        lua += f"while {v_state} ~= 0 do "
+        lua += self._generate_math_noise(v_math_seed)
         
-        # Основной цикл с мусором и разрывом потока (Control Flow)
-        vm_code += f"for {v_step}=1, #{v_data} do "
-        vm_code += self._gen_trash() # Вставляем мусор в начало цикла
+        # Состояние 1: Дешифровка
+        lua += f"if {v_state} == 1 then "
+        lua += f"for i = 1, #{v_byte_table} do "
+        lua += f"local b = {v_byte_table}[i]; "
+        lua += f"b = (b - {salt}) % 256; "
+        lua += f"b = (bit32 and bit32.bxor(b, {self.key}) or (b ~ {self.key})); "
+        lua += f"table.insert({v_output}, string.char(b)); "
+        lua += f"if i % {random.randint(50, 100)} == 0 then {v_math_seed} = {v_math_seed} + 1 end; "
+        lua += "end; "
+        lua += f"{v_state} = 2; "
         
-        # Логика дешифровки "спрятана" внутри сложного условия
-        vm_code += f"if {v_math} > 0 then "
-        vm_code += f"local b = {v_data}[{v_step}];"
-        vm_code += self._gen_trash() # Мусор между строками
-        vm_code += f"b = (b - 2) ~ {key};" # XOR операция
-        vm_code += f"table.insert({v_res}, {v_char}(b));"
-        vm_code += f"end;"
+        # Состояние 2: Проверка целостности (Муляж)
+        lua += f"elseif {v_state} == 2 then "
+        lua += self._generate_massive_junk()
+        lua += f"if #{v_output} > 0 then {v_state} = 3 else {v_state} = 0 end; "
         
-        # Дополнительный блок мусора в конце цикла
-        vm_code += f"if {v_step} % 5 == 0 then {v_math} = ({v_math} + 1) % 10000; {self._gen_trash()} end;"
-        vm_code += "end;"
+        # Состояние 3: Выполнение
+        lua += f"elseif {v_state} == 3 then "
+        lua += f"local {self._v()} = table.concat({v_output}); "
+        lua += f"local {self._v()} = (loadstring or load)({self._v()}); "
+        lua += f"if {self._v()} then {v_state} = 0; return {self._v()}(...) end; "
         
-        # Выполнение результата
-        vm_code += f"local {self._get_v('f')} = {v_load}(table.concat({v_res}));"
-        vm_code += f"if {self._get_v('f')} then {self._get_v('f')}(...) end;"
-
-        # Упаковка в одну очень длинную запутаную строку
-        return header + vm_code.replace("\n", " ")
+        # Состояние 4-5: Мусорные переходы
+        lua += f"else {v_state} = 1; end; "
+        lua += "end " # Конец while
+        
+        return lua
 
 @dp.message(Command("start"))
 async def start(message: types.Message):
-    await message.answer(
-        "🚀 **Meloten Obfuscator V4 Online**\n\n"
-        "Отправь мне `.lua` файл, и я превращу его в защищенную виртуальную машину с тоннами мусорного кода.",
-        parse_mode="Markdown"
-    )
+    await message.answer("🚀 **Meloten Ultra VM** запущена. Отправь .lua файл для максимальной защиты.")
 
 @dp.message(F.document)
 async def handle_file(message: types.Message):
-    if not message.document.file_name.endswith(('.lua', '.txt')):
-        await message.answer("❌ Ошибка: нужен файл .lua")
-        return
-
-    status = await message.answer("🧪 **Инициализация Meloten VM...**")
+    if not message.document.file_name.endswith(('.lua', '.txt')): return
+    
+    proc = await message.answer("🛠 **Генерация виртуальной среды...**")
     
     try:
         file_info = await bot.get_file(message.document.file_id)
-        file_content = await bot.download_file(file_info.file_path)
-        source = file_content.read().decode('utf-8', errors='ignore')
+        content = await bot.download_file(file_info.file_path)
+        source = content.read().decode('utf-8', errors='ignore')
+        
+        # Увеличиваем нагрузку: прогоняем через обфускатор 
+        engine = MelotenEngine(source)
+        result = engine.build()
+        
+        # Добавляем в конец еще 500 строк мусорных комментариев для веса файла
+        junk_comments = "\n" + "\n".join([f"-- {engine._v()}" for _ in range(200)])
+        final_data = result + junk_comments
 
-        await status.edit_text("🧬 **Генерация мусорных байт-кодов...**")
-        
-        # Обфускация
-        obf = MelotenUltraVM(source)
-        final_code = obf.build()
-
-        output = BufferedInputFile(
-            final_code.encode('utf-8'), 
-            filename=f"Meloten_{message.document.file_name}"
-        )
-        
-        await message.answer_document(output, caption="✅ **Защита Meloten V4 успешно применена!**")
-        await status.delete()
-        
+        output = BufferedInputFile(final_data.encode('utf-8'), filename=f"Meloten_ULTRA_{message.document.file_name}")
+        await message.answer_document(output, caption="💎 **Meloten V4 PRO: Защита завершена**")
+        await proc.delete()
     except Exception as e:
-        await message.answer(f"❌ Критическая ошибка: {e}")
+        await message.answer(f"❌ Ошибка: {e}")
 
 if __name__ == '__main__':
-    try:
-        asyncio.run(dp.start_polling(bot))
-    except (KeyboardInterrupt, SystemExit):
-        pass
+    asyncio.run(dp.start_polling(bot))
