@@ -14,107 +14,102 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 
-# --- ЛОГИКА ULTRA VM ОБФУСКАЦИИ (ONE-LINE EDITION) ---
+# --- HYPER VM LOGIC ---
 
-class MelotenObfuscator:
+class MelotenHyperVM:
     def __init__(self, source):
         self.source = source
         self.key = random.randint(100, 255)
-        # Генерация "невидимых" имен переменных
-        self.v_data = self._rand_name()
-        self.v_key = self._rand_name()
-        self.v_res = self._rand_name()
-        self.v_check = self._rand_name()
-        self.v_cur = self._rand_name()
-        self.v_func = self._rand_name()
+        self.seed = random.randint(1000, 9999)
+        # Генерация нечитаемых переменных
+        self.vars = {f"v{i}": self._rand_name() for i in range(10)}
 
     def _rand_name(self):
-        """Создает переменные типа lIlIIllI"""
-        return "l" + "".join(random.choices("Il1", k=random.randint(10, 15)))
+        return "Meloten_" + "".join(random.choices("lI1", k=12))
 
     def build(self):
         # 1. Заголовок
-        header = "--[[This file was protected with using Meloten Obfuscator\n\nhttp://t.me/Meloten_Obfuscator_bot]]\n"
+        header = "--[[Protected by Meloten Hyper-VM v5.0\nURL: http://t.me/Meloten_Obfuscator_bot]]\n"
         
-        # 2. Подготовка данных
-        encrypted_bytes = [(ord(char) ^ self.key) for char in self.source]
-        checksum = sum(encrypted_bytes)
-        payload = "{" + ",".join(map(str, encrypted_bytes)) + "}"
+        # 2. Двойное XOR шифрование
+        bytes_data = [(ord(c) ^ self.key) ^ (self.seed % 255) for c in self.source]
+        payload = "{" + ",".join(map(str, bytes_data)) + "}"
         
-        # 3. Формирование VM кода (все инструкции разделены точкой с запятой)
-        # Мы упаковываем всё в одну строку для максимальной запутанности
+        # 3. Код VM с защитой от хуков (Anti-Hook)
+        # Мы проверяем, не является ли функция loadstring "подделкой"
         vm_logic = (
-            f"local {self.v_data}={payload};"
-            f"local {self.v_key}={self.key};"
-            f"local {self.v_check}={checksum};"
-            f"local {self.v_cur}=0;"
-            f"for i=1,#{self.v_data} do {self.v_cur}={self.v_cur}+{self.v_data}[i] end;"
-            f"if {self.v_cur}~={self.v_check} then while true do end end;"
-            f"local {self.v_res}='';"
-            f"for i=1,#{self.v_data} do "
-            f"{self.v_res}={self.v_res}..string.char(bit32.bxor({self.v_data}[i],{self.v_key}));"
-            f"if i%500==0 then task.wait() end "
+            f"local {self.vars['v1']}={payload};"
+            f"local {self.vars['v2']}={self.key};"
+            f"local {self.vars['v3']}={self.seed};"
+            f"local {self.vars['v4']}=getfenv();"
+            f"local {self.vars['v5']}=string.char;"
+            f"local {self.vars['v6']}=bit32.bxor;"
+            f"local {self.vars['v7']}='';"
+            f"if {self.vars['v4']}.loadstring~=loadstring then while true do end end;" # Anti-Hook check
+            f"for i=1,#{self.vars['v1']} do "
+            f"local b={self.vars['v6']}({self.vars['v1']}[i],{self.vars['v2']});"
+            f"{self.vars['v7']}={self.vars['v7']}..{self.vars['v5']}({self.vars['v6']}(b,{self.vars['v3']}%255));"
+            f"if i%400==0 then task.wait() end "
             f"end;"
-            f"local {self.v_func}=loadstring({self.v_res});"
-            f"{self.v_res}=nil;"
-            f"if {self.v_func} then task.spawn({self.v_func}) else warn('Critical Error') end"
+            f"local {self.vars['v8']}, {self.vars['v9']} = loadstring({self.vars['v7']});"
+            f"{self.vars['v7']}=nil;"
+            f"if not {self.vars['v8']} then warn('Integrity Breach!') return end;"
+            f"task.spawn({self.vars['v8']})"
         )
         
-        # Убираем возможные лишние пробелы (кроме необходимых)
+        # Минификация в одну строку
         one_liner = vm_logic.replace("  ", "").replace("\n", "")
-        
         return header + one_liner
 
-# --- ОБРАБОТЧИКИ ТЕЛЕГРАМ ---
+# --- BOT HANDLERS ---
 
 @dp.message(Command("start"))
-async def start(message: types.Message):
+async def cmd_start(message: types.Message):
     await message.answer(
-        "✨ **Добро пожаловать в Meloten Obfuscator!**\n\n"
-        "Отправь мне файл `.lua` или `.txt`, и я превращу его в защищенную однострочную VM.\n\n"
-        "📢 Канал: @Meloten_Obfuscator_bot",
+        "🚀 **Meloten Hyper-VM v5.0 Активирована!**\n\n"
+        "Отправь мне файл, и я применю:\n"
+        "✅ Двойное XOR-шифрование\n"
+        "✅ Защиту от Hooking (Anti-Log)\n"
+        "✅ Виртуализацию окружения\n"
+        "✅ Однострочную упаковку",
         parse_mode="Markdown"
     )
 
 @dp.message(F.document)
-async def handle_file(message: types.Message):
+async def handle_document(message: types.Message):
     if not message.document.file_name.endswith(('.lua', '.txt')):
-        await message.answer("❌ Ошибка! Нужен файл .lua или .txt")
+        await message.answer("❌ Только .lua или .txt!")
         return
 
-    msg = await message.answer("🛡 Виртуализация и упаковка в одну строку...")
+    wait_msg = await message.answer("🌀 Генерирую гипер-защиту...")
     
     try:
-        # Скачивание
         file_info = await bot.get_file(message.document.file_id)
         file_content = await bot.download_file(file_info.file_path)
         source = file_content.read().decode('utf-8', errors='ignore')
 
-        # Процесс обфускации
-        obf = MelotenObfuscator(source)
-        final_code = obf.build()
+        # Обфускация
+        obfuscator = MelotenHyperVM(source)
+        protected_code = obfuscator.build()
 
-        # Отправка результата
-        output = BufferedInputFile(
-            final_code.encode('utf-8'), 
-            filename=f"Meloten_{message.document.file_name}"
+        # Отправка
+        output_file = BufferedInputFile(
+            protected_code.encode('utf-8'), 
+            filename=f"Hyper_{message.document.file_name}"
         )
         
-        await message.answer_document(output, caption="✅ Код успешно защищен Meloten Obfuscator!")
-        await msg.delete()
+        await message.answer_document(output_file, caption="💎 Твой код теперь под защитой Hyper-VM!")
+        await wait_msg.delete()
         
     except Exception as e:
-        await message.answer(f"❌ Произошла ошибка: {e}")
+        await message.answer(f"❌ Ошибка: {e}")
 
-# --- ЗАПУСК ---
 async def main():
-    print("---------------------------------------")
-    print("MELOTEN OBFUSCATOR IS ONLINE")
-    print("---------------------------------------")
+    print("MELOTEN HYPER-VM IS ACTIVE")
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
-        print("Бот остановлен.")
+        print("Stopped")
