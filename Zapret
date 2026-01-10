@@ -1,7 +1,6 @@
 import asyncio
 import logging
 import random
-import string
 import io
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -14,102 +13,109 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 
-# --- HYPER VM LOGIC ---
-
 class MelotenHyperVM:
     def __init__(self, source):
         self.source = source
-        self.key = random.randint(100, 255)
-        self.seed = random.randint(1000, 9999)
-        # Генерация нечитаемых переменных
-        self.vars = {f"v{i}": self._rand_name() for i in range(10)}
+        self.key = random.randint(50, 200)
+        self.seed = random.randint(1000, 5000)
+        # Имена переменных в стиле "невидимок"
+        self.vars = {f"v{i}": self._rand_name() for i in range(20)}
 
     def _rand_name(self):
-        return "Meloten_" + "".join(random.choices("lI1", k=12))
+        """Создает путаные имена, которые выглядят почти одинаково."""
+        chars = "Il1"
+        return "Meloten_" + "".join(random.choices(chars, k=random.randint(10, 15)))
+
+    def _get_math_junk(self, target_num):
+        """Превращает число в математическое выражение."""
+        offset = random.randint(1, 50)
+        return f"({target_num + offset} - {offset})"
+
+    def _generate_complex_junk(self):
+        """Генерирует тяжелый мусорный код."""
+        junk_parts = [
+            f"local {self._rand_name()} = function() for i=1,10 do end return {random.randint(1,100)} end;",
+            f"local {self._rand_name()} = {{[{random.randint(1,500)}] = '{self._rand_name()}'}};",
+            f"if {random.randint(1,10)} > 20 then print('{self._rand_name()}') end;",
+            f"local {self._rand_name()} = math.sin({random.randint(1,100)}) + math.cos({random.randint(1,100)});"
+        ]
+        return "".join(random.sample(junk_parts, k=2))
 
     def build(self):
-        # 1. Заголовок
-        header = "--[[Protected by Meloten Hyper-VM v5.0\nURL: http://t.me/Meloten_Obfuscator_bot]]\n"
-        
-        # 2. Двойное XOR шифрование
+        # Превращаем исходный код в байты
         bytes_data = [(ord(c) ^ self.key) ^ (self.seed % 255) for c in self.source]
         payload = "{" + ",".join(map(str, bytes_data)) + "}"
         
-        # 3. Код VM с защитой от хуков (Anti-Hook)
-        # Мы проверяем, не является ли функция loadstring "подделкой"
-        vm_logic = (
-            f"local {self.vars['v1']}={payload};"
-            f"local {self.vars['v2']}={self.key};"
-            f"local {self.vars['v3']}={self.seed};"
-            f"local {self.vars['v4']}=getfenv();"
-            f"local {self.vars['v5']}=string.char;"
-            f"local {self.vars['v6']}=bit32.bxor;"
-            f"local {self.vars['v7']}='';"
-            f"if {self.vars['v4']}.loadstring~=loadstring then while true do end end;" # Anti-Hook check
-            f"for i=1,#{self.vars['v1']} do "
-            f"local b={self.vars['v6']}({self.vars['v1']}[i],{self.vars['v2']});"
-            f"{self.vars['v7']}={self.vars['v7']}..{self.vars['v5']}({self.vars['v6']}(b,{self.vars['v3']}%255));"
-            f"if i%400==0 then task.wait() end "
-            f"end;"
-            f"local {self.vars['v8']}, {self.vars['v9']} = loadstring({self.vars['v7']});"
-            f"{self.vars['v7']}=nil;"
-            f"if not {self.vars['v8']} then warn('Integrity Breach!') return end;"
-            f"task.spawn({self.vars['v8']})"
+        # Основная логика обфускации
+        # Мы локализуем функции для скрытности и скорости
+        vm_code = (
+            f"--[[ Meloten Hyper-VM Roblox Edition ]]\n"
+            f"local {self.vars['v1']} = {payload}; "
+            f"{self._generate_complex_junk()} "
+            f"local {self.vars['v2']} = {self._get_math_junk(self.key)}; "
+            f"local {self.vars['v3']} = {self._get_math_junk(self.seed)}; "
+            f"local {self.vars['v4']} = string.char; "
+            f"local {self.vars['v5']} = bit32.bxor; "
+            f"local {self.vars['v6']} = ''; "
+            f"{self._generate_complex_junk()} "
+            f"for {self.vars['v7']} = 1, #{self.vars['v1']} do "
+            f"  local {self.vars['v8']} = {self.vars['v5']}({self.vars['v1']}[{self.vars['v7']}], {self.vars['v2']}); "
+            f"  {self.vars['v6']} = {self.vars['v6']} .. {self.vars['v4']}({self.vars['v5']}({self.vars['v8']}, {self.vars['v3']} % 255)); "
+            f"  if {self.vars['v7']} % 300 == 0 then task.wait() end " # Чтобы Roblox не лагал
+            f"end; "
+            f"{self._generate_complex_junk()} "
+            f"local {self.vars['v9']}, {self.vars['v10']} = loadstring({self.vars['v6']}); "
+            f"if not {self.vars['v9']} then "
+            f"  warn('Critical Security Breach Detected!') "
+            f"else "
+            f"  local {self.vars['v11']} = task.spawn({self.vars['v9']}); "
+            f"end; "
+            f"{self.vars['v6']} = nil; " # Очистка памяти
         )
         
-        # Минификация в одну строку
-        one_liner = vm_logic.replace("  ", "").replace("\n", "")
-        return header + one_liner
+        # Финальная упаковка в одну строку для сложности чтения
+        return " ".join(vm_code.split())
 
-# --- BOT HANDLERS ---
+# --- ОБРАБОТЧИКИ БОТА ---
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     await message.answer(
-        "🚀 **Meloten Hyper-VM v5.0 Активирована!**\n\n"
-        "Отправь мне файл, и я применю:\n"
-        "✅ Двойное XOR-шифрование\n"
-        "✅ Защиту от Hooking (Anti-Log)\n"
-        "✅ Виртуализацию окружения\n"
-        "✅ Однострочную упаковку",
-        parse_mode="Markdown"
+        "👋 **Привет! Я твой партнер по защите Roblox-скриптов.**\n\n"
+        "Отправь мне файл `.lua`, и я превращу его в защищенную кашу, которую "
+        "будет крайне сложно прочитать человеку, но которую легко исполнит Roblox.\n\n"
+        "**Методы защиты:**\n"
+        "• Динамический Junk Code\n"
+        "• Bit32 XOR Encryption\n"
+        "• Script Exhaustion Protection\n"
+        "• Variable Obfuscation"
     )
 
 @dp.message(F.document)
 async def handle_document(message: types.Message):
     if not message.document.file_name.endswith(('.lua', '.txt')):
-        await message.answer("❌ Только .lua или .txt!")
+        await message.answer("❌ Мне нужен файл .lua или .txt")
         return
 
-    wait_msg = await message.answer("🌀 Генерирую гипер-защиту...")
+    status = await message.answer("🛡 Применяю гипер-защиту Meloten...")
     
     try:
-        file_info = await bot.get_file(message.document.file_id)
-        file_content = await bot.download_file(file_info.file_path)
-        source = file_content.read().decode('utf-8', errors='ignore')
+        file_in_memory = io.BytesIO()
+        await bot.download(message.document, destination=file_in_memory)
+        source_code = file_in_memory.getvalue().decode('utf-8', errors='ignore')
 
-        # Обфускация
-        obfuscator = MelotenHyperVM(source)
+        obfuscator = MelotenHyperVM(source_code)
         protected_code = obfuscator.build()
 
-        # Отправка
-        output_file = BufferedInputFile(
-            protected_code.encode('utf-8'), 
-            filename=f"Hyper_{message.document.file_name}"
-        )
-        
-        await message.answer_document(output_file, caption="💎 Твой код теперь под защитой Hyper-VM!")
-        await wait_msg.delete()
-        
+        output = BufferedInputFile(protected_code.encode('utf-8'), filename=f"Protected_{message.document.file_name}")
+        await message.answer_document(output, caption="✅ Код успешно обфусцирован для Roblox!")
+        await status.delete()
+
     except Exception as e:
-        await message.answer(f"❌ Ошибка: {e}")
+        await message.answer(f"⚠️ Ошибка: {str(e)}")
 
 async def main():
-    print("MELOTEN HYPER-VM IS ACTIVE")
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        print("Stopped")
+    asyncio.run(main())
