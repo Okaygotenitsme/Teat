@@ -3,7 +3,6 @@ import logging
 import random
 import string
 import io
-# Используем только современные импорты aiogram 3.x
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile
@@ -15,133 +14,107 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 
-# --- СЕРДЦЕ ОБФУСКАТОРА (ГЕНЕРАЦИЯ VM) ---
+# --- ЛОГИКА ULTRA VM ОБФУСКАЦИИ (ONE-LINE EDITION) ---
 
-class ObfuscatorVM:
-    def __init__(self, source_code):
-        self.source = source_code
-        self.key = random.randint(50, 255)
-        self.vm_name = "".join(random.choices(string.ascii_letters, k=8))
+class MelotenObfuscator:
+    def __init__(self, source):
+        self.source = source
+        self.key = random.randint(100, 255)
+        # Генерация "невидимых" имен переменных
+        self.v_data = self._rand_name()
+        self.v_key = self._rand_name()
+        self.v_res = self._rand_name()
+        self.v_check = self._rand_name()
+        self.v_cur = self._rand_name()
+        self.v_func = self._rand_name()
+
+    def _rand_name(self):
+        """Создает переменные типа lIlIIllI"""
+        return "l" + "".join(random.choices("Il1", k=random.randint(10, 15)))
+
+    def build(self):
+        # 1. Заголовок
+        header = "--[[This file was protected with using Meloten Obfuscator\n\nhttp://t.me/Meloten_Obfuscator_bot]]\n"
         
-    def generate_junk(self):
-        """Создает огромные блоки бесполезного кода"""
-        junk = ""
-        for _ in range(random.randint(5, 10)):
-            var = "".join(random.choices(string.ascii_letters, k=6))
-            val = random.randint(1000, 999999)
-            op = random.choice(['+', '-', '*', '/'])
-            junk += f"local {var} = ({val} {op} {random.randint(1, 100)}) + math.pi;\n"
-        return junk
-
-    def protect(self):
-        """Главный процесс виртуализации"""
-        # Превращаем код в байт-массив с XOR шифрованием
-        encrypted_bytes = [ord(c) ^ self.key for c in self.source]
+        # 2. Подготовка данных
+        encrypted_bytes = [(ord(char) ^ self.key) for char in self.source]
+        checksum = sum(encrypted_bytes)
         payload = "{" + ",".join(map(str, encrypted_bytes)) + "}"
         
-        # Генерация 'Сердца' Виртуальной Машины для Roblox
-        vm_script = f"""--[[ 
-    STRICT VIRTUAL MACHINE PROTECTION v4.0
-    AUTHORIZED ACCESS ONLY
-]]
-
-{self.generate_junk()}
-
-local _PAYLOAD = {payload}
-local _K = {self.key}
-local _S = ""
-
--- Виртуальный процессор (Интерпретатор)
-local function {self.vm_name}(_d, _k)
-    local _decoded = {{}}
-    {self.generate_junk()}
-    for _i = 1, #_d do
-        local _byte = _d[_i]
-        -- Динамическая дешифровка через побитовые операции Luau
-        _decoded[_i] = string.char(bit32.bxor(_byte, _k))
+        # 3. Формирование VM кода (все инструкции разделены точкой с запятой)
+        # Мы упаковываем всё в одну строку для максимальной запутанности
+        vm_logic = (
+            f"local {self.v_data}={payload};"
+            f"local {self.v_key}={self.key};"
+            f"local {self.v_check}={checksum};"
+            f"local {self.v_cur}=0;"
+            f"for i=1,#{self.v_data} do {self.v_cur}={self.v_cur}+{self.v_data}[i] end;"
+            f"if {self.v_cur}~={self.v_check} then while true do end end;"
+            f"local {self.v_res}='';"
+            f"for i=1,#{self.v_data} do "
+            f"{self.v_res}={self.v_res}..string.char(bit32.bxor({self.v_data}[i],{self.v_key}));"
+            f"if i%500==0 then task.wait() end "
+            f"end;"
+            f"local {self.v_func}=loadstring({self.v_res});"
+            f"{self.v_res}=nil;"
+            f"if {self.v_func} then task.spawn({self.v_func}) else warn('Critical Error') end"
+        )
         
-        if _i % 100 == 0 then task.wait() end -- Anti-Lag для больших скриптов
-    end
-    
-    local _res = table.concat(_decoded)
-    {self.generate_junk()}
-    
-    local _exec, _err = loadstring(_res)
-    if _exec then
-        return _exec
-    else
-        warn("[VM CRITICAL ERROR]: " .. tostring(_err))
-        return nil
-    end
-end
-
-{self.generate_junk()}
-
-local _ready_to_run = {self.vm_name}(_PAYLOAD, _K)
-if _ready_to_run then
-    task.spawn(_ready_to_run)
-end
-
-{self.generate_junk()}
-"""
-        return vm_script
+        # Убираем возможные лишние пробелы (кроме необходимых)
+        one_liner = vm_logic.replace("  ", "").replace("\n", "")
+        
+        return header + one_liner
 
 # --- ОБРАБОТЧИКИ ТЕЛЕГРАМ ---
 
 @dp.message(Command("start"))
-async def start_cmd(message: types.Message):
-    welcome_text = (
-        "💻 **Мощный VM-Обфускатор для Roblox запущен!**\n\n"
-        "Я превращаю твой код в виртуализированный байт-код, который:\n"
-        "1. Не читается обычными декомпиляторами.\n"
-        "2. Защищен XOR-шифрованием.\n"
-        "3. Содержит Junk-фильтры.\n\n"
-        "Отправь мне файл `.lua` или `.txt`!"
+async def start(message: types.Message):
+    await message.answer(
+        "✨ **Добро пожаловать в Meloten Obfuscator!**\n\n"
+        "Отправь мне файл `.lua` или `.txt`, и я превращу его в защищенную однострочную VM.\n\n"
+        "📢 Канал: @Meloten_Obfuscator_bot",
+        parse_mode="Markdown"
     )
-    await message.answer(welcome_text, parse_mode="Markdown")
 
 @dp.message(F.document)
-async def process_file(message: types.Message):
+async def handle_file(message: types.Message):
     if not message.document.file_name.endswith(('.lua', '.txt')):
-        await message.answer("❌ Ошибка! Я принимаю только файлы .lua или .txt")
+        await message.answer("❌ Ошибка! Нужен файл .lua или .txt")
         return
 
-    status_msg = await message.answer("🛠 Подготовка Виртуальной Машины...")
+    msg = await message.answer("🛡 Виртуализация и упаковка в одну строку...")
     
     try:
         # Скачивание
         file_info = await bot.get_file(message.document.file_id)
         file_content = await bot.download_file(file_info.file_path)
-        source_code = file_content.read().decode('utf-8')
+        source = file_content.read().decode('utf-8', errors='ignore')
 
-        # Обфускация
-        obf = ObfuscatorVM(source_code)
-        protected_code = obf.protect()
+        # Процесс обфускации
+        obf = MelotenObfuscator(source)
+        final_code = obf.build()
 
-        # Отправка
-        await status_msg.edit_text("🛰 Шифрование завершено. Отправляю...")
-        
+        # Отправка результата
         output = BufferedInputFile(
-            protected_code.encode('utf-8'), 
-            filename=f"protected_{message.document.file_name}"
+            final_code.encode('utf-8'), 
+            filename=f"Meloten_{message.document.file_name}"
         )
         
-        await message.answer_document(output, caption="✅ Код успешно виртуализирован!")
+        await message.answer_document(output, caption="✅ Код успешно защищен Meloten Obfuscator!")
+        await msg.delete()
         
     except Exception as e:
-        await message.answer(f"❌ Критическая ошибка: {e}")
+        await message.answer(f"❌ Произошла ошибка: {e}")
 
-# --- ТОЧКА ВХОДА ---
-
+# --- ЗАПУСК ---
 async def main():
-    print("========================================")
-    print("СТАТУС: БОТ АКТИВЕН (aiogram 3.x)")
-    print("ОКРУЖЕНИЕ: IDLE / Python 3.14")
-    print("========================================")
+    print("---------------------------------------")
+    print("MELOTEN OBFUSCATOR IS ONLINE")
+    print("---------------------------------------")
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
-        print("\nБот остановлен.")
+        print("Бот остановлен.")
