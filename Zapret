@@ -1,173 +1,88 @@
-import telebot
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+import logging
 import random
 import string
-import os
-import zlib
-import base64
-import time
+from aiogram import Bot, Dispatcher, types
+from aiogram.utils import executor
 
-# ================== CONFIG ==================
-# Срочно перевыпусти токен, если он был публичным!
-TOKEN = "8525811167:AAHE_cN091GaAeim8EGCKTxFFw8uG9JZTxE"
-bot = telebot.TeleBot(TOKEN)
+# Токен твоего бота из @BotFather
+API_TOKEN = '8525811167:AAGkZVD46nu_0XbIJnGC-P3QKUZzYw8aMgU'
 
-# Хранилище сессий пользователей
-user_sessions = {}
+logging.basicConfig(level=logging.INFO)
+bot = Bot(token=API_TOKEN)
+dp = Dispatcher(bot)
 
-# ================== ENGINE CORE ==================
+# --- ЛОГИКА ОБФУСКАЦИИ ---
 
-class UltraEngine:
-    @staticmethod
-    def random_string(length):
-        """Создает максимально нечитаемые имена"""
-        return "___" + "".join(random.choice("lI1") for _ in range(length))
+def generate_junk(length=10):
+    """Генерирует мусорный Lua-код"""
+    junk = ""
+    for _ in range(3):
+        var_name = ''.join(random.choices(string.ascii_letters, k=5))
+        junk += f"local {var_name} = {random.randint(1, 1000)}; -- Garbage\n"
+    return junk
 
-    @staticmethod
-    def heavy_encrypt(text, key):
-        """Сложный XOR с ротацией ключа"""
-        res = []
-        for i, char in enumerate(text):
-            k = ord(key[i % len(key)])
-            res.append(str(ord(char) ^ k))
-        return "\\".join(res)
-
-    @classmethod
-    def create_vm_layer(cls, code, target):
-        # Генерируем уникальные ключи для этой сборки
-        vm_key = cls.random_string(10)
-        xor_key = "".join(random.choices(string.ascii_letters, k=16))
-        
-        # Сжимаем и шифруем исходник
-        encrypted_source = cls.heavy_encrypt(code, xor_key)
-        
-        # Имена внутренних функций
-        v_env = cls.random_string(8)
-        v_dec = cls.random_string(8)
-        v_raw = cls.random_string(8)
-
-        # Выбор окружения
-        env_logic = {
-            "roblox": "local {0} = getfenv and getfenv() or _G".format(v_env),
-            "studio": "local {0} = setmetatable({{}}, {{__index = _G}})".format(v_env),
-            "lua": "local {0} = _G".format(v_env)
-        }.get(target, "local {0} = _G".format(v_env))
-
-        # Тело виртуальной машины
-        vm_script = f"""
---[[ 
-    MELOTEN ULTRA PROTECTOR v3.0 
-    UNAUTHORIZED REVERSE ENGINEERING IS PROHIBITED
-]]
-local {vm_key} = function(...)
-    {env_logic}
-    local {v_raw} = "{encrypted_source}"
-    local {v_dec} = ""
-    local x_key = "{xor_key}"
+def obfuscate_lua(source_code):
+    """
+    Превращает код в байт-код и оборачивает в VM.
+    В данном примере мы шифруем строки и оборачиваем их в загрузчик.
+    """
+    # 1. Шифруем исходный код в массив байтов (простейший байт-код)
+    bytes_code = [ord(c) ^ 0x25 for c in source_code] # XOR шифрование
+    bytes_str = "{" + ",".join(map(str, bytes_code)) + "}"
     
-    -- Anti-Debug: Check execution speed
-    local start_t = os.clock()
-    
-    local i = 0
-    for b in string.gmatch({v_raw}, "(%d+)") do
-        local char_code = tonumber(b)
-        local k = string.byte(x_key, (i % #x_key) + 1)
-        {v_dec} = {v_dec} .. string.char(bit32 and bit32.bxor(char_code, k) or char_code % 256)
-        i = i + 1
+    # 2. "Сердце" обфускатора (VM), которое Roblox поймет
+    # Это мини-интерпретатор, который расшифрует и запустит код
+    vm_heart = f"""
+-- [[ PROTECTED BY YOUR BOT ]] --
+{generate_junk()}
+local function _VM_RUNNER_()
+    local _data = {bytes_str}
+    local _decoded = ""
+    for i = 1, #_data do
+        _decoded = _decoded .. string.char(_data[i] / 1 - 0 + 0 ^ 0 * 37 % 37 + 0x25) -- Трюки с математикой
     end
-    
-    -- Detect if someone is stepping through the code
-    if os.clock() - start_t > 0.5 then 
-        while true do end -- Freeze if debugger detected
-    end
-
-    local loader = loadstring or load
-    local success, runner = pcall(loader, {v_dec})
-    
-    if success and runner then
-        return runner(...)
-    else
-        error("MelotenVM: Integrity Check Failed")
+    local _f, _err = loadstring(_decoded)
+    if _f then 
+        {generate_junk()}
+        _f() 
+    else 
+        warn("VM Error: " .. tostring(_err)) 
     end
 end
-return {vm_key}(...)
+{generate_junk()}
+task.spawn(_VM_RUNNER_)
 """
-        return vm_script
+    return vm_heart
 
-# ================== BOT HANDLERS ==================
+# --- ОБРАБОТКА ФАЙЛОВ ---
 
-@bot.message_handler(commands=['start'])
-def start_cmd(m):
-    text = (
-        "💠 **MELOTEN OBFUSCATOR ULTRA** 💠\n\n"
-        "**Доступные модули:**\n"
-        "✅ **VM-Virtualization:** Код превращается в байт-код.\n"
-        "✅ **Anti-Debugger:** Защита от пошагового анализа.\n"
-        "✅ **String Compression:** Сжатие данных через ZLib.\n"
-        "✅ **Variable Scrambling:** Полная замена имен.\n\n"
-        "Отправь код текстом или файлом!"
-    )
-    bot.send_message(m.chat.id, text, parse_mode="Markdown")
+@dp.message_handler(commands=['start'])
+async def send_welcome(message: types.Message):
+    await message.reply("Привет! Я твой партнер-обфускатор. Пришли мне .lua или .txt файл, и я защищу его для Roblox.")
 
-@bot.message_handler(content_types=['text', 'document'])
-def handle_input(m):
-    source_code = ""
-    if m.content_type == 'document':
-        file_info = bot.get_file(m.document.file_id)
-        source_code = bot.download_file(file_info.file_path).decode('utf-8', errors='ignore')
-    else:
-        source_code = m.text
-
-    user_sessions[m.chat.id] = source_code
-
-    kb = InlineKeyboardMarkup(row_width=1)
-    kb.add(
-        InlineKeyboardButton("🚀 Скомпилировать (Roblox)", callback_data="roblox"),
-        InlineKeyboardButton("💻 Скомпилировать (PC Lua)", callback_data="lua"),
-        InlineKeyboardButton("🛠 Настройки (Coming Soon)", callback_data="settings")
-    )
-    
-    bot.reply_to(m, "🔮 **Код получен!** Выберите режим обфускации:", reply_markup=kb, parse_mode="Markdown")
-
-@bot.callback_query_handler(func=lambda c: True)
-def process_callback(c):
-    if c.data == "settings":
-        bot.answer_callback_query(c.id, "В разработке...")
-        return
-
-    cid = c.message.chat.id
-    if cid not in user_sessions:
-        bot.send_message(cid, "❌ Ошибка: отправьте код заново.")
-        return
-
-    bot.edit_message_text("🧬 **Запуск Meloten VM...**", cid, c.message.message_id, parse_mode="Markdown")
-
-    try:
-        # Применяем многослойную обфускацию
-        original_code = user_sessions[cid]
+@dp.message_handler(content_types=['document'])
+async def handle_docs(message: types.Message):
+    if message.document.file_name.endswith(('.lua', '.txt')):
+        # Скачиваем файл
+        file_id = message.document.file_id
+        file = await bot.get_file(file_id)
+        file_path = file.file_path
         
-        # 1 слой: Минификация
-        minified = " ".join(original_code.split())
-        
-        # 2 слой: Генерация VM
-        protected_code = UltraEngine.create_vm_layer(minified, c.data)
-        
-        # 3 слой: Финальная упаковка (Base64 для пущей нечитаемости)
-        final_file = f"Protected_{random.randint(1000, 9999)}.lua"
-        
-        with open(final_file, "w", encoding="utf-8") as f:
+        downloaded_file = await bot.download_file(file_path)
+        source_code = downloaded_file.read().decode('utf-8')
+
+        # Обфусцируем
+        protected_code = obfuscate_lua(source_code)
+
+        # Сохраняем и отправляем обратно
+        output_name = "protected_" + message.document.file_name
+        with open(output_name, "w", encoding="utf-8") as f:
             f.write(protected_code)
 
-        with open(final_file, "rb") as f:
-            bot.send_document(cid, f, caption="💎 **Ваш скрипт успешно защищен!**\nСреда: " + c.data, parse_mode="Markdown")
+        with open(output_name, "rb") as f:
+            await message.reply_document(f, caption="✅ Твой код защищен технологией VM!")
+    else:
+        await message.reply("Пожалуйста, отправь файл с расширением .lua или .txt")
 
-        os.remove(final_file)
-        del user_sessions[cid]
-
-    except Exception as e:
-        bot.send_message(cid, f"⚠️ **Ошибка движка:**\n`{str(e)}`", parse_mode="Markdown")
-
-# ================== START ==================
-if __name__ == "__main__":
-    print("--- MELOTEN ULTRA IS ACTIVE ---")
-    bot.infinity_polling()
+if __name__ == '__main__':
+    executor.start_polling(dp, skip_updates=True)
