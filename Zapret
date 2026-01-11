@@ -17,7 +17,7 @@ bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 user_settings = {} # Хранилище настроек (слои)
 
-# --- МОДУЛЬ BEAUTIFIER (Улучшение кода - без изменений) ---
+# --- МОДУЛЬ BEAUTIFIER ---
 class LuaBeautifier:
     def __init__(self, source):
         self.source = source
@@ -46,86 +46,86 @@ class LuaBeautifier:
                 elif 'else' == curr_line_lower: indent += 1
         return "\n".join(formatted)
 
-# --- MELOTEN OBFUSCATOR V9 (SUPERNOVA - POLYMORPHIC VM) ---
+# --- MELOTEN OBFUSCATOR V9 (SUPERNOVA - FIXED) ---
 class MelotenObfuscatorV9:
     def __init__(self, source, layers=1):
         self.source = source
         self.layers = layers
-        # Генерация уникальных имен для текущей сессии (Полиморфизм)
         self.v = self._gen_vars()
         self.key = random.randint(123456, 999999)
 
+    def _safe_name(self):
+        """
+        Генерирует безопасное имя переменной.
+        Первый символ ВСЕГДА буква (чтобы не было ошибки Lua),
+        остальные - смесь букв и цифр.
+        """
+        # Первый символ только буквы (I, l, O)
+        head = random.choice("IlO")
+        # Остальные символы + цифры
+        body_len = random.randint(10, 20)
+        body = "".join(random.choices("Il1O0", k=body_len))
+        return head + body
+
     def _gen_vars(self):
-        """Генерирует словарь с нечитаемыми именами переменных (Il1lIl)"""
-        base = "Il1O0"
         return {
-            'vm_func': self._r(base, 10),
-            'pc': self._r(base, 8),      # Program Counter
-            'stack': self._r(base, 8),   # Virtual Stack
-            'top': self._r(base, 8),     # Stack Pointer
-            'env': self._r(base, 9),     # Environment
-            'instr': self._r(base, 9),   # Instructions
-            'str_lib': self._r(base, 6),
-            'char': self._r(base, 5),
-            'byte': self._r(base, 5),
-            'sub': self._r(base, 5),
-            'concat': self._r(base, 6),
-            'xor_func': self._r(base, 12),
-            'decrypt': self._r(base, 11),
-            'chunk': self._r(base, 7)
+            'vm_func': self._safe_name(),
+            'pc': self._safe_name(),
+            'stack': self._safe_name(),
+            'top': self._safe_name(),
+            'env': self._safe_name(),
+            'instr': self._safe_name(),
+            'str_lib': self._safe_name(),
+            'char': self._safe_name(),
+            'byte': self._safe_name(),
+            'sub': self._safe_name(),
+            'concat': self._safe_name(),
+            'xor_func': self._safe_name(),
+            'decrypt': self._safe_name(),
+            'chunk': self._safe_name()
         }
 
-    def _r(self, chars, length):
-        return "".join(random.choice(chars) for _ in range(length))
-
     def _encrypt_payload(self, code):
-        """Продвинутое шифрование с динамическим ключом и солью"""
-        # 1. Base64
         b64 = base64.b64encode(code.encode()).decode()
-        # 2. Rolling XOR
         res = []
         key_offset = self.key % 255
         for i, char in enumerate(b64):
             byte = ord(char)
-            # Сложная формула смещения
             mix = (i * 1337 + key_offset) % 255
             enc = byte ^ mix
             res.append(enc)
         return res
 
     def _generate_garbage(self):
-        """Генерирует мусорный код, который выглядит как настоящий (Junk Code)"""
-        v = self._r("abcdef", 4)
+        """Мусорный код. Имена переменных тут тоже безопасные."""
+        v = "var_" + "".join(random.choices("abcdef", k=4))
         ops = [
             f"local {v} = (55 * 2) / 4;",
             f"if (2 > 5) then return end;",
-            f"-- Memory Address: 0x{random.randint(10000, 99999):X}",
-            f"local _{self._r('123', 3)} = math.abs(-10);",
+            f"-- Mem: 0x{random.randint(10000, 99999):X}",
+            f"local _{random.randint(10,99)} = math.abs(-10);", # Starts with _ is OK
         ]
         return random.choice(ops)
 
     def build(self):
-        # Если слоев > 1, рекурсивно обфусцируем результат
         current_source = self.source
         for i in range(self.layers):
             current_source = self._build_single_layer(current_source)
         return current_source
 
     def _build_single_layer(self, code):
-        self.v = self._gen_vars() # Регенерируем имена для каждого слоя
+        self.v = self._gen_vars()
         encrypted_bytes = self._encrypt_payload(code)
         byte_str = "{" + ",".join(map(str, encrypted_bytes)) + "}"
         
-        # Генерация случайных OpCodes для виртуальной машины
         op_start = random.randint(100, 500)
         op_dec = random.randint(600, 900)
         op_run = random.randint(1000, 1500)
         op_end = 0
 
         lua_vm = f"""--[[ 
-  Meloten V9 (Supernova)
-  Security Level: EXPERIMENTAL
-  Polymorphism: ENABLED
+  Protected by Meloten Obfuscator V9
+  Link: http://t.me/Meloten_Obfuscator_bot
 ]]
 local {self.v['str_lib']} = string
 local {self.v['char']} = {self.v['str_lib']}.char
@@ -134,13 +134,11 @@ local {self.v['sub']} = {self.v['str_lib']}.sub
 local {self.v['concat']} = table.concat
 local {self.v['env']} = getfenv()
 
--- Anti-Tamper: Environment Check
 if {self.v['env']}.script and {self.v['env']}.script.Disabled == true then return end
 
 local function {self.v['xor_func']}(val, salt, idx)
     local k = ({self.key} % 255)
     local mix = (idx * 1337 + k) % 255
-    -- Bitwise XOR simulation without bit32 lib for compatibility
     local res = val
     local m = mix
     local r = 0
@@ -159,7 +157,7 @@ end
 local {self.v['chunk']} = {byte_str}
 
 local function {self.v['vm_func']}()
-    local {self.v['pc']} = {op_start} -- Start OpCode
+    local {self.v['pc']} = {op_start}
     local {self.v['stack']} = {{}}
     local {self.v['top']} = 0
     local {self.v['decrypt']} = {{}}
@@ -168,7 +166,6 @@ local function {self.v['vm_func']}()
     while {self.v['pc']} ~= {op_end} do
         {self._generate_garbage()}
         
-        -- Control Flow Flattening (Switch-Case Simulation)
         if {self.v['pc']} == {op_start} then
             i = 1
             {self.v['pc']} = {op_dec}
@@ -179,7 +176,6 @@ local function {self.v['vm_func']}()
                 local c = {self.v['xor_func']}(b, 0, i-1)
                 table.insert({self.v['decrypt']}, {self.v['char']}(c))
                 i = i + 1
-                -- JUMP BACK
                 {self.v['pc']} = {op_dec}
             else
                 {self.v['pc']} = {op_run}
@@ -187,7 +183,6 @@ local function {self.v['vm_func']}()
             
         elseif {self.v['pc']} == {op_run} then
             local raw = {self.v['concat']}({self.v['decrypt']})
-            -- Base64 Decode
             local b='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
             raw = string.gsub(raw, '[^'..b..'=]', '')
             local decoded = (raw:gsub('.', function(x)
@@ -202,7 +197,6 @@ local function {self.v['vm_func']}()
                 return string.char(c)
             end))
             
-            -- Anti-Debug: Check if loadstring is hooked
             if tostring(loadstring):find("function") == nil then while true do end end
 
             local l = loadstring or load
@@ -215,28 +209,27 @@ local function {self.v['vm_func']}()
     end
 end
 
--- Entry Point
 if not getgenv or getgenv().SCRIPT_OWNER ~= "Gokuoriginal_Clone" then
     {self.v['vm_func']}()
 end
 """
         return lua_vm
 
-# --- ОБРАБОТЧИКИ (Оставлены без изменений логики, обновлены под V9) ---
+# --- ОБРАБОТЧИКИ ---
 
 @dp.message(Command("start"))
 async def start(message: types.Message):
     await message.answer(
         "🛡 **Meloten Obfuscator V9 (Supernova)**\n\n"
         "☢️ **Уровень защиты: EXTREME**\n"
-        "Теперь бот использует полиморфную виртуализацию.\n\n"
+        "Исправлены баги генерации имен переменных.\n\n"
         "🔥 **Функции:**\n"
         "1️⃣ Скинь `.lua` — уничтожу читаемость (V9).\n"
         "2️⃣ `/beautify` (с файлом) — улучшу код.\n"
         "3️⃣ `/loadstring <url>` — генератор.\n"
         "4️⃣ `/ping` — проверка скорости.\n\n"
         "⚙️ Настройки: `/setlayers 1-3`\n"
-        "📢 Канал: @MelotenBot",
+        "🔗 Бот: http://t.me/Meloten_Obfuscator_bot",
         parse_mode="Markdown"
     )
 
@@ -270,7 +263,6 @@ async def set_layers(message: types.Message, command: CommandObject):
         await message.answer("⚠️ Пример: `/setlayers 2`")
         return
     
-    # ПРОВЕРКА НА ПРЕМИУМ (ВЛАДЕЛЕЦ)
     is_premium = (message.from_user.username == "Gokuoriginal")
     max_limit = 10 if is_premium else 3
     
@@ -291,7 +283,6 @@ async def make_loadstring(message: types.Message, command: CommandObject):
         return
     url = command.args.strip()
     content = f'loadstring(game:HttpGet("{url}"))()'
-    # Текст вместо файла
     await message.answer(f"✅ **Loadstring готов:**\n\n`{content}`", parse_mode="Markdown")
 
 @dp.message(F.document)
@@ -312,7 +303,7 @@ async def handle_files(message: types.Message):
             beauty = LuaBeautifier(source_code)
             formatted_code = beauty.format()
             out = BufferedInputFile(formatted_code.encode(), filename=f"Clean_{message.document.file_name}")
-            await message.answer_document(out, caption="✨ **Код отформатирован!**")
+            await message.answer_document(out, caption="✨ **Код отформатирован!**\nhttp://t.me/Meloten_Obfuscator_bot")
             await status.delete()
         except Exception as e:
             await message.answer(f"❌ Ошибка: {e}")
@@ -323,12 +314,20 @@ async def handle_files(message: types.Message):
     status = await message.answer(f"☢️ **Защита V9 (Supernova) | Layers: {layers}...**\n_Генерирую полиморфную VM..._", parse_mode="Markdown")
     
     try:
-        # Используем новый класс V9
         obf = MelotenObfuscatorV9(source_code, layers=layers)
         protected_code = obf.build()
         
         out = BufferedInputFile(protected_code.encode(), filename=f"Supernova_{message.document.file_name}")
-        await message.answer_document(out, caption=f"✅ **Готово (V9 Supernova)**\n🛡 Layers: {layers}\n🌀 Polymorphism: Active")
+        
+        # ДОБАВЛЕНА ССЫЛКА НА БОТА В CAPTION
+        caption_text = (
+            f"✅ **Готово (V9 Supernova)**\n"
+            f"🛡 Layers: {layers}\n"
+            f"🌀 Polymorphism: Active\n\n"
+            f"🔗 http://t.me/Meloten_Obfuscator_bot"
+        )
+        
+        await message.answer_document(out, caption=caption_text)
         await status.delete()
         
     except Exception as e:
@@ -336,7 +335,7 @@ async def handle_files(message: types.Message):
         await message.answer(f"❌ Ошибка обфускации: {e}")
 
 async def main():
-    print("--- MELOTEN V9 SUPERNOVA STARTED ---")
+    print("--- MELOTEN V9 FIXED STARTED ---")
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
