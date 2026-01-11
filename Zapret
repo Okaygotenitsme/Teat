@@ -1,9 +1,10 @@
 import asyncio
 import logging
 import random
-import re
+import base64
+import io
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import Command
+from aiogram.filters import Command, CommandObject
 from aiogram.types import BufferedInputFile
 
 # --- КОНФИГУРАЦИЯ ---
@@ -13,7 +14,7 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 
-# --- ЛОГИКА ОБФУСКАТОРА ---
+# --- УЛУЧШЕННАЯ ЛОГИКА ОБФУСКАТОРА ---
 class MelotenObfuscator:
     def __init__(self, source):
         self.source = source
@@ -21,84 +22,127 @@ class MelotenObfuscator:
         self.v_data = self._rand_name()
         self.v_key = self._rand_name()
         self.v_res = self._rand_name()
-        self.v_check = self._rand_name()
-        self.v_cur = self._rand_name()
         self.v_func = self._rand_name()
 
     def _rand_name(self):
-        return "l" + "".join(random.choices("Il1", k=random.randint(10, 15)))
+        """Создает нечитаемые имена переменных типа lIlIIllIlI"""
+        return "l" + "".join(random.choices("Il1", k=random.randint(12, 18)))
+
+    def _generate_junk(self):
+        """Создает мусорный код для запутывания декомпиляторов"""
+        junk_names = [self._rand_name() for _ in range(3)]
+        return f"local {junk_names[0]}={random.randint(1,999)};local {junk_names[1]}='{junk_names[2]}';"
 
     def build(self):
-        header = "--[[Protected by Meloten Obfuscator]]\n"
-        encrypted_bytes = [(ord(char) ^ self.key) for char in self.source]
-        checksum = sum(encrypted_bytes)
-        payload = "{" + ",".join(map(str, encrypted_bytes)) + "}"
+        # Кодируем исходник в Base64
+        b64_source = base64.b64encode(self.source.encode()).decode()
         
+        header = f"--[[Protected by Meloten Obfuscator]]\n--[[News: @MelotenBot]]\n"
+        
+        # Сложная VM структура: декодирование Base64 + XOR шифрование кадра
         vm_logic = (
-            f"local {self.v_data}={payload};"
+            f"{self._generate_junk()}"
+            f"local {self.v_data}='{b64_source}';"
             f"local {self.v_key}={self.key};"
-            f"local {self.v_check}={checksum};"
-            f"local {self.v_cur}=0;"
-            f"for i=1,#{self.v_data} do {self.v_cur}={self.v_cur}+{self.v_data}[i] end;"
-            f"if {self.v_cur}~={self.v_check} then while true do end end;"
-            f"local {self.v_res}='';"
-            f"for i=1,#{self.v_data} do "
-            f"{self.v_res}={self.v_res}..string.char(bit32.bxor({self.v_data}[i],{self.v_key}));"
-            f"if i%500==0 then task.wait() end "
-            f"end;"
-            f"local {self.v_func}=loadstring({self.v_res});"
-            f"{self.v_res}=nil;"
-            f"if {self.v_func} then task.spawn({self.v_func}) else warn('Critical Error') end"
+            f"local function {self.v_res}(d) "
+            f"local b='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/' "
+            f"d=d:gsub('[^'..b..'..'=]', '') "
+            f"return (d:gsub('.', function(x) "
+            f"if x=='=' then return '' end "
+            f"local r,f='', (b:find(x)-1) "
+            f"for i=6,1,-1 do r=r..(f%2^i-f%2^(i-1)>0 and '1' or '0') end "
+            f"return r; end):gsub('%d%d%d%d%d%d%d%d', function(x) "
+            f"local c=0 for i=1,8 do c=c+(x:sub(i,i)=='1' and 2^(8-i) or 0) end "
+            f"return string.char(bit32.bxor(c,{self.v_key})) end)) end;"
+            f"local {self.v_func}=loadstring({self.v_res}({self.v_data}));"
+            f"{self._generate_junk()}"
+            f"if {self.v_func} then task.spawn({self.v_func}) end"
         )
-        return header + vm_logic.replace("  ", "").replace("\n", "")
+        
+        return header + vm_logic.replace("    ", "")
 
 # --- ОБРАБОТЧИКИ ---
 
 @dp.message(Command("start"))
 async def start(message: types.Message):
-    await message.answer("✨ **Meloten Bot**\n\nОтправь .lua файл для обфускации или просто пообщайся со мной!")
+    await message.answer(
+        "✨ **Добро пожаловать в Meloten Bot!**\n\n"
+        "📜 **Доступные функции:**\n"
+        "1️⃣ Отправь файл `.lua` — я его **обфусцирую**.\n"
+        "2️⃣ Используй `/loadstring <ссылка>` — создам загрузчик.\n"
+        "3️⃣ Напиши 'meow' — я помяукаю.\n\n"
+        "📢 **Наш канал:** @MelotenBot",
+        parse_mode="Markdown"
+    )
 
-# Функция ASCII - теперь просто заглушка
+# Обработчик команды /loadstring
+@dp.message(Command("loadstring"))
+async def make_loadstring(message: types.Message, command: CommandObject):
+    if not command.args:
+        await message.answer("⚠️ Ошибка! Введи ссылку после команды.\nПример: `/loadstring https://raw.github.com/...`", parse_mode="Markdown")
+        return
+
+    url = command.args
+    content = f'loadstring(game:HttpGet("{url}"))()'
+    
+    file_output = BufferedInputFile(
+        content.encode('utf-8'), 
+        filename="loader.lua"
+    )
+    
+    await message.answer_document(
+        file_output, 
+        caption=f"✅ **Loadstring готов!**\n\n📢 @MelotenBot", 
+        parse_mode="Markdown"
+    )
+
 @dp.message(Command("ASCII"))
 async def ascii_dev(message: types.Message):
-    await message.answer("🛠 **Эта функция (ASCII анимация) сейчас находится в разработке.**\nСледите за обновлениями!")
+    await message.answer("🛠 **Эта функция (ASCII анимация) всё еще в разработке.**")
 
-# Реакция на Meow / Мяу
-@dp.message(F.text)
+# Исправленный Meow (фильтр ~F.text.startswith("/") убирает двойные ответы)
+@dp.message(F.text, ~F.text.startswith("/"))
 async def meow_handler(message: types.Message):
-    # Проверяем, есть ли слово meow или мяу в сообщении (игнорируя регистр)
     text = message.text.lower()
     if "meow" in text or "мяу" in text:
-        # Генерируем случайное количество повторений от 1 до 10
         count = random.randint(1, 10)
-        response = " ".join(["meow"] * count)
-        await message.answer(response)
-    
-    # Если это просто текст и не содержит meow, бот ничего не делает (или можешь добавить свою логику)
+        await message.answer("meow " * count)
 
-# Обфускация документов
+# Обфускация файлов
 @dp.message(F.document)
 async def handle_docs(message: types.Message):
     if not message.document.file_name.endswith(('.lua', '.txt')):
         return
 
-    msg = await message.answer("🛡 Защищаю код...")
+    status = await message.answer("🛡 **Защита Meloten VM...**", parse_mode="Markdown")
     try:
         file_info = await bot.get_file(message.document.file_id)
         file_content = await bot.download_file(file_info.file_path)
         source = file_content.read().decode('utf-8', errors='ignore')
 
         obf = MelotenObfuscator(source)
-        output = BufferedInputFile(obf.build().encode('utf-8'), filename=f"Obf_{message.document.file_name}")
+        protected_code = obf.build()
+
+        output = BufferedInputFile(
+            protected_code.encode('utf-8'), 
+            filename=f"Meloten_{message.document.file_name}"
+        )
         
-        await message.answer_document(output, caption="✅ Код защищен!")
-        await msg.delete()
+        await message.answer_document(
+            output, 
+            caption="✅ **Код успешно обфусцирован!**\n\n📢 @MelotenBot",
+            parse_mode="Markdown"
+        )
+        await status.delete()
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e}")
 
 async def main():
-    print("Бот запущен!")
+    print("--- MELOTEN BOT STARTED ---")
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        print("Bot off")
