@@ -10,12 +10,13 @@ from aiogram.types import BufferedInputFile, InlineKeyboardMarkup, InlineKeyboar
 
 # --- КОНФИГУРАЦИЯ ---
 API_TOKEN = '8525811167:AAGRnOjWoJqS_FyhO3fQYPPUhCbhBoZwSQo'
+ADMIN_USERNAME = "Gokuoriginal"  # Владелец, которому доступен /ban
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 
-# --- ХРАНИЛИЩЕ ДАННЫХ ---
+# --- ХРАНИЛИЩЕ ---
 user_settings = {}     # {user_id: layers}
 user_current_file = {} # {user_id: file_id}
 
@@ -25,7 +26,7 @@ class LuaBeautifier:
         self.source = source
 
     def format(self):
-        """Базовое форматирование для отступов"""
+        """Простое выравнивание отступов"""
         code = self.source
         lines = [line.strip() for line in code.splitlines() if line.strip()]
         formatted = []
@@ -48,46 +49,42 @@ class LuaBeautifier:
 
         return "\n".join(formatted)
 
-# --- MELOTEN OBFUSCATOR V10 (BLACK HOLE) ---
-class MelotenObfuscatorV10:
+# --- MELOTEN OBFUSCATOR V11 (STABLE) ---
+class MelotenObfuscatorV11:
     def __init__(self, source, layers=1):
         self.original_source = source
         self.layers = layers
+        # Просто ссылка, без угроз
         self.watermark = (
-            "--[[This file was protected by Meloten Obfuscator\n"
-            "\n"
-            "http://t.me/Meloten_Obfuscator_bot\n"
-            "DO NOT REMOVE THIS WATERMARK - SCRIPT WILL BREAK]]\n\n"
+            "--[[ Protected by Meloten Obfuscator ]]\n"
+            "--[[ http://t.me/Meloten_Obfuscator_bot ]]\n\n"
         )
         
     def _n(self):
-        """
-        Генерирует имена переменных. 
-        Исправлено: теперь всегда начинается с '_', чтобы избежать ошибок Lua.
-        """
-        length = random.randint(15, 35)
-        # Используем символы, которые трудно различить визуально (I, l, 1, O, 0)
+        """Безопасные имена переменных (всегда с _ в начале)"""
+        length = random.randint(10, 20)
         suffix = ''.join(random.choices("Il1O0", k=length))
         return f"_{suffix}"
 
     def _generate_names(self):
-        self.key = random.randint(1000, 9999)
+        self.key = random.randint(100, 255)
         self.vars = {k: self._n() for k in [
             'vm', 'state', 'bytes', 'idx', 'xor', 'junk', 
             'magic', 'dec', 'len', 'byte_val', 'table', 
-            'str_lib', 'bit_lib', 'cache', 'fake', 'shift', 'char', 'concat'
+            'str_lib', 'bit_lib', 'char', 'concat', 'res'
         ]}
 
     def _junk_code(self):
-        """Генерирует сложный мусорный код"""
+        """
+        Безопасный мусорный код. 
+        Убраны бесконечные циклы, которые вешали игру.
+        """
         v1 = self._n()
-        v2 = self._n()
         ops = [
-            f"local {v1} = ({random.randint(10,99)} + {random.randint(1,5)}) / 1;",
-            f"if (math.random() > 1) then while true do end end;",
-            f"-- Memory: 0x{random.randint(100000,999999):X}",
-            f"local {v2} = string.byte('{random.choice(string.ascii_letters)}');",
-            f"repeat until true;"
+            f"local {v1} = math.floor(12.5 + 0.5);",
+            f"if (1 == 2) then return end;",
+            f"-- Opcode: {random.randint(100,999)}",
+            f"local {v1} = string.char({random.randint(65, 90)});",
         ]
         return random.choice(ops)
 
@@ -97,34 +94,25 @@ class MelotenObfuscatorV10:
         # 1. Base64
         b64_source = base64.b64encode(source_code.encode('utf-8')).decode('utf-8')
         
-        # 2. Advanced Encryption (Dual Shift XOR)
+        # 2. Stable XOR Encryption
+        # Используем простую, но надежную арифметику, чтобы Lua точно это переварил
         raw_bytes = b64_source.encode('utf-8')
         enc_bytes = []
-        seed = self.key % 255
         
+        # Генерируем динамический ключ для каждого байта
         for i, b in enumerate(raw_bytes):
-            # Очень запутанная формула шифрования байтов
-            step1 = (b + i) % 255
-            step2 = (step1 ^ seed)
-            step3 = (step2 - (i % 10)) % 255
-            enc_bytes.append(step3)
-            # Меняем сид для следующего байта
-            seed = (seed + step3) % 255
+            key_mod = (self.key + i) % 255
+            # XOR операция
+            val = b ^ key_mod
+            enc_bytes.append(val)
         
         payload = "".join([f"\\{b}" for b in enc_bytes])
 
-        # 3. VM Logic V10
+        # 3. VM Logic (Исправленная и стабильная)
         vm_script = f"""{self.watermark}local {self.vars['str_lib']} = string
 local {self.vars['table']} = table
 local {self.vars['char']} = {self.vars['str_lib']}.char
 local {self.vars['concat']} = {self.vars['table']}.concat
-local {self.vars['bit_lib']} = bit32 or require('bit')
-
--- Anti-Tamper / Variable Check
-if getgenv then
-    getgenv().SCRIPT_OWNER = "Gokuoriginal"
-    getgenv().MELOTEN_OBF = true
-end
 
 local function {self.vars['xor']}(a, b)
     local p,c=1,0
@@ -138,53 +126,28 @@ local function {self.vars['xor']}(a, b)
 end
 
 local function {self.vars['vm']}({self.vars['bytes']})
-    local {self.vars['state']} = {random.randint(100, 200)}
     local {self.vars['dec']} = {{}}
-    local {self.vars['idx']} = 1
     local {self.vars['len']} = #{self.vars['bytes']}
-    local {self.vars['magic']} = {self.key % 255}
+    local {self.vars['magic']} = {self.key}
     
-    while true do
+    -- Цикл расшифровки
+    for {self.vars['idx']} = 1, {self.vars['len']} do
         {self._junk_code()}
         
-        if {self.vars['state']} == {random.randint(100, 200)} then
-            {self.vars['idx']} = 1
-            {self.vars['state']} = 500
-            
-        elseif {self.vars['state']} == 500 then
-            if {self.vars['idx']} <= {self.vars['len']} then
-                {self.vars['state']} = 777
-            else
-                {self.vars['state']} = 999
-            end
-            
-        elseif {self.vars['state']} == 777 then
-            local {self.vars['byte_val']} = {self.vars['str_lib']}.byte({self.vars['bytes']}, {self.vars['idx']})
-            local i = {self.vars['idx']} - 1
-            
-            -- Decryption Logic V10 (Reverse)
-            local step3 = {self.vars['byte_val']}
-            local step2 = (step3 + (i % 10)) % 255
-            local step1 = {self.vars['xor']}(step2, {self.vars['magic']})
-            local clean = (step1 - i) % 255
-            
-            {self.vars['magic']} = ({self.vars['magic']} + step3) % 255 -- Update rolling key
-            
-            {self.vars['table']}.insert({self.vars['dec']}, {self.vars['char']}(clean))
-            {self.vars['idx']} = {self.vars['idx']} + 1
-            {self.vars['state']} = 500
-            
-        elseif {self.vars['state']} == 999 then
-            break
-        end
+        local {self.vars['byte_val']} = {self.vars['str_lib']}.byte({self.vars['bytes']}, {self.vars['idx']})
+        local key_mod = ({self.vars['magic']} + ({self.vars['idx']} - 1)) % 255
+        local clean = {self.vars['xor']}({self.vars['byte_val']}, key_mod)
+        
+        {self.vars['table']}.insert({self.vars['dec']}, {self.vars['char']}(clean))
     end
     
     return {self.vars['concat']}({self.vars['dec']})
 end
 
 local _payload = "{payload}"
-local _res = {self.vars['vm']}(_payload)
+local {self.vars['res']} = {self.vars['vm']}(_payload)
 
+-- Base64 Decode
 local b='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
 local function _d(d)
     d = string.gsub(d, '[^'..b..'=]', '')
@@ -201,7 +164,7 @@ local function _d(d)
     end))
 end
 
-local _final = _d(_res)
+local _final = _d({self.vars['res']})
 local _run = loadstring or load
 pcall(_run(_final))
 """
@@ -211,85 +174,85 @@ pcall(_run(_final))
         code = self.original_source
         for _ in range(self.layers):
             code = self._build_layer(code)
-        # Вотермарка всегда добавляется в финальный результат
         return code
 
 # --- КЛАВИАТУРЫ ---
 def get_action_keyboard():
     buttons = [
-        [InlineKeyboardButton(text="🔒 Obfuscate (V10)", callback_data="act_obfuscate")],
-        [InlineKeyboardButton(text="✨ Beautify (Clean)", callback_data="act_beautify")]
+        [InlineKeyboardButton(text="🔒 Obfuscate (V11 Stable)", callback_data="act_obfuscate")],
+        [InlineKeyboardButton(text="✨ Beautify", callback_data="act_beautify")]
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+# --- АДМИН КОМАНДЫ (PREMIUM) ---
+
+@dp.message(Command("ban"))
+async def ban_command(message: types.Message):
+    # 1. Проверяем, что пишет владелец
+    if message.from_user.username != ADMIN_USERNAME:
+        return # Игнорируем обычных юзеров
+    
+    # 2. Проверяем, что это ответ на сообщение
+    if not message.reply_to_message:
+        await message.reply("⚠️ Эту команду нужно писать в ответ на сообщение нарушителя.")
+        return
+
+    # 3. Баним
+    try:
+        user_to_ban = message.reply_to_message.from_user
+        await bot.ban_chat_member(chat_id=message.chat.id, user_id=user_to_ban.id)
+        await message.answer(f"🚫 Пользователь {user_to_ban.full_name} был заблокирован.")
+    except Exception as e:
+        await message.answer(f"❌ Не удалось забанить: {e}")
 
 # --- ОБРАБОТЧИКИ ---
 
 @dp.message(Command("start"))
 async def start(message: types.Message):
     await message.answer(
-        "🛡 **Meloten Obfuscator V10 (Black Hole)**\n\n"
-        "Владелец: `Gokuoriginal`\n\n"
-        "Отправь мне **.lua** файл, и я предложу варианты:\n"
-        "1️⃣ **Obfuscate** — Максимальная защита V10 + Watermark.\n"
-        "2️⃣ **Beautify** — Улучшение читаемости кода.\n\n"
-        "⚙️ `/setlayers <1-3>` — Уровень защиты.\n"
-        "🔗 `/loadstring <url>` — Генератор.",
+        "🛡 **Meloten Obfuscator V11**\n"
+        "Исправлена стабильность скриптов.\n\n"
+        "Отправь **.lua** файл для начала.",
         parse_mode="Markdown"
     )
 
 @dp.message(Command("help"))
 async def help_cmd(message: types.Message):
     await message.answer(
-        "📚 **Инструкция:**\n"
-        "1. Кидаешь файл `.lua`\n"
-        "2. Жмешь кнопку под сообщением.\n"
-        "3. Получаешь результат.\n\n"
-        "❗️ Вотермарку удалять нельзя, скрипт сломается.",
+        "📚 **Меню:**\n"
+        "• Кинь файл -> нажми кнопку.\n"
+        "• `/loadstring <url>`\n"
+        "• `/setlayers <1-3>`\n\n"
+        "👑 **Premium:**\n"
+        "• `/ban` (Reply) — Бан пользователя (только для владельца).",
         parse_mode="Markdown"
     )
 
-@dp.message(Command("ping"))
-async def ping_handler(message: types.Message):
-    start_time = time.time()
-    msg = await message.answer("📶 **Check...**", parse_mode="Markdown")
-    end_time = time.time()
-    ping_ms = int((end_time - start_time) * 1000)
-    await msg.edit_text(f"📶 **Pong!** `{ping_ms}ms`", parse_mode="Markdown")
-
 @dp.message(Command("setlayers"))
 async def set_layers(message: types.Message, command: CommandObject):
-    if not command.args:
-        await message.answer("⚠️ Пример: `/setlayers 2`")
-        return
     try:
         n = int(command.args)
         if 1 <= n <= 3:
             user_settings[message.from_user.id] = n
-            await message.answer(f"✅ V10 Слои: **{n}**")
+            await message.answer(f"✅ Layers: **{n}**")
         else:
-            await message.answer("⚠️ Лимит: 1-3 слоя.")
+            await message.answer("⚠️ 1-3")
     except:
-        await message.answer("⚠️ Введи число.")
+        await message.answer("⚠️ Число.")
 
 @dp.message(Command("loadstring"))
 async def make_loadstring(message: types.Message, command: CommandObject):
-    if not command.args:
-        await message.answer("⚠️ Используй: `/loadstring https://...`")
-        return
+    if not command.args: return
     url = command.args.strip()
-    code_result = f'loadstring(game:HttpGet("{url}"))()'
-    await message.answer(f"✅ **Loadstring:**\n\n`{code_result}`", parse_mode="Markdown")
+    code = f'loadstring(game:HttpGet("{url}"))()'
+    await message.answer(f"`{code}`", parse_mode="Markdown")
 
 @dp.message(F.document)
 async def handle_document(message: types.Message):
-    if not message.document.file_name.endswith(('.lua', '.txt')):
-        await message.answer("⚠️ Только .lua или .txt файлы.")
-        return
-
+    if not message.document.file_name.endswith(('.lua', '.txt')): return
     user_current_file[message.from_user.id] = message.document.file_id
-    
     await message.answer(
-        f"📂 Файл: **{message.document.file_name}**\nВыбери действие:",
+        f"📂 **{message.document.file_name}**",
         reply_markup=get_action_keyboard(),
         parse_mode="Markdown"
     )
@@ -298,52 +261,44 @@ async def handle_document(message: types.Message):
 async def process_file_action(callback: CallbackQuery):
     action = callback.data.split("_")[1]
     user_id = callback.from_user.id
-    
     file_id = user_current_file.get(user_id)
+    
     if not file_id:
-        await callback.message.answer("❌ Файл устарел. Скинь снова.")
-        await callback.answer()
+        await callback.answer("❌ Файл устарел")
         return
 
-    await callback.message.edit_text("⏳ **Обработка V10...**", parse_mode="Markdown")
+    await callback.message.edit_text("⏳ **Working...**", parse_mode="Markdown")
     
     try:
         file_info = await bot.get_file(file_id)
         downloaded = await bot.download_file(file_info.file_path)
         source_code = downloaded.read().decode('utf-8', errors='ignore')
         
-        result_code = ""
-        result_filename = ""
-        caption_text = ""
-
         if action == "obfuscate":
             layers = user_settings.get(user_id, 1)
-            obf = MelotenObfuscatorV10(source_code, layers=layers)
-            result_code = obf.build()
-            result_filename = "Protected_By_Meloten.lua"
-            caption_text = f"🛡 **Protected by Meloten V10**\nOwner: `Gokuoriginal`\nLayers: {layers}"
+            obf = MelotenObfuscatorV11(source_code, layers=layers)
+            res = obf.build()
+            name = "Protected_V11.lua"
+            cap = f"🛡 **Protected V11 (Stable)**\nLayers: {layers}"
             
         elif action == "beautify":
             beauty = LuaBeautifier(source_code)
-            result_code = beauty.format()
-            result_filename = "Clean_Script.lua"
-            caption_text = "✨ **Beautified Code**"
+            res = beauty.format()
+            name = "Clean.lua"
+            cap = "✨ **Beautified**"
 
-        out = BufferedInputFile(result_code.encode(), filename=result_filename)
-        await callback.message.answer_document(out, caption=caption_text, parse_mode="Markdown")
+        out = BufferedInputFile(res.encode(), filename=name)
+        await callback.message.answer_document(out, caption=cap, parse_mode="Markdown")
         await callback.message.delete()
         
     except Exception as e:
-        logging.error(e)
-        await callback.message.answer(f"❌ Ошибка: {e}")
-    finally:
-        if user_id in user_current_file:
-            del user_current_file[user_id]
+        await callback.message.answer(f"Err: {e}")
     
+    if user_id in user_current_file: del user_current_file[user_id]
     await callback.answer()
 
 async def main():
-    print("--- MELOTEN V10 STARTED ---")
+    print("--- MELOTEN V11 STARTED ---")
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
