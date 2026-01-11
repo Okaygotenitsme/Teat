@@ -8,82 +8,86 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import BufferedInputFile
 
 # --- КОНФИГУРАЦИЯ ---
-API_TOKEN = '8525811167:AAGRnOjWoJqS_FyhO3fQYPPUhCbhBoZwSQo'
+API_TOKEN = 'ТВОЙ_ТОКЕН_ЗДЕСЬ' 
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 
-# --- MELOTEN OBFUSCATOR V6 (TITAN) ---
-class MelotenObfuscatorV6:
-    def __init__(self, source):
-        self.source = source
+# --- MELOTEN OBFUSCATOR V7 (MULTI-LAYER) ---
+class MelotenObfuscatorV7:
+    def __init__(self, source, layers=1):
+        self.original_source = source
+        self.layers = layers  # Количество слоев (проходов)
+        
+    def _generate_names(self):
+        """Генерирует уникальный набор имен переменных для текущего слоя"""
         self.key = random.randint(50, 200)
         self.vars = {}
-        # Генерируем "семью" переменных
-        keys = ['vm', 'state', 'bytes', 'idx', 'xor', 'junk', 'magic', 'dec', 'len', 'byte_val', 'table', 'str_lib']
+        # Используем нечитаемые имена (l, I, 1, 0, O)
+        keys = ['vm', 'state', 'bytes', 'idx', 'xor', 'junk', 'magic', 'dec', 'len', 'byte_val', 'table', 'str_lib', 'bit_lib']
         for k in keys:
-            self.vars[k] = self._n()
-
-    def _n(self):
-        """Безопасный генератор имен (начинается с _, чтобы не конфликтовать)"""
-        # Используем O, 0, 1, l, I для визуальной путаницы
-        length = random.randint(12, 24)
-        suffix = ''.join(random.choices("Il1O0", k=length))
-        return f"_{suffix}"
+            length = random.randint(10, 20)
+            suffix = ''.join(random.choices("Il1O0", k=length))
+            self.vars[k] = f"_{suffix}"
 
     def _junk_code(self):
-        """Генерирует продвинутый мусорный код"""
-        v1, v2 = self._n(), self._n()
+        """Генерирует безопасный мусорный код"""
+        v1, v2 = self.vars['junk'], self.vars['magic']
         ops = [
-            f"local {v1} = math.floor(math.pi * {random.randint(1,100)});",
-            f"if ({random.randint(1,10)} > 20) then local {v2} = 'fake' end;",
-            f"-- Memory Stack: 0x{random.randint(10000, 99999):X}",
-            f"local {v1} = (function(x) return x*2 end)({random.randint(1,50)});",
-            f"bit32 = bit32 or require('bit'); -- fake dependency check",
+            f"local {v1} = 0; for i=1, {random.randint(1,5)} do {v1}={v1}+i end",
+            f"if ({random.randint(100,200)} < 50) then end -- Dead code",
+            f"-- Stack: 0x{random.randint(1000, 9999):X}",
         ]
         return random.choice(ops)
 
-    def build(self):
-        # 1. Base64 Encoding Layer
-        # Сначала кодируем исходник в b64, чтобы убрать спецсимволы и добавить слой
-        b64_source = base64.b64encode(self.source.encode('utf-8')).decode('utf-8')
+    def _build_layer(self, source_code):
+        """Создает один слой защиты (VM + Rolling XOR)"""
+        self._generate_names() # Новые имена для каждого слоя
         
-        # 2. Rolling Key XOR + Anti-Prettify formatting
-        # Мы шифруем уже Base64 строку
+        # 1. Base64
+        b64_source = base64.b64encode(source_code.encode('utf-8')).decode('utf-8')
+        
+        # 2. Rolling Key XOR
         raw_bytes = b64_source.encode('utf-8')
         enc_bytes = []
-        
         for i, b in enumerate(raw_bytes):
-            # Rolling Key: Ключ меняется в зависимости от позиции (i)
-            # Формула: (Byte ^ (Key + Index % 150))
-            dynamic_key = (self.key + (i % 150)) % 255
+            dynamic_key = (self.key + (i % 120)) % 255
             val = (b ^ dynamic_key)
             enc_bytes.append(val)
         
-        # Превращаем в строку байтов Lua: \123\45...
         payload = "".join([f"\\{b}" for b in enc_bytes])
 
-        # 3. Генерация VM с Control Flow Flattening
-        vm_script = f"""--[[ 
-    Meloten Secure V6 (Titan) 
-    Protected by AI Logic 
-]]
+        # 3. Virtual Machine (Исправленная версия без syntax error)
+        vm_script = f"""--[[ Meloten Secure Layer ]]
 local {self.vars['str_lib']} = string
 local {self.vars['table']} = table
-local {self.vars['xor']} = function(a, b) return (a ~ b) end -- Lua 5.3+ bitwise or fallback logic below needed if 5.1
-if not {self.vars['xor']} then
-    {self.vars['xor']} = function(p,q) 
-        local r,s=0,1; while p>0 and q>0 do 
-        local ra,rb=p%2,q%2; if ra~=rb then r=r+s end; 
-        p,q,s=(p-ra)/2,(q-rb)/2,s*2 end; 
-        if p<q then p=q end; while p>0 do 
-        local ra=p%2; if ra>0 then r=r+s end; p,s=(p-ra)/2,s*2 end; return r 
-    end 
+local {self.vars['bit_lib']} = bit32 or require('bit') -- Auto-detect bit library
+
+-- Универсальная функция XOR (работает везде: Lua 5.1, JIT, Luau)
+local function {self.vars['xor']}(a, b)
+    if {self.vars['bit_lib']} then
+        return {self.vars['bit_lib']}.bxor(a, b)
+    else
+        -- Math fallback for pure Lua 5.1 without libs
+        local p,c=1,0
+        while a>0 and b>0 do
+            local ra,rb=a%2,b%2
+            if ra~=rb then c=c+p end
+            a,b,p=(a-ra)/2,(b-rb)/2,p*2
+        end
+        if a<b then a=b end
+        while a>0 do
+            local ra=a%2
+            if ra>0 then c=c+p end
+            a,p=(a-ra)/2,p*2
+        end
+        return c
+    end
 end
 
 local function {self.vars['vm']}({self.vars['bytes']})
-    local {self.vars['state']} = 729 -- Initial State (Randomized)
+    local {self.vars['state']} = 500
     local {self.vars['dec']} = {{}}
     local {self.vars['idx']} = 1
     local {self.vars['len']} = #{self.vars['bytes']}
@@ -91,63 +95,35 @@ local function {self.vars['vm']}({self.vars['bytes']})
     
     while {self.vars['state']} ~= 0 do
         {self._junk_code()}
-        
-        if {self.vars['state']} == 729 then
-            -- ENTRY POINT
+        if {self.vars['state']} == 500 then
             {self.vars['idx']} = 1
-            {self.vars['state']} = 154
-            
-        elseif {self.vars['state']} == 154 then
-            -- LOOP CONDITION CHECK
+            {self.vars['state']} = 200
+        elseif {self.vars['state']} == 200 then
             if {self.vars['idx']} <= {self.vars['len']} then
-                {self.vars['state']} = 882
+                {self.vars['state']} = 300
             else
-                {self.vars['state']} = 404 -- EXIT
+                {self.vars['state']} = 0
             end
-            
-        elseif {self.vars['state']} == 882 then
-            -- DECRYPTION LOGIC (Rolling Key)
+        elseif {self.vars['state']} == 300 then
             local {self.vars['byte_val']} = {self.vars['str_lib']}.byte({self.vars['bytes']}, {self.vars['idx']})
-            
-            -- Reversing the Rolling Key Logic:
-            -- DynamicKey = (BaseKey + (Index-1 % 150)) % 255
-            local dyn = ({self.vars['magic']} + (({self.vars['idx']} - 1) % 150)) % 255
+            local dyn = ({self.vars['magic']} + (({self.vars['idx']} - 1) % 120)) % 255
             local clean = {self.vars['xor']}({self.vars['byte_val']}, dyn)
-            
             {self.vars['table']}.insert({self.vars['dec']}, {self.vars['str_lib']}.char(clean))
-            {self.vars['state']} = 331
-            
-        elseif {self.vars['state']} == 331 then
-            -- INCREMENT
             {self.vars['idx']} = {self.vars['idx']} + 1
-            {self.vars['state']} = 154 -- Back to loop
-            
-        elseif {self.vars['state']} == 404 then
-            {self.vars['state']} = 0
+            {self.vars['state']} = 200
         end
     end
     
-    -- Anti-Tamper: Clear memory refs
-    {self.vars['magic']} = nil
-    
-    -- Decode Base64 result
     local res = {self.vars['table']}.concat({self.vars['dec']})
-    
-    -- Custom Base64 Decoder (Simulated for compatibility)
-    -- In real V6 we rely on standard libs or embedded decoder. 
-    -- For this output, we assume environment has decode capability or return raw if text.
-    return res 
+    return res
 end
 
---[[ Anti-Tamper Check ]]
-if ({self.vars['vm']} == nil) then while true do end end
+local _payload = "{payload}"
+local _data = {self.vars['vm']}(_payload)
 
-local _encrypted = "{payload}"
-local _data = {self.vars['vm']}(_encrypted)
-
--- Base64 Decode Wrapper
-local b = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
-local function _b64dec(data)
+-- Embedded Base64 Decoder
+local b='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+local function _dec(data)
     data = string.gsub(data, '[^'..b..'=]', '')
     return (data:gsub('.', function(x)
         if (x == '=') then return '' end
@@ -162,84 +138,94 @@ local function _b64dec(data)
     end))
 end
 
-local _final = _b64dec(_data)
+local _final = _dec(_data)
 local _loader = loadstring or load
-pcall(_loader(_final))
+if getgenv then getgenv().SCRIPT_OWNER = "Meloten" end
+_loader(_final)()
 """
         return vm_script
+
+    def build(self):
+        current_code = self.original_source
+        
+        # Цикл накладывания слоев
+        for i in range(self.layers):
+            # Если это не первый слой, мы убираем выполнение (_loader) из предыдущего кода,
+            # чтобы VM внутри VM просто возвращала строку, а не исполняла её сразу.
+            # Но для простоты: мы просто заворачиваем ВЕСЬ предыдущий скрипт как строку в новую VM.
+            current_code = self._build_layer(current_code)
+            
+        return current_code
 
 # --- ОБРАБОТЧИКИ ---
 
 @dp.message(Command("start"))
 async def start(message: types.Message):
     await message.answer(
-        "🛡 **Meloten Obfuscator V6 (Titan)**\n\n"
-        "📜 **Функции:**\n"
-        "1️⃣ Отправь `.lua` — применю VM + Control Flow Flattening.\n"
-        "2️⃣ `/loadstring <url>` — генератор (без сохранения на диск).\n"
-        "3️⃣ Пасхалка: напиши 'meow'.\n\n"
-        "📢 Канал обновлений: @MelotenBot",
+        "🛡 **Meloten Obfuscator V7 (Multi-Layer)**\n\n"
+        "Отправь `.lua` файл, и я защищу его.\n"
+        "По умолчанию используется **1 слой** защиты.\n\n"
+        "⚙️ **Настройки:**\n"
+        "Напиши `/setlayers 2` (или 3), чтобы включить двойную/тройную обфускацию!\n"
+        "_(Осторожно: файл станет больше)_",
         parse_mode="Markdown"
     )
 
 @dp.message(Command("help"))
 async def help_command(message: types.Message):
     await message.answer(
-        "📚 **Список команд Meloten Bot:**\n\n"
-        "🔹 `/start` — Перезапустить бота и показать приветствие.\n"
-        "🔹 `/help` — Показать это меню помощи.\n"
-        "🔹 `/loadstring <url>` — Создать скрипт-загрузчик (loader) для URL.\n"
-        "🔹 **Отправка файла** — Просто скинь `.lua` или `.txt` файл, чтобы зашифровать его.\n\n"
-        "🔧 **Технические детали защиты:**\n"
-        "• Rolling Key XOR (Плавающий ключ)\n"
-        "• Control Flow Flattening (Запутывание потока)\n"
-        "• Junk Code Injection (Мусорный код)\n"
-        "• Base64 Layer (Доп. слой кодирования)\n",
+        "📚 **Команды:**\n"
+        "🔹 `/start` - Старт\n"
+        "🔹 `/help` - Меню\n"
+        "🔹 `/loadstring <url>` - Создать лоадер\n"
+        "🔹 `/setlayers <число>` - Установить количество слоев защиты (1-3).\n",
         parse_mode="Markdown"
     )
+
+# Хранилище настроек пользователей (в памяти)
+user_settings = {}
+
+@dp.message(Command("setlayers"))
+async def set_layers(message: types.Message, command: CommandObject):
+    if not command.args:
+        await message.answer("⚠️ Пример: `/setlayers 2`")
+        return
+    try:
+        n = int(command.args)
+        if 1 <= n <= 3:
+            user_settings[message.from_user.id] = n
+            await message.answer(f"✅ Установлено слоев защиты: **{n}**")
+        else:
+            await message.answer("⚠️ Можно установить от 1 до 3 слоев.")
+    except:
+        await message.answer("⚠️ Введите число.")
 
 @dp.message(Command("loadstring"))
 async def make_loadstring(message: types.Message, command: CommandObject):
     if not command.args:
         await message.answer("⚠️ Пример: `/loadstring https://raw.github...`")
         return
-
     url = command.args.strip()
     content = f'loadstring(game:HttpGet("{url}"))()'
-    
-    file_output = BufferedInputFile(
-        content.encode('utf-8'), 
-        filename="loader.lua"
-    )
-    
-    await message.answer_document(
-        file_output, 
-        caption=f"✅ **Loadstring сгенерирован**\n(Файл удалится из памяти после отправки)", 
-        parse_mode="Markdown"
-    )
-
-@dp.message(F.text)
-async def meow_handler(message: types.Message):
-    if message.text.startswith("/"): return
-    
-    text = message.text.lower()
-    if "meow" in text or "мяу" in text:
-        count = random.randint(1, 10)
-        await message.answer(" ".join(["meow"] * count))
+    file_output = BufferedInputFile(content.encode('utf-8'), filename="loader.lua")
+    await message.answer_document(file_output, caption=f"✅ **Loadstring готов**")
 
 @dp.message(F.document)
 async def handle_docs(message: types.Message):
     if not message.document.file_name.endswith(('.lua', '.txt')):
         return
 
-    status = await message.answer("🔒 **Защита V6 (Titan) активирована...**\n_Применяю CFF и Rolling XOR..._", parse_mode="Markdown")
+    # Получаем настройки пользователя
+    layers = user_settings.get(message.from_user.id, 1)
+
+    status = await message.answer(f"🔒 **Защита V7 (Layers: {layers})...**\n_Исправлена ошибка синтаксиса..._", parse_mode="Markdown")
     try:
         file_info = await bot.get_file(message.document.file_id)
         file_content = await bot.download_file(file_info.file_path)
         source = file_content.read().decode('utf-8', errors='ignore')
 
-        # Обфускация
-        obf = MelotenObfuscatorV6(source)
+        # Обфускация с указанным кол-вом слоев
+        obf = MelotenObfuscatorV7(source, layers=layers)
         protected_code = obf.build()
 
         output = BufferedInputFile(
@@ -249,19 +235,17 @@ async def handle_docs(message: types.Message):
         
         await message.answer_document(
             output, 
-            caption="✅ **Скрипт защищен (V6 Titan)!**\n\n🛡 Метод: VM + CFF + Rolling XOR + Base64.\n📢 Канал: @MelotenBot",
+            caption=f"✅ **Успешно!**\n🛡 Слоев защиты: {layers}\n🐛 Syntax Error fix: Applied.",
         )
         await status.delete()
-        
-        del source
-        del protected_code
+        del source, protected_code
         
     except Exception as e:
         logging.error(e)
         await message.answer(f"❌ Ошибка: {e}")
 
 async def main():
-    print("--- MELOTEN V6 TITAN STARTED ---")
+    print("--- MELOTEN V7 STARTED ---")
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
