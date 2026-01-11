@@ -9,7 +9,7 @@ from aiogram.types import BufferedInputFile
 
 # --- КОНФИГУРАЦИЯ ---
 # ВСТАВЬТЕ СЮДА ВАШ НОВЫЙ ТОКЕН ОТ @BotFather
-API_TOKEN = 'ВСТАВЬ_СЮДА_НОВЫЙ_ТОКЕН' 
+API_TOKEN = '8525811167:AAGRnOjWoJqS_FyhO3fQYPPUhCbhBoZwSQo' 
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
