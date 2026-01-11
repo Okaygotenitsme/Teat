@@ -16,20 +16,21 @@ bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 
 # --- ХРАНИЛИЩЕ ДАННЫХ ---
-user_settings = {}     # Настройки слоев обфускации {user_id: layers}
-user_current_file = {} # Временное хранение ID файла перед выбором действия {user_id: file_id}
+user_settings = {}     # {user_id: layers}
+user_current_file = {} # {user_id: file_id}
 
-# --- МОДУЛЬ BEAUTIFIER (Улучшение кода) ---
+# --- МОДУЛЬ BEAUTIFIER ---
 class LuaBeautifier:
     def __init__(self, source):
         self.source = source
 
     def format(self):
+        """Базовое форматирование для отступов"""
         code = self.source
         lines = [line.strip() for line in code.splitlines() if line.strip()]
         formatted = []
         indent = 0
-        indent_str = "    " 
+        indent_str = "    "
         
         up_keywords = ['function', 'do', 'then', 'repeat', '{', '(', 'if']
         down_keywords = ['end', 'until', '}', ')', 'elseif']
@@ -38,78 +39,92 @@ class LuaBeautifier:
             curr_line_lower = line.lower()
             if any(curr_line_lower.startswith(k) for k in ['end', 'until', '}', ')', 'elseif', 'else']):
                 indent = max(0, indent - 1)
-            
             formatted.append((indent_str * indent) + line)
-            
             open_count = sum(1 for k in up_keywords if k in curr_line_lower)
             close_count = sum(1 for k in down_keywords if k in curr_line_lower)
-            
-            if 'function' in curr_line_lower and 'end' in curr_line_lower:
-                pass
-            elif 'then' in curr_line_lower and 'end' in curr_line_lower:
-                pass
-            else:
-                if open_count > close_count:
-                    indent += 1
-                elif 'else' == curr_line_lower:
-                    indent += 1
+            if not ('function' in curr_line_lower and 'end' in curr_line_lower):
+                if open_count > close_count: indent += 1
+                elif 'else' == curr_line_lower: indent += 1
 
         return "\n".join(formatted)
 
-# --- MELOTEN OBFUSCATOR V9 (ABYSS UPGRADED) ---
-class MelotenObfuscatorV9:
+# --- MELOTEN OBFUSCATOR V10 (BLACK HOLE) ---
+class MelotenObfuscatorV10:
     def __init__(self, source, layers=1):
         self.original_source = source
         self.layers = layers
+        self.watermark = (
+            "--[[This file was protected by Meloten Obfuscator\n"
+            "\n"
+            "http://t.me/Meloten_Obfuscator_bot\n"
+            "DO NOT REMOVE THIS WATERMARK - SCRIPT WILL BREAK]]\n\n"
+        )
         
     def _n(self):
-        """Генерирует визуально запутанные имена (Il1l)"""
-        length = random.randint(10, 25)
-        return ''.join(random.choices("Il1", k=length))
+        """
+        Генерирует имена переменных. 
+        Исправлено: теперь всегда начинается с '_', чтобы избежать ошибок Lua.
+        """
+        length = random.randint(15, 35)
+        # Используем символы, которые трудно различить визуально (I, l, 1, O, 0)
+        suffix = ''.join(random.choices("Il1O0", k=length))
+        return f"_{suffix}"
 
     def _generate_names(self):
-        self.key = random.randint(50, 200)
-        # Генерируем уникальные имена переменных для каждого билда
+        self.key = random.randint(1000, 9999)
         self.vars = {k: self._n() for k in [
             'vm', 'state', 'bytes', 'idx', 'xor', 'junk', 
             'magic', 'dec', 'len', 'byte_val', 'table', 
-            'str_lib', 'bit_lib', 'cache', 'fake', 'shift'
+            'str_lib', 'bit_lib', 'cache', 'fake', 'shift', 'char', 'concat'
         ]}
 
     def _junk_code(self):
-        """Добавляет сложный мусорный код"""
+        """Генерирует сложный мусорный код"""
         v1 = self._n()
+        v2 = self._n()
         ops = [
-            f"local {v1} = ({random.randint(10,99)}*{random.randint(2,5)})%2;",
-            f"if (os.time() < {random.randint(100,1000)}) then return end;",
-            f"-- Memory Address: 0x{random.randint(10000,99999):X}",
-            f"local _{random.randint(1,99)} = math.abs(-1);",
+            f"local {v1} = ({random.randint(10,99)} + {random.randint(1,5)}) / 1;",
+            f"if (math.random() > 1) then while true do end end;",
+            f"-- Memory: 0x{random.randint(100000,999999):X}",
+            f"local {v2} = string.byte('{random.choice(string.ascii_letters)}');",
+            f"repeat until true;"
         ]
         return random.choice(ops)
 
     def _build_layer(self, source_code):
         self._generate_names()
         
-        # 1. Base64 Encoding
+        # 1. Base64
         b64_source = base64.b64encode(source_code.encode('utf-8')).decode('utf-8')
         
-        # 2. Custom Byte Encryption (Rolling XOR)
+        # 2. Advanced Encryption (Dual Shift XOR)
         raw_bytes = b64_source.encode('utf-8')
         enc_bytes = []
-        last_val = 123 # Seed
-        for b in raw_bytes:
-            # Сцепляем текущий байт с предыдущим значением и ключом
-            val = (b ^ self.key ^ last_val) % 255
-            enc_bytes.append(val)
-            last_val = val # Rolling key update
+        seed = self.key % 255
+        
+        for i, b in enumerate(raw_bytes):
+            # Очень запутанная формула шифрования байтов
+            step1 = (b + i) % 255
+            step2 = (step1 ^ seed)
+            step3 = (step2 - (i % 10)) % 255
+            enc_bytes.append(step3)
+            # Меняем сид для следующего байта
+            seed = (seed + step3) % 255
         
         payload = "".join([f"\\{b}" for b in enc_bytes])
 
-        # 3. VM Logic (Virtual Machine)
-        vm_script = f"""--[[ Meloten Secure V9 (Abyss) ]]
-local {self.vars['str_lib']} = string
+        # 3. VM Logic V10
+        vm_script = f"""{self.watermark}local {self.vars['str_lib']} = string
 local {self.vars['table']} = table
+local {self.vars['char']} = {self.vars['str_lib']}.char
+local {self.vars['concat']} = {self.vars['table']}.concat
 local {self.vars['bit_lib']} = bit32 or require('bit')
+
+-- Anti-Tamper / Variable Check
+if getgenv then
+    getgenv().SCRIPT_OWNER = "Gokuoriginal"
+    getgenv().MELOTEN_OBF = true
+end
 
 local function {self.vars['xor']}(a, b)
     local p,c=1,0
@@ -123,50 +138,53 @@ local function {self.vars['xor']}(a, b)
 end
 
 local function {self.vars['vm']}({self.vars['bytes']})
-    local {self.vars['state']} = 'START'
+    local {self.vars['state']} = {random.randint(100, 200)}
     local {self.vars['dec']} = {{}}
     local {self.vars['idx']} = 1
     local {self.vars['len']} = #{self.vars['bytes']}
-    local {self.vars['magic']} = {self.key}
-    local {self.vars['shift']} = 123
+    local {self.vars['magic']} = {self.key % 255}
     
-    while {self.vars['state']} ~= 'STOP' do
+    while true do
         {self._junk_code()}
         
-        if {self.vars['state']} == 'START' then
+        if {self.vars['state']} == {random.randint(100, 200)} then
             {self.vars['idx']} = 1
-            {self.vars['state']} = 'LOOP_CHECK'
+            {self.vars['state']} = 500
             
-        elseif {self.vars['state']} == 'LOOP_CHECK' then
+        elseif {self.vars['state']} == 500 then
             if {self.vars['idx']} <= {self.vars['len']} then
-                {self.vars['state']} = 'PROCESS'
+                {self.vars['state']} = 777
             else
-                {self.vars['state']} = 'FINISH'
+                {self.vars['state']} = 999
             end
-        
-        elseif {self.vars['state']} == 'PROCESS' then
+            
+        elseif {self.vars['state']} == 777 then
             local {self.vars['byte_val']} = {self.vars['str_lib']}.byte({self.vars['bytes']}, {self.vars['idx']})
+            local i = {self.vars['idx']} - 1
             
-            -- Reverse Rolling XOR logic
-            local clean = {self.vars['xor']}({self.vars['byte_val']}, {self.vars['xor']}({self.vars['magic']}, {self.vars['shift']})) % 255
-            {self.vars['shift']} = {self.vars['byte_val']} -- Update rolling key from encrypted byte
+            -- Decryption Logic V10 (Reverse)
+            local step3 = {self.vars['byte_val']}
+            local step2 = (step3 + (i % 10)) % 255
+            local step1 = {self.vars['xor']}(step2, {self.vars['magic']})
+            local clean = (step1 - i) % 255
             
-            {self.vars['table']}.insert({self.vars['dec']}, {self.vars['str_lib']}.char(clean))
+            {self.vars['magic']} = ({self.vars['magic']} + step3) % 255 -- Update rolling key
+            
+            {self.vars['table']}.insert({self.vars['dec']}, {self.vars['char']}(clean))
             {self.vars['idx']} = {self.vars['idx']} + 1
-            {self.vars['state']} = 'LOOP_CHECK'
+            {self.vars['state']} = 500
             
-        elseif {self.vars['state']} == 'FINISH' then
-             {self.vars['state']} = 'STOP'
+        elseif {self.vars['state']} == 999 then
+            break
         end
     end
     
-    return {self.vars['table']}.concat({self.vars['dec']})
+    return {self.vars['concat']}({self.vars['dec']})
 end
 
 local _payload = "{payload}"
 local _res = {self.vars['vm']}(_payload)
 
--- Decoding Wrapper
 local b='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
 local function _d(d)
     d = string.gsub(d, '[^'..b..'=]', '')
@@ -193,13 +211,14 @@ pcall(_run(_final))
         code = self.original_source
         for _ in range(self.layers):
             code = self._build_layer(code)
+        # Вотермарка всегда добавляется в финальный результат
         return code
 
 # --- КЛАВИАТУРЫ ---
 def get_action_keyboard():
     buttons = [
-        [InlineKeyboardButton(text="🔒 Obfuscate (Защитить)", callback_data="act_obfuscate")],
-        [InlineKeyboardButton(text="✨ Beautify (Улучшить)", callback_data="act_beautify")]
+        [InlineKeyboardButton(text="🔒 Obfuscate (V10)", callback_data="act_obfuscate")],
+        [InlineKeyboardButton(text="✨ Beautify (Clean)", callback_data="act_beautify")]
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -208,24 +227,24 @@ def get_action_keyboard():
 @dp.message(Command("start"))
 async def start(message: types.Message):
     await message.answer(
-        "🛡 **Meloten Obfuscator V9 (Abyss)**\n\n"
-        "Просто **отправь мне .lua файл**, и я предложу действия:\n"
-        "1️⃣ **Obfuscate** — Мощная защита кода.\n"
-        "2️⃣ **Beautify** — Выравнивание кода.\n\n"
-        "⚙️ Другие команды:\n"
-        "• `/loadstring <url>` — Генератор текста.\n"
-        "• `/setlayers 1-3` — Сила защиты.\n"
-        "• `/ping` — Проверка.",
+        "🛡 **Meloten Obfuscator V10 (Black Hole)**\n\n"
+        "Владелец: `Gokuoriginal`\n\n"
+        "Отправь мне **.lua** файл, и я предложу варианты:\n"
+        "1️⃣ **Obfuscate** — Максимальная защита V10 + Watermark.\n"
+        "2️⃣ **Beautify** — Улучшение читаемости кода.\n\n"
+        "⚙️ `/setlayers <1-3>` — Уровень защиты.\n"
+        "🔗 `/loadstring <url>` — Генератор.",
         parse_mode="Markdown"
     )
 
 @dp.message(Command("help"))
 async def help_cmd(message: types.Message):
     await message.answer(
-        "📚 **Помощь:**\n"
-        "Кидай файл -> Выбирай кнопку.\n\n"
-        "• `/loadstring <url>` — получить скрипт текстом.\n"
-        "• `/setlayers` — настроить сложность V9.",
+        "📚 **Инструкция:**\n"
+        "1. Кидаешь файл `.lua`\n"
+        "2. Жмешь кнопку под сообщением.\n"
+        "3. Получаешь результат.\n\n"
+        "❗️ Вотермарку удалять нельзя, скрипт сломается.",
         parse_mode="Markdown"
     )
 
@@ -246,38 +265,31 @@ async def set_layers(message: types.Message, command: CommandObject):
         n = int(command.args)
         if 1 <= n <= 3:
             user_settings[message.from_user.id] = n
-            await message.answer(f"✅ Слои защиты V9: **{n}**")
+            await message.answer(f"✅ V10 Слои: **{n}**")
         else:
             await message.answer("⚠️ Лимит: 1-3 слоя.")
     except:
-        await message.answer("⚠️ Введите число.")
+        await message.answer("⚠️ Введи число.")
 
 @dp.message(Command("loadstring"))
 async def make_loadstring(message: types.Message, command: CommandObject):
     if not command.args:
-        await message.answer("⚠️ Используй: `/loadstring https://raw.github...`")
+        await message.answer("⚠️ Используй: `/loadstring https://...`")
         return
-    
     url = command.args.strip()
-    # Экранируем символы для MarkdownV2 или просто используем блок кода
     code_result = f'loadstring(game:HttpGet("{url}"))()'
-    
-    await message.answer(
-        f"✅ **Твой Loadstring:**\n\n`{code_result}`",
-        parse_mode="Markdown"
-    )
+    await message.answer(f"✅ **Loadstring:**\n\n`{code_result}`", parse_mode="Markdown")
 
 @dp.message(F.document)
 async def handle_document(message: types.Message):
     if not message.document.file_name.endswith(('.lua', '.txt')):
-        await message.answer("⚠️ Принимаю только .lua или .txt файлы.")
+        await message.answer("⚠️ Только .lua или .txt файлы.")
         return
 
-    # Сохраняем ID файла во временную память
     user_current_file[message.from_user.id] = message.document.file_id
     
     await message.answer(
-        f"📂 Файл: **{message.document.file_name}**\nЧто сделать?",
+        f"📂 Файл: **{message.document.file_name}**\nВыбери действие:",
         reply_markup=get_action_keyboard(),
         parse_mode="Markdown"
     )
@@ -287,15 +299,14 @@ async def process_file_action(callback: CallbackQuery):
     action = callback.data.split("_")[1]
     user_id = callback.from_user.id
     
-    # Проверяем, есть ли файл в памяти
     file_id = user_current_file.get(user_id)
     if not file_id:
-        await callback.message.answer("❌ Файл устарел. Отправь заново.")
+        await callback.message.answer("❌ Файл устарел. Скинь снова.")
         await callback.answer()
         return
 
-    # Скачиваем файл
-    await callback.message.edit_text("⏳ **Обработка...**", parse_mode="Markdown")
+    await callback.message.edit_text("⏳ **Обработка V10...**", parse_mode="Markdown")
+    
     try:
         file_info = await bot.get_file(file_id)
         downloaded = await bot.download_file(file_info.file_path)
@@ -307,10 +318,10 @@ async def process_file_action(callback: CallbackQuery):
 
         if action == "obfuscate":
             layers = user_settings.get(user_id, 1)
-            obf = MelotenObfuscatorV9(source_code, layers=layers)
+            obf = MelotenObfuscatorV10(source_code, layers=layers)
             result_code = obf.build()
-            result_filename = "Protected_Script.lua"
-            caption_text = f"🛡 **Obfuscated V9 (Abyss)**\nLayers: {layers}"
+            result_filename = "Protected_By_Meloten.lua"
+            caption_text = f"🛡 **Protected by Meloten V10**\nOwner: `Gokuoriginal`\nLayers: {layers}"
             
         elif action == "beautify":
             beauty = LuaBeautifier(source_code)
@@ -318,25 +329,21 @@ async def process_file_action(callback: CallbackQuery):
             result_filename = "Clean_Script.lua"
             caption_text = "✨ **Beautified Code**"
 
-        # Отправка результата
         out = BufferedInputFile(result_code.encode(), filename=result_filename)
         await callback.message.answer_document(out, caption=caption_text, parse_mode="Markdown")
-        
-        # Удаляем сообщение с ожиданием
         await callback.message.delete()
         
     except Exception as e:
         logging.error(e)
         await callback.message.answer(f"❌ Ошибка: {e}")
     finally:
-        # Очищаем память (необязательно, но полезно)
         if user_id in user_current_file:
             del user_current_file[user_id]
     
     await callback.answer()
 
 async def main():
-    print("--- MELOTEN BOT STARTED ---")
+    print("--- MELOTEN V10 STARTED ---")
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
