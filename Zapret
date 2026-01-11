@@ -21,7 +21,7 @@ except Exception:
 
 from aiogram.types import BufferedInputFile, InlineKeyboardMarkup, InlineKeyboardButton
 
-API_TOKEN = '8525811167:AAGRnOjWoJqS_FyhO3fQYPPUhCbhBoZwSQo'  # заменяй при необходимости
+API_TOKEN = '8525811167:AAGRnOjWoJqS_FyhO3fQYPPUhCbhBoZwSQo'  # при необходимости замени
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN)
@@ -52,15 +52,10 @@ class LuaBeautifier:
         return "\n".join(out)
 
 
-# ------------------ MELOTEN OBFUSCATOR V13 (HARDENED, SAFE FOR LUA) ------------------
+# ------------------ MELOTEN OBFUSCATOR V13 FIXED ------------------
 class MelotenObfuscatorV13:
     """
-    V13: максимально усилённая, но совместимая с Luau обфускация:
-    - base64 -> многократные арифметические трансформации (без битовых операторов)
-    - фрагментация и перестановка фрагментов
-    - полиморфный VM (полностью на Lua, без запрещённых токенов)
-    - anti-tamper, owner bypass
-    - экранирование Lua-таблиц {{ }} в f-строках
+    Исправленная версия V13 — безопасная для Luau и с диагностикой.
     """
     def __init__(self, source: str, layers: int = 1):
         self.source = source
@@ -74,21 +69,17 @@ class MelotenObfuscatorV13:
         return head + body
 
     def _encode_payload(self, code: str):
-        # 1) base64
+        # base64 + арифметическое кодирование (без битовых операций)
         b64 = base64.b64encode(code.encode()).decode()
         key = self.master_key
         out = []
         for i, ch in enumerate(b64):
             b = ord(ch)
-            # безопасные арифметические трансформации (вместо XOR / shifts)
             k1 = (key + i * 31) % 256
             k2 = ((key // 257) + i * 17) % 256
-            # encode as additive modulo 256
             x = (b + k1 + k2) % 256
             out.append(x)
-            # mutate key (deterministic)
             key = (key * 1103515245 + 12345 + x) & 0xFFFFFFFF
-        # fragment + shuffle
         chunk_size = random.randint(6, 20)
         chunks = [out[i:i + chunk_size] for i in range(0, len(out), chunk_size)]
         order = list(range(len(chunks)))
@@ -112,15 +103,15 @@ class MelotenObfuscatorV13:
         v = {k: self._safe_name() for k in [
             "strlib", "char", "sub", "concat", "env",
             "decrypt", "chunk", "vmfunc", "decodefunc",
-            "ordertbl", "chunksz", "kf"
+            "ordertbl", "chunksz"
         ]}
 
         byte_list_str = ",".join(str(b) for b in payload_bytes)
         order_list_str = ",".join(str(o) for o in order)
 
-        # В этом Lua-коде НЕТ битовых операторов (>>, <<, ~, &). Всё через арифметику и %
+        # Вставляем исправленный b64 декодер (работает корректно с '=' padding)
         lua = f"""--[[
-  Protected by Meloten Obfuscator V13 (HARDENED)
+  Protected by Meloten Obfuscator V13 (HARDENED - FIXED)
   Link: http://t.me/Meloten_Obfuscator_bot
 ]]
 local {v['strlib']} = string
@@ -140,7 +131,7 @@ local {v['chunk']} = {{{byte_list_str}}}
 local {v['chunksz']} = {chunk_size}
 local {v['ordertbl']} = {{{order_list_str}}}
 
--- decoder (arithmetic inverse of encoder)
+-- arithmetic inverse decoder
 local function {v['decodefunc']}(b, idx, master)
     master = master or {self.master_key}
     local k1 = (master + idx * 31) % 256
@@ -167,7 +158,6 @@ local function {v['vmfunc']}()
         i = i + {v['chunksz']}
     end
 
-    -- reassemble according to order
     local assembled = {{}} 
     for p = 1, # {v['ordertbl']} do
         local pos = {v['ordertbl']}[p] + 1
@@ -177,11 +167,17 @@ local function {v['vmfunc']}()
         end
     end
 
+    -- debug: покажем в консоли длину собранного массива (помогает отлавливать ошибки)
+    pcall(function()
+        if print then
+            print("[MelotenObfuscator] assembled length:", #assembled)
+        end
+    end)
+
     local key = {self.master_key}
     for z = 1, #assembled do
         local b = assembled[z]
         local val = {v['decodefunc']}(b, z - 1, key)
-        -- update key similar to encoder
         key = (key * 1103515245 + 12345 + val) % 4294967296
         table.insert({v['decrypt']}, {v['char']}(val))
         if (z % {int(max(3, 8 - int(self.garbage_density * 10)))}) == 0 then
@@ -193,40 +189,73 @@ local function {v['vmfunc']}()
     local bset = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
     raw = raw:gsub('[^'..bset..'=]', '')
 
+    -- Correct Base64 decode (process by 4-char blocks; handles '=' padding)
     local function b64decode(s)
-        local res = {{}} 
-        local bits = ''
-        for c in s:gmatch('.') do
-            if c == '=' then break end
-            local v = bset:find(c) - 1
-            local b = ''
-            for j=6,1,-1 do
-                b = b .. ((v % (2^j) - v % (2^(j-1)) > 0) and '1' or '0')
+        local rev = {{}}
+        for i=1,#bset do
+            rev[bset:sub(i,i)] = i - 1
+        end
+        local res = {{}}
+        local i = 1
+        while i <= #s do
+            local a = s:sub(i,i) or ''
+            local b = s:sub(i+1,i+1) or ''
+            local c = s:sub(i+2,i+2) or ''
+            local d = s:sub(i+3,i+3) or ''
+            if a == '' then break end
+            local va = rev[a] or 0
+            local vb = rev[b] or 0
+            local vc = (c == '=' and 0) or (rev[c] or 0)
+            local vd = (d == '=' and 0) or (rev[d] or 0)
+            local triple = va * 2^18 + vb * 2^12 + vc * 2^6 + vd
+            table.insert(res, string.char(math.floor(triple / 2^16) % 256))
+            if c ~= '=' then
+                table.insert(res, string.char(math.floor(triple / 2^8) % 256))
             end
-            bits = bits .. b
-            while #bits >= 8 do
-                local byte = bits:sub(1,8)
-                bits = bits:sub(9)
-                local num = 0
-                for j=1,8 do
-                    if byte:sub(j,j) == '1' then num = num + 2^(8-j) end
-                end
-                table.insert(res, string.char(num))
+            if d ~= '=' then
+                table.insert(res, string.char(triple % 256))
             end
+            i = i + 4
         end
         return table.concat(res)
     end
 
-    local decoded = b64decode(raw)
-    local loader = loadstring or load
-    local f, err = loader(decoded)
-    if f then
-        pcall(f)
+    local decoded = nil
+    local okd, resd = pcall(function() return b64decode(raw) end)
+    if okd then
+        decoded = resd
     else
-        local safef, safeerr = pcall(function() return loader(decoded) end)
-        if safef and safeerr then
-            pcall(safeerr)
+        pcall(function()
+            if print then print("[MelotenObfuscator] b64decode failed:", resd) end
+        end)
+        return
+    end
+
+    -- debug: сообщим длину декодированного строки
+    pcall(function()
+        if print then
+            print("[MelotenObfuscator] decoded length:", decoded and #decoded or 0)
         end
+    end)
+
+    local loader = loadstring or load
+    local f, err = nil, nil
+    pcall(function()
+        f, err = loader(decoded)
+    end)
+
+    if not f then
+        pcall(function()
+            if print then print("[MelotenObfuscator] loader failed:", err) end
+        end)
+        return
+    end
+
+    local ok_run, run_err = pcall(f)
+    if not ok_run then
+        pcall(function()
+            if print then print("[MelotenObfuscator] runtime error:", run_err) end
+        end)
     end
 end
 
@@ -243,7 +272,6 @@ end
             payload, chunk_size, order = self._encode_payload(current)
             lua_layer = self._build_layer(payload, chunk_size, order)
             current = lua_layer
-            # mutate master key between layers
             self.master_key = (self.master_key * 1664525 + 1013904223) & 0xFFFFFFFF
         return current
 
@@ -332,7 +360,7 @@ async def handle_file_upload(message: types.Message):
     await message.answer("Файл получен. Выберите действие:", reply_markup=kb)
 
 
-# callback: совместимость Text / fallback
+# callback handler compatibility
 if Text is not None:
     @dp.callback_query(Text(startswith="filecb:"))
     async def on_file_action(callback: types.CallbackQuery):
@@ -389,7 +417,7 @@ async def _process_file_callback(callback: types.CallbackQuery):
     await bot.send_message(uid, "Неизвестное действие.")
 
 
-# очистка pending
+# cleanup pending
 async def _cleanup_pending():
     while True:
         now = time.time()
@@ -400,7 +428,7 @@ async def _cleanup_pending():
 
 
 async def main():
-    logging.info("Starting Meloten V13 Bot")
+    logging.info("Starting Meloten V13 Bot (fixed)")
     asyncio.create_task(_cleanup_pending())
     await dp.start_polling(bot)
 
@@ -409,4 +437,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
-        print("Bot stopped") 
+        print("Bot stopped")
