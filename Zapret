@@ -13,125 +13,115 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 
-# --- MELOTEN OBFUSCATOR V5 (HEAVY CFF) ---
-class MelotenObfuscatorV5:
+# --- MELOTEN OBFUSCATOR V6 (Rolling Key VM) ---
+class MelotenObfuscatorV6:
     def __init__(self, source):
         self.source = source
-        self.key = random.randint(50, 200)
-        # Генерируем имена переменных
+        self.key = random.randint(150, 250)
+        # Генерируем "злые" имена переменных (I1l0O...)
         self.v = {
-            'vm_func': self._n(),   # Имя главной функции
-            'state': self._n(),     # Переменная состояния (step)
-            'arr': self._n(),       # Таблица байтов
-            'str': self._n(),       # Входящая строка
-            'idx': self._n(),       # Индекс цикла
-            'xor': self._n(),       # Функция XOR
-            'junk': self._n(),      # Мусорная переменная
-            'magic': self._n()      # Магическое число
+            'dec_func': self._n(),  # Функция дешифровки
+            'byte_table': self._n(),# Таблица данных
+            'key_var': self._n(),   # Переменная ключа
+            'idx': self._n(),       # Счетчик
+            'str_res': self._n(),   # Итоговая строка
+            'dummy': self._n()      # Пустышка
         }
 
     def _n(self):
-        """Безопасный генератор имен (начинается с _)"""
-        length = random.randint(10, 20)
-        suffix = ''.join(random.choices("Il1O0", k=length))
-        return f"_{suffix}"
+        """Генератор запутанных имен (Il1l0O)"""
+        length = random.randint(12, 25)
+        return ''.join(random.choices("Il1O0", k=length))
 
     def _junk_code(self):
-        """Генерирует бессмысленный код для запутывания"""
+        """Генерирует мусор для сбивания с толку"""
+        vars_ = [self._n() for _ in range(3)]
         ops = [
-            f"local {self._n()} = math.abs(-{random.randint(1,99)});",
-            f"local {self._n()} = ({random.randint(1,99)} * 2) / 2;",
-            f"-- Memory: {random.randint(10000, 99999)}",
+            f"local {vars_[0]} = function(a) return a*2 end",
+            f"local {vars_[1]} = {{ 0x1, 0x2, 0x3 }}; -- Memory Check",
+            f"if {random.randint(1,10)} > 20 then return end",
         ]
-        return random.choice(ops)
+        return "\n".join(random.sample(ops, 2))
 
     def build(self):
-        # 1. Очистка
+        # 1. Очистка исходника
         lines = [line for line in self.source.splitlines() if not line.strip().startswith("--")]
         clean_source = "\n".join(lines) or self.source
 
-        # 2. Polymorphic Encryption
+        # 2. Rolling Key Encryption (Плавающий ключ)
+        # Это сильнее обычного XOR, так как ключ меняется на каждом байте
         raw_bytes = clean_source.encode('utf-8')
-        enc_bytes = []
-        last = self.key
+        enc_data = []
+        current_key = self.key
         
         for b in raw_bytes:
-            # Сложный XOR: (Byte ^ Key) - (LastByte % 7)
-            val = (b ^ self.key)
-            enc_bytes.append(val)
-        
-        payload = "".join([f"\\{b}" for b in enc_bytes])
+            # Шифруем: (Байт + Ключ) % 255
+            encrypted_byte = (b + current_key) % 256
+            enc_data.append(encrypted_byte)
+            # Обновляем ключ для следующего байта (Rolling)
+            current_key = (current_key * 1664525 + 1013904223) % 4294967296 # Линейный конгруэнтный метод
+            current_key = int(current_key % 255)
 
-        # 3. Virtual Machine с Control Flow Flattening
-        # Логика разбита на шаги (cases), которые выполняются в while loop
-        vm = f"""--[[ Meloten Secure V5 ]]
-local {self.v['xor']} = bit32 and bit32.bxor or function(a,b)
-    local p,c=1,0
-    while a>0 and b>0 do
-        local ra,rb=a%2,b%2
-        if ra~=rb then c=c+p end
-        a,b,p=(a-ra)/2,(b-rb)/2,p*2
-    end
-    if a<b then a=b end
-    while a>0 do
-        local ra=a%2
-        if ra>0 then c=c+p end
-        a,p=(a-ra)/2,p*2
-    end
-    return c
-end
+        # Превращаем данные в строку таблицы Lua: {12, 55, 23...}
+        table_str = "{" + ",".join(map(str, enc_data)) + "}"
 
-local function {self.v['vm_func']}({self.v['str']})
-    local {self.v['state']} = 1
-    local {self.v['arr']} = {{}}
-    local {self.v['idx']} = 1
-    local {self.v['magic']} = {self.key}
+        # 3. Создаем загрузчик (Loader)
+        loader = f"""--[[ 
+  Meloten Security V6 
+  Protected by Advanced Rolling Algorithm 
+]]
+local {self.v['byte_table']} = {table_str}
+local {self.v['key_var']} = {self.key}
+
+{self._junk_code()}
+
+local function {self.v['dec_func']}(data, key)
+    local {self.v['str_res']} = {{}}
+    local current_k = key
     
-    while {self.v['state']} ~= 0 do
-        {self._junk_code()}
-        if {self.v['state']} == 1 then
-            -- Init step
-            {self.v['idx']} = 1
-            {self.v['state']} = 2
+    for i = 1, #data do
+        local enc = data[i]
+        -- Обратная операция: (Enc - Key) % 256
+        local dec = (enc - current_k) % 256
+        if dec < 0 then dec = dec + 256 end
         
-        elseif {self.v['state']} == 2 then
-            -- Loop condition
-            if {self.v['idx']} <= #{self.v['str']} then
-                {self.v['state']} = 3
-            else
-                {self.v['state']} = 0 -- Exit
-            end
-            
-        elseif {self.v['state']} == 3 then
-            -- Decoding logic
-            local b = string.byte({self.v['str']}, {self.v['idx']})
-            local dec = {self.v['xor']}(b, {self.v['magic']})
-            table.insert({self.v['arr']}, string.char(dec))
-            {self.v['idx']} = {self.v['idx']} + 1
-            {self.v['state']} = 2 -- Back to loop check
-        end
+        table.insert({self.v['str_res']}, string.char(dec))
+        
+        -- Обновление ключа (точно такое же, как в Python)
+        current_k = (current_k * 1664525 + 1013904223) % 4294967296
+        current_k = current_k % 255
     end
-    return table.concat({self.v['arr']})
+    return table.concat({self.v['str_res']})
 end
 
-local _payload = "{payload}"
+{self._junk_code()}
+
 local _loader = loadstring or load
-if getgenv then getgenv().SCRIPT_OWNER = "Meloten" end
-pcall(_loader({self.v['vm_func']}(_payload)))
+local _code = {self.v['dec_func']}({self.v['byte_table']}, {self.v['key_var']})
+if getgenv then getgenv().Meloten_Secure = true end
+pcall(_loader(_code))
 """
-        return vm
+        return loader
 
 # --- ОБРАБОТЧИКИ ---
 
 @dp.message(Command("start"))
 async def start(message: types.Message):
     await message.answer(
-        "🛡 **Meloten Obfuscator V5 (Heavy)**\n\n"
-        "📜 **Функции:**\n"
-        "1️⃣ Отправь `.lua` — применю VM + Control Flow Flattening.\n"
-        "2️⃣ `/loadstring <url>` — генератор (без сохранения на диск).\n"
-        "3️⃣ Пасхалка: напиши 'meow'.\n\n"
-        "📢 Канал обновлений: @MelotenBot",
+        "🛡 **Meloten Obfuscator V6**\n\n"
+        "Я обновился! Теперь защита еще сложнее.\n"
+        "Напиши /help чтобы увидеть список команд.",
+        parse_mode="Markdown"
+    )
+
+@dp.message(Command("help"))
+async def help_command(message: types.Message):
+    await message.answer(
+        "📜 **Список команд:**\n\n"
+        "1️⃣ **Отправь файл (.lua)** — я зашифрую его новым методом (V6).\n"
+        "2️⃣ `/loadstring <ссылка>` — создам загрузчик для скрипта.\n"
+        "3️⃣ `/start` — перезапустить бота.\n\n"
+        "🐱 **Секрет:** Попробуй написать мне 'meow'.",
         parse_mode="Markdown"
     )
 
@@ -144,7 +134,6 @@ async def make_loadstring(message: types.Message, command: CommandObject):
     url = command.args.strip()
     content = f'loadstring(game:HttpGet("{url}"))()'
     
-    # Файл создается в памяти (RAM)
     file_output = BufferedInputFile(
         content.encode('utf-8'), 
         filename="loader.lua"
@@ -152,7 +141,7 @@ async def make_loadstring(message: types.Message, command: CommandObject):
     
     await message.answer_document(
         file_output, 
-        caption=f"✅ **Loadstring сгенерирован**\n(Файл удалится из памяти после отправки)", 
+        caption=f"✅ **Loadstring сгенерирован**", 
         parse_mode="Markdown"
     )
 
@@ -170,18 +159,16 @@ async def handle_docs(message: types.Message):
     if not message.document.file_name.endswith(('.lua', '.txt')):
         return
 
-    status = await message.answer("🔒 **Защита V5 (Heavy)...**", parse_mode="Markdown")
+    status = await message.answer("🔒 **Защита V6 (Rolling Key)...**", parse_mode="Markdown")
     try:
         file_info = await bot.get_file(message.document.file_id)
-        # Скачиваем в память
         file_content = await bot.download_file(file_info.file_path)
         source = file_content.read().decode('utf-8', errors='ignore')
 
-        # Обфускация
-        obf = MelotenObfuscatorV5(source)
+        # Обфускация V6
+        obf = MelotenObfuscatorV6(source)
         protected_code = obf.build()
 
-        # Создаем выходной файл в памяти
         output = BufferedInputFile(
             protected_code.encode('utf-8'), 
             filename=f"Protected_{message.document.file_name}"
@@ -189,20 +176,17 @@ async def handle_docs(message: types.Message):
         
         await message.answer_document(
             output, 
-            caption="✅ **Скрипт защищен!**\nМетод: Virtual Machine + Flow Flattening.\n\n📢 Канал: @MelotenBot",
+            caption="✅ **Скрипт защищен (V6)!**\nМетод: Rolling Key Encryption + Junk Code.\n\nКоманды: /help",
         )
         await status.delete()
-        
-        # Очистка переменных (Python GC сделает это сам, но для надежности обнуляем ссылку)
-        del source
-        del protected_code
+        del source, protected_code
         
     except Exception as e:
         logging.error(e)
         await message.answer(f"❌ Ошибка: {e}")
 
 async def main():
-    print("--- MELOTEN V5 STARTED ---")
+    print("--- MELOTEN V6 STARTED ---")
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
