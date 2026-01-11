@@ -2,20 +2,22 @@ import asyncio
 import logging
 import random
 import os
-import cv2  # pip install opencv-python
-import numpy as np
+from PIL import Image, ImageSequence  # Библиотека Pillow для работы с картинками/GIF
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile
 
 # --- КОНФИГУРАЦИЯ ---
-API_TOKEN = '8525811167:AAGGVCLArope5t9P1QeSYf3y_a18ykHdxy8' # Твой токен
+# Твой токен
+API_TOKEN = '8525811167:AAGGVCLArope5t9P1QeSYf3y_a18ykHdxy8'
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 
-# --- ЛОГИКА ULTRA VM ОБФУСКАЦИИ ---
+# ==========================================================
+# ЧАСТЬ 1: ЛОГИКА ОБФУСКАТОРА (MELOTEN VM)
+# ==========================================================
 class MelotenObfuscator:
     def __init__(self, source):
         self.source = source
@@ -28,14 +30,17 @@ class MelotenObfuscator:
         self.v_func = self._rand_name()
 
     def _rand_name(self):
+        """Генерирует имена переменных lIlIIllI"""
         return "l" + "".join(random.choices("Il1", k=random.randint(10, 15)))
 
     def build(self):
         header = "--[[Protected by Meloten Obfuscator]]\n"
+        # Шифрование XOR
         encrypted_bytes = [(ord(char) ^ self.key) for char in self.source]
         checksum = sum(encrypted_bytes)
         payload = "{" + ",".join(map(str, encrypted_bytes)) + "}"
         
+        # Lua VM код
         vm_logic = (
             f"local {self.v_data}={payload};"
             f"local {self.v_key}={self.key};"
@@ -55,146 +60,173 @@ class MelotenObfuscator:
         one_liner = vm_logic.replace("  ", "").replace("\n", "")
         return header + one_liner
 
-# --- ЛОГИКА ASCII ГЕНЕРАЦИИ ---
+# ==========================================================
+# ЧАСТЬ 2: ЛОГИКА ASCII АНИМАЦИИ (PILLOW)
+# ==========================================================
 
-# Набор символов от темного к светлому
+# Символы от темного к светлому
 ASCII_CHARS = ["@", "#", "S", "%", "?", "*", "+", ";", ":", ",", "."]
 
-def frame_to_ascii(frame, new_width=25):
-    """Преобразует один кадр (изображение) в строку ASCII"""
-    height, width, _ = frame.shape
+def image_to_ascii(image, new_width=25):
+    """Преобразует один кадр (картинку) в текст"""
+    width, height = image.size
     aspect_ratio = height / width
-    # Символы текста выше, чем шире, поэтому корректируем высоту (0.55)
+    # Корректировка высоты шрифта (символы в консоли обычно вытянуты)
     new_height = int(new_width * aspect_ratio * 0.55)
     
-    resized_frame = cv2.resize(frame, (new_width, new_height))
-    gray_frame = cv2.cvtColor(resized_frame, cv2.COLOR_BGR2GRAY)
+    # Ресайз для уменьшения и перевод в оттенки серого (L)
+    img = image.resize((new_width, new_height)).convert("L")
+    pixels = img.getdata()
     
+    # Заменяем пиксели на символы
     ascii_str = ""
-    for pixel_value in gray_frame.flatten():
-        # Мапим яркость 0-255 на индекс массива ASCII_CHARS
-        ascii_str += ASCII_CHARS[pixel_value // 25]
+    for pixel in pixels:
+        ascii_str += ASCII_CHARS[pixel // 25] # 255 / 11 символов ~= 25
         
-    # Форматируем в прямоугольник
+    # Разбиваем строку на линии
     ascii_img = ""
     for i in range(0, len(ascii_str), new_width):
         ascii_img += ascii_str[i:i+new_width] + "\n"
         
     return ascii_img
 
-async def process_video_animation(video_path, message_to_edit):
-    cap = cv2.VideoCapture(video_path)
-    
+async def animate_media(file_path, message_to_edit):
+    """Читает файл и анимирует сообщение"""
     try:
-        frame_count = 0
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
+        # Открываем файл через Pillow
+        with Image.open(file_path) as im:
             
-            frame_count += 1
+            # Проверка: Pillow может анимировать GIF и некоторые форматы.
+            # Обычные MP4 могут не открыться как последовательность кадров без плагинов.
             
-            # БЕРЕМ КАЖДЫЙ 10-й КАДР
-            # Это критически важно, иначе Телеграм заблокирует бота за спам запросами
-            if frame_count % 10 != 0:
-                continue
-
-            ascii_art = frame_to_ascii(frame)
-            
-            # Оборачиваем в код-блок для моноширинного шрифта
-            text_frame = f"```\n{ascii_art}\n```"
-            
-            try:
-                # Редактируем сообщение
-                await message_to_edit.edit_text(text_frame, parse_mode="MarkdownV2")
-                # Пауза, чтобы не словить FloodWait (минимум 1-1.5 сек)
-                await asyncio.sleep(1.5) 
-            except Exception as e:
-                # Игнорируем ошибки (например, если сообщение не изменилось)
-                pass
+            frame_number = 0
+            # ImageSequence.Iterator проходит по кадрам (если это GIF)
+            for frame in ImageSequence.Iterator(im):
+                frame_number += 1
                 
+                # Пропускаем кадры, чтобы не спамить (берем каждый 3-й кадр)
+                if frame_number % 3 != 0:
+                    continue
+                
+                # Ограничение длины (максимум 20 обновлений, чтобы не зависло)
+                if frame_number > 60: 
+                    break
+
+                # Конвертация
+                ascii_art = image_to_ascii(frame)
+                text_block = f"```\n{ascii_art}\n```"
+                
+                try:
+                    # Редактируем сообщение (Эффект анимации)
+                    await message_to_edit.edit_text(text_block, parse_mode="MarkdownV2")
+                    # ВАЖНО: Задержка 1.5 сек, иначе Телеграм забанит за флуд
+                    await asyncio.sleep(1.5)
+                except Exception:
+                    # Если текст не изменился или ошибка сети - идем дальше
+                    pass
+
+    except OSError:
+        await message_to_edit.edit_text("❌ Ошибка: Pillow не может прочитать этот видео-формат. Попробуй отправить **GIF** файл.")
+    except Exception as e:
+        logging.error(f"Error in animation: {e}")
+        await message_to_edit.edit_text(f"❌ Ошибка обработки: {e}")
     finally:
-        cap.release()
-        if os.path.exists(video_path):
-            os.remove(video_path)
+        # Удаляем временный файл
+        if os.path.exists(file_path):
+            os.remove(file_path)
         await message_to_edit.edit_text("🏁 Анимация завершена!")
 
-# --- ОБРАБОТЧИКИ ТЕЛЕГРАМ ---
+
+# ==========================================================
+# ЧАСТЬ 3: ОБРАБОТЧИКИ (HANDLERS)
+# ==========================================================
 
 @dp.message(Command("start"))
 async def start(message: types.Message):
     await message.answer(
         "✨ **Meloten Bot**\n\n"
-        "1. Отправь `.lua` для обфускации.\n"
-        "2. Ответь командой `/ASCII` на видео, чтобы получить анимацию.\n",
+        "📜 **Обфускация:** Отправь файл `.lua` или `.txt`.\n"
+        "🎬 **ASCII Арт:** Ответь командой `/ASCII` на сообщение с **GIF** (анимацией).\n",
         parse_mode="Markdown"
     )
 
-# Обработчик команды /ASCII (должен быть ответом на видео)
+# --- Обработчик команды /ASCII ---
 @dp.message(Command("ASCII"))
-async def ascii_convert(message: types.Message):
-    # Проверяем, является ли сообщение ответом (reply)
+async def ascii_handler(message: types.Message):
+    # Проверка: команда должна быть ответом (reply)
     if not message.reply_to_message:
-        await message.answer("❌ Эту команду нужно писать **в ответ** на видео!")
+        await message.answer("⚠️ Используй эту команду **в ответ** на GIF или видео!")
         return
     
-    # Проверяем, есть ли видео в отвеченном сообщении
-    video = message.reply_to_message.video or message.reply_to_message.animation
-    if not video:
-        await message.answer("❌ В сообщении, на которое ты ответил, нет видео.")
+    # Ищем анимацию или видео в сообщении
+    media = message.reply_to_message.animation or message.reply_to_message.video
+    
+    if not media:
+        await message.answer("❌ В сообщении нет видео или GIF.")
         return
 
-    status_msg = await message.answer("⏳ Скачиваю видео и готовлю магию...")
+    # Ответ пользователю
+    status_msg = await message.answer("📥 Скачиваю файл...")
     
-    # Скачивание файла во временную папку
-    file_id = video.file_id
-    file = await bot.get_file(file_id)
+    # Скачивание
+    file = await bot.get_file(media.file_id)
     file_path = file.file_path
     
-    temp_filename = f"temp_{video.file_id}.mp4"
-    await bot.download_file(file_path, temp_filename)
+    # Сохраняем с правильным расширением (GIF надежнее для Pillow)
+    ext = file_path.split('.')[-1]
+    temp_name = f"temp_{media.file_id}.{ext}"
     
-    await status_msg.edit_text("🎬 Запускаю анимацию...")
+    await bot.download_file(file_path, temp_name)
     
-    # Запуск процесса анимации
-    await process_video_animation(temp_filename, status_msg)
+    await status_msg.edit_text("🎨 Рисую символами...")
+    
+    # Запуск магии
+    await animate_media(temp_name, status_msg)
 
 
-# Обработчик файлов для обфускации
+# --- Обработчик файлов для обфускации ---
 @dp.message(F.document)
-async def handle_file_obfuscation(message: types.Message):
+async def obfuscate_file(message: types.Message):
     if not message.document.file_name.endswith(('.lua', '.txt')):
-        # Если это не луа и не команда ascii, просто игнорим или пишем ошибку
-        return
+        return # Игнорируем не скрипты
 
-    msg = await message.answer("🛡 Виртуализация...")
+    msg = await message.answer("🛡 Защищаю код...")
     
     try:
         file_info = await bot.get_file(message.document.file_id)
-        file_content = await bot.download_file(file_info.file_path)
-        source = file_content.read().decode('utf-8', errors='ignore')
+        downloaded_file = await bot.download_file(file_info.file_path)
+        
+        # Читаем исходник
+        source_code = downloaded_file.read().decode('utf-8', errors='ignore')
 
-        obf = MelotenObfuscator(source)
-        final_code = obf.build()
+        # Обфусцируем
+        obfuscator = MelotenObfuscator(source_code)
+        protected_code = obfuscator.build()
 
-        output = BufferedInputFile(
-            final_code.encode('utf-8'), 
-            filename=f"Meloten_{message.document.file_name}"
+        # Отправляем обратно
+        result_file = BufferedInputFile(
+            protected_code.encode('utf-8'), 
+            filename=f"Protected_{message.document.file_name}"
         )
         
-        await message.answer_document(output, caption="✅ Готово!")
+        await message.answer_document(result_file, caption="✅ Готово! Код защищен.")
         await msg.delete()
         
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e}")
 
-# --- ЗАПУСК ---
+
+# ==========================================================
+# ЗАПУСК
+# ==========================================================
 async def main():
-    print("MELOTEN BOT STARTED")
+    print("-------------------------")
+    print(" BOT IS ONLINE (Pillow ver) ")
+    print("-------------------------")
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
-        pass
+        print("Bot stopped")
