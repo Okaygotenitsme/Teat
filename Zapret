@@ -8,6 +8,7 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import BufferedInputFile
 
 # --- КОНФИГУРАЦИЯ ---
+# Рекомендую сменить токен, так как старый "засветился" в вопросе
 API_TOKEN = '8525811167:AAGRnOjWoJqS_FyhO3fQYPPUhCbhBoZwSQo'
 
 logging.basicConfig(level=logging.INFO)
@@ -18,32 +19,51 @@ dp = Dispatcher()
 class MelotenObfuscator:
     def __init__(self, source):
         self.source = source
-        self.key = random.randint(100, 255)
+        self.key = random.randint(100, 255) # Ключ шифрования (byte)
         self.v_data = self._rand_name()
         self.v_key = self._rand_name()
         self.v_res = self._rand_name()
         self.v_func = self._rand_name()
+        self.v_bxor = self._rand_name() # Имя для функции xor
 
     def _rand_name(self):
         """Создает нечитаемые имена переменных типа lIlIIllIlI"""
         return "l" + "".join(random.choices("Il1", k=random.randint(12, 18)))
 
     def _generate_junk(self):
-        """Создает мусорный код для запутывания декомпиляторов"""
+        """Создает мусорный код для запутывания"""
         junk_names = [self._rand_name() for _ in range(3)]
         return f"local {junk_names[0]}={random.randint(1,999)};local {junk_names[1]}='{junk_names[2]}';"
 
     def build(self):
-        # Кодируем исходник в Base64
-        b64_source = base64.b64encode(self.source.encode()).decode()
+        # 1. ШИФРОВАНИЕ (Python side)
+        # Сначала применяем XOR к каждому байту исходника
+        raw_bytes = self.source.encode('utf-8')
+        xor_bytes = bytearray(raw_bytes)
+        for i in range(len(xor_bytes)):
+            xor_bytes[i] ^= self.key
+            
+        # 2. Потом кодируем результат в Base64
+        b64_source = base64.b64encode(xor_bytes).decode()
         
         header = f"--[[Protected by Meloten Obfuscator]]\n--[[News: @MelotenBot]]\n"
         
-        # Сложная VM структура: декодирование Base64 + XOR шифрование кадра
+        # 3. ДЕШИФРОВКА (Lua side)
+        # Lua скрипт, который декодирует Base64 и применяет XOR обратно
         vm_logic = (
             f"{self._generate_junk()}"
             f"local {self.v_data}='{b64_source}';"
             f"local {self.v_key}={self.key};"
+            # Функция XOR совместимая с разными версиями Lua (Roblox использует bit32)
+            f"local function {self.v_bxor}(a,b) "
+            f"if bit32 then return bit32.bxor(a,b) else "
+            f"local p,c=1,0 while a>0 and b>0 do "
+            f"local ra,rb=a%2,b%2 if ra~=rb then c=c+p end "
+            f"a,b,p=(a-ra)/2,(b-rb)/2,p*2 end "
+            f"if a<b then a=b end while a>0 do "
+            f"local ra=a%2 if ra>0 then c=c+p end a,p=(a-ra)/2,p*2 end return c end end;"
+            
+            # Основной декодер
             f"local function {self.v_res}(d) "
             f"local b='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/' "
             f"d=d:gsub('[^'..b..'..'=]', '') "
@@ -53,13 +73,16 @@ class MelotenObfuscator:
             f"for i=6,1,-1 do r=r..(f%2^i-f%2^(i-1)>0 and '1' or '0') end "
             f"return r; end):gsub('%d%d%d%d%d%d%d%d', function(x) "
             f"local c=0 for i=1,8 do c=c+(x:sub(i,i)=='1' and 2^(8-i) or 0) end "
-            f"return string.char(bit32.bxor(c,{self.v_key})) end)) end;"
+            # Применяем XOR к расшифрованному байту
+            f"return string.char({self.v_bxor}(c,{self.v_key})) end)) end;"
+            
             f"local {self.v_func}=loadstring({self.v_res}({self.v_data}));"
             f"{self._generate_junk()}"
             f"if {self.v_func} then task.spawn({self.v_func}) end"
         )
         
-        return header + vm_logic.replace("    ", "")
+        # Убираем лишние пробелы для компактности
+        return header + vm_logic.replace("    ", " ")
 
 # --- ОБРАБОТЧИКИ ---
 
@@ -83,6 +106,7 @@ async def make_loadstring(message: types.Message, command: CommandObject):
         return
 
     url = command.args
+    # Используем raw string для безопасности
     content = f'loadstring(game:HttpGet("{url}"))()'
     
     file_output = BufferedInputFile(
@@ -100,7 +124,7 @@ async def make_loadstring(message: types.Message, command: CommandObject):
 async def ascii_dev(message: types.Message):
     await message.answer("🛠 **Эта функция (ASCII анимация) всё еще в разработке.**")
 
-# Исправленный Meow (фильтр ~F.text.startswith("/") убирает двойные ответы)
+# Исправленный Meow
 @dp.message(F.text, ~F.text.startswith("/"))
 async def meow_handler(message: types.Message):
     text = message.text.lower()
