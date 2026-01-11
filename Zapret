@@ -162,17 +162,17 @@ local {v['chunksz']} = {chunk_size}
 local {v['ordertbl']} = {{{",".join(map(str, order))}}}
 
 local function {v['vmfunc']}()
-    local {v['decrypt']} = {{}}
+    local {v['decrypt']} = {{}} 
     local idx = 1
     local key = {self.master_key}
     -- восстанавливаем порядок фрагментов
-    local parts = {{}}
+    local parts = {{}} 
     local total = # {v['chunk']}
     -- разделим по chunksz (в Lua: iterate)
     local i = 1
     local pidx = 1
     while i <= total do
-        local subtbl = {{}}
+        local subtbl = {{}} 
         for j=0, {v['chunksz']}-1 do
             if i + j <= total then
                 table.insert(subtbl, {v['chunk']}[i + j])
@@ -184,10 +184,10 @@ local function {v['vmfunc']}()
     end
 
     -- переставим фрагменты в обратном порядке (по ordertbl)
-    local assembled = {{}}
+    local assembled = {{}} 
     for p = 1, # {v['ordertbl']} do
         local pos = {v['ordertbl']}[p] + 1  -- порядок сохранён в python 0-based
-        local frag = parts[pos] or {{}}
+        local frag = parts[pos] or {{}} 
         for q = 1, #frag do
             table.insert(assembled, frag[q])
         end
@@ -212,7 +212,7 @@ local function {v['vmfunc']}()
     raw = raw:gsub('[^'..bset..'=]', '')
     -- decode base64 (встроенный Lua декодер, реализованный здесь) 
     local function b64decode(s)
-        local res = {}
+        local res = {{}} 
         local bits = ''
         for c in s:gmatch('.') do
             if c == '=' then break end
