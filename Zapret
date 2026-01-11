@@ -12,7 +12,7 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import BufferedInputFile
 
 # --- КОНФИГУРАЦИЯ ---
-API_TOKEN = "ВСТАВЬ_СЮДА_НОВЫЙ_ТОКЕН"  # <-- замените на ваш токен
+API_TOKEN = "8525811167:AAGRnOjWoJqS_FyhO3fQYPPUhCbhBoZwSQo"  # <-- замените на ваш токен
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
