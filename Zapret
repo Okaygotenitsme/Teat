@@ -2,117 +2,151 @@ import asyncio
 import logging
 import random
 import base64
-import io
+import string
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, CommandObject
 from aiogram.types import BufferedInputFile
 
 # --- КОНФИГУРАЦИЯ ---
-# ВСТАВЬТЕ СЮДА ВАШ НОВЫЙ ТОКЕН ОТ @BotFather
-API_TOKEN = '8525811167:AAGRnOjWoJqS_FyhO3fQYPPUhCbhBoZwSQo' 
+API_TOKEN = '8525811167:AAGRnOjWoJqS_FyhO3fQYPPUhCbhBoZwSQo'
 
-# Настройка логирования
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 
-# --- УЛУЧШЕННАЯ ЛОГИКА ОБФУСКАТОРА ---
-class MelotenObfuscator:
+# --- HARDCORE OBFUSCATOR ---
+class MelotenHardObfuscator:
     def __init__(self, source):
         self.source = source
-        self.key = random.randint(100, 255)
-        self.v_data = self._rand_name()
-        self.v_func = self._rand_name()
-        self.v_var = self._rand_name()
+        # Генерируем стартовый ключ
+        self.key = random.randint(15, 150)
+        # Имена переменных, имитирующие системные или hex-значения
+        self.v_table = self._hex_name()
+        self.v_decoder = self._hex_name()
+        self.v_idx = self._hex_name()
+        self.v_val = self._hex_name()
+        self.v_res = self._hex_name()
+        self.v_byte = self._hex_name()
 
-    def _rand_name(self):
-        """Создает нечитаемые имена переменных"""
-        # Используем символы, которые трудно различить визуально
-        return "v" + "".join(random.choices("Il10O", k=random.randint(8, 12)))
+    def _hex_name(self):
+        """Генерирует имена типа _0x4A12F"""
+        suffix = ''.join(random.choices("0123456789ABCDEF", k=5))
+        return f"_0x{suffix}"
+
+    def _generate_junk(self):
+        """Генерирует бессмысленные комментарии и операции"""
+        junk = [
+            f"-- Memory: {random.randint(1000,9999)}kb",
+            f"local {self._hex_name()} = {random.random()};",
+            "--[[ Obfuscated with Meloten Protection ]]"
+        ]
+        return random.choice(junk)
 
     def build(self):
-        # 1. Шифруем исходник (XOR)
-        # Добавляем небольшой заголовок, чтобы сбить сигнатуры
-        raw_bytes = self.source.encode('utf-8')
-        xor_bytes = bytearray(raw_bytes)
-        
-        # XOR шифрование каждого байта
-        for i in range(len(xor_bytes)):
-            xor_bytes[i] ^= (self.key % 255)
-            
-        # 2. Кодируем в Base64
-        b64_source = base64.b64encode(xor_bytes).decode()
-        
-        # 3. Разбиваем на чанки (для обхода лимитов строк в Lua)
-        chunk_size = 1000 
-        chunks = [b64_source[i:i+chunk_size] for i in range(0, len(b64_source), chunk_size)]
-        lua_table_content = ",".join([f"'{chunk}'" for chunk in chunks])
+        # 1. Сжимаем исходник (удаляем лишние пробелы/комментарии примитивно)
+        # Это уменьшит размер пейлоуда
+        lines = [line.strip() for line in self.source.splitlines() if not line.strip().startswith("--")]
+        clean_source = "\n".join(lines)
+        if not clean_source:
+            clean_source = self.source
 
-        # Генерируем Lua декодер.
-        # Используем чистую арифметику для XOR, чтобы работало везде (Roblox/Standard Lua)
-        vm_logic = f"""
---[[Protected by Meloten Obfuscator]]
---[[News: @MelotenBot]]
-local {self.v_data} = table.concat({{{lua_table_content}}})
-
-local function {self.v_func}(s)
-    local b = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
-    s = string.gsub(s, '[^'..b..'=]', '')
-    return (s:gsub('.', function(x)
-        if (x == '=') then return '' end
-        local r,f='',(b:find(x)-1)
-        for i=6,1,-1 do r=r..(f%2^i-f%2^(i-1)>0 and '1' or '0') end
-        return r;
-    end):gsub('%d%d%d?%d?%d?%d?%d?%d?', function(x)
-        if (#x ~= 8) then return '' end
-        local c=0
-        for i=1,8 do c=c+(x:sub(i,i)=='1' and 2^(8-i) or 0) end
+        # 2. Rolling XOR Шифрование
+        # Ключ меняется на каждом шаге: (byte ^ (key + index) % 255)
+        raw_bytes = clean_source.encode('utf-8')
+        encrypted_bytes = []
         
-        -- XOR Algorithm (Math based for compatibility)
-        local k = {self.key}
-        local m = 0
+        for i, byte in enumerate(raw_bytes):
+            # Плавающий ключ
+            dynamic_key = (self.key + i) % 255
+            encrypted_bytes.append(byte ^ dynamic_key)
+
+        # 3. Превращаем байты в escape-последовательность Lua строки
+        # Это быстрее таблицы {1, 2, 3} и занимает меньше памяти
+        lua_byte_string = "".join([f"\\{b}" for b in encrypted_bytes])
+
+        # 4. Генерируем Lua VM (Виртуальную машину декодирования)
+        vm_code = f"""
+--[[ 
+    Meloten Secure VM 
+    Protected: {random.randint(10000, 99999)} 
+]]
+local string_char = string.char
+local string_sub = string.sub
+local table_concat = table.concat
+local math_floor = math.floor
+
+-- Encrypted Payload
+local {self.v_table} = "{lua_byte_string}"
+
+-- VM Decoder Function
+local function {self.v_decoder}(str, key)
+    local {self.v_res} = {{}}
+    local len = #str
+    for {self.v_idx} = 1, len do
+        local {self.v_byte} = string.byte(str, {self.v_idx}, {self.v_idx})
+        -- Reverse Rolling XOR Logic
+        local dyn_key = (key + ({self.v_idx} - 1)) % 255
+        
+        -- Bitwise XOR emulation for 5.1/Luau compatibility
+        local a, b = {self.v_byte}, dyn_key
+        local xor_res = 0
         local p = 1
-        local a, b = c, k
         while a > 0 or b > 0 do
             local ra, rb = a % 2, b % 2
-            if ra ~= rb then m = m + p end
+            if ra ~= rb then xor_res = xor_res + p end
             a, b, p = (a - ra) / 2, (b - rb) / 2, p * 2
         end
-        return string.char(m)
-    end))
+        
+        {self.v_res}[{self.v_idx}] = string_char(xor_res)
+    end
+    return table_concat({self.v_res})
 end
 
-local {self.v_var} = {self.v_func}({self.v_data})
-local f = loadstring({self.v_var})
-if f then 
-    pcall(f) 
+-- Execution Wrapper
+local function run_vm()
+    {self._generate_junk()}
+    local code = {self.v_decoder}({self.v_table}, {self.key})
+    
+    -- Environment Sandbox (Optional Protection)
+    local f, err = loadstring(code)
+    if not f then
+        -- Try fallback for some environments
+        f, err = load(code)
+    end
+    
+    if f then
+        if getgenv then getgenv().SCRIPT_OWNER = "Meloten" end
+        pcall(f)
+    end
 end
+
+run_vm()
 """
-        return vm_logic
+        return vm_code
 
 # --- ОБРАБОТЧИКИ ---
 
 @dp.message(Command("start"))
 async def start(message: types.Message):
     await message.answer(
-        "✨ **Добро пожаловать в Meloten Bot!**\n\n"
-        "📜 **Доступные функции:**\n"
-        "1️⃣ Отправь файл `.lua` — я его **обфусцирую**.\n"
-        "2️⃣ Используй `/loadstring <ссылка>` — создам загрузчик.\n"
-        "3️⃣ Напиши 'meow' — я помяукаю.\n\n"
-        "📢 **Наш канал:** @MelotenBot",
+        "🛡 **Meloten Obfuscator V2 (Secure)**\n\n"
+        "📜 **Функции:**\n"
+        "1️⃣ Отправь `.lua` файл — я применю **Rolling XOR** + **VM** защиту.\n"
+        "2️⃣ `/loadstring <url>` — генератор загрузчика.\n"
+        "3️⃣ Напиши 'meow' — пасхалка.\n\n"
+        "Эта версия создает код, который намного сложнее прочитать новичкам.",
         parse_mode="Markdown"
     )
 
 @dp.message(Command("loadstring"))
 async def make_loadstring(message: types.Message, command: CommandObject):
     if not command.args:
-        await message.answer("⚠️ Ошибка! Введи ссылку после команды.\nПример: `/loadstring https://raw.github.com/...`", parse_mode="Markdown")
+        await message.answer("⚠️ Пример: `/loadstring https://raw.github...`")
         return
 
     url = command.args
-    # Добавляем game:HttpGet для Roblox совместимости
-    content = f'loadstring(game:HttpGet("{url}"))()'
+    # Добавляем защиту от кеширования (random tick)
+    content = f'loadstring(game:HttpGet("{url}?t="..tostring(math.random(1,10000))))()'
     
     file_output = BufferedInputFile(
         content.encode('utf-8'), 
@@ -121,58 +155,51 @@ async def make_loadstring(message: types.Message, command: CommandObject):
     
     await message.answer_document(
         file_output, 
-        caption=f"✅ **Loadstring готов!**\n\n📢 @MelotenBot", 
+        caption=f"✅ **Loadstring готов!**", 
         parse_mode="Markdown"
     )
 
 @dp.message(Command("ASCII"))
 async def ascii_dev(message: types.Message):
-    await message.answer("🛠 **Эта функция (ASCII анимация) всё еще в разработке.**")
+    await message.answer("🛠 В разработке.")
 
 @dp.message(F.text, ~F.text.startswith("/"))
 async def meow_handler(message: types.Message):
-    text = message.text.lower()
-    if "meow" in text or "мяу" in text:
-        count = random.randint(1, 10)
-        await message.answer("meow " * count)
+    if "meow" in message.text.lower() or "мяу" in message.text.lower():
+        await message.answer("🐱 Meow!")
 
 @dp.message(F.document)
 async def handle_docs(message: types.Message):
-    # Проверка расширения файла
     if not message.document.file_name.endswith(('.lua', '.txt')):
         return
 
-    status = await message.answer("🛡 **Защита Meloten VM...**", parse_mode="Markdown")
+    status = await message.answer("🔒 **Применяю усиленную защиту (V2)...**", parse_mode="Markdown")
     try:
-        # Скачивание файла
         file_info = await bot.get_file(message.document.file_id)
         file_content = await bot.download_file(file_info.file_path)
-        
-        # Чтение исходника
         source = file_content.read().decode('utf-8', errors='ignore')
 
-        # Запуск обфускатора
-        obf = MelotenObfuscator(source)
+        # Используем новый усиленный класс
+        obf = MelotenHardObfuscator(source)
         protected_code = obf.build()
 
-        # Отправка результата
         output = BufferedInputFile(
             protected_code.encode('utf-8'), 
-            filename=f"Meloten_{message.document.file_name}"
+            filename=f"Secure_{message.document.file_name}"
         )
         
         await message.answer_document(
             output, 
-            caption="✅ **Код успешно обфусцирован!**\n\n📢 @MelotenBot",
+            caption="✅ **Скрипт защищен (Rolling XOR + VM structure).**\nСложность деобфускации: Средняя/Высокая.",
             parse_mode="Markdown"
         )
         await status.delete()
     except Exception as e:
         logging.error(e)
-        await message.answer(f"❌ Произошла ошибка при обработке: {e}")
+        await message.answer(f"❌ Ошибка: {e}")
 
 async def main():
-    print("--- MELOTEN BOT STARTED ---")
+    print("--- MELOTEN SECURE BOT STARTED ---")
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
