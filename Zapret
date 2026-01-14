@@ -1,270 +1,3 @@
-import asyncio
-import logging
-import random
-import string
-import base64
-import time
-import re
-import aiohttp # <--- НУЖНО УСТАНОВИТЬ: pip install aiohttp
-from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import Command, CommandObject
-from aiogram.types import BufferedInputFile
-
-# --- КОНФИГУРАЦИЯ ---
-# Вставь свой токен сюда
-API_TOKEN = '8525811167:AAGRnOjWoJqS_FyhO3fQYPPUhCbhBoZwSQo'
-
-logging.basicConfig(level=logging.INFO)
-bot = Bot(token=API_TOKEN)
-dp = Dispatcher()
-user_settings = {} # Хранилище настроек (слои)
-
-# --- МОДУЛЬ BEAUTIFIER (Улучшение кода) ---
-class LuaBeautifier:
-    def __init__(self, source):
-        self.source = source
-
-    def format(self):
-        """Простое форматирование отступов для Lua"""
-        code = self.source
-        lines = [line.strip() for line in code.splitlines() if line.strip()]
-        
-        formatted = []
-        indent = 0
-        indent_str = "    " # 4 пробела
-        
-        up_keywords = ['function', 'do', 'then', 'repeat', '{', '(', 'if']
-        down_keywords = ['end', 'until', '}', ')', 'elseif']
-        
-        for line in lines:
-            curr_line_lower = line.lower()
-            
-            if any(curr_line_lower.startswith(k) for k in ['end', 'until', '}', ')', 'elseif', 'else']):
-                indent = max(0, indent - 1)
-            
-            formatted.append((indent_str * indent) + line)
-            
-            open_count = sum(1 for k in up_keywords if k in curr_line_lower)
-            close_count = sum(1 for k in down_keywords if k in curr_line_lower)
-            
-            if 'function' in curr_line_lower and 'end' in curr_line_lower:
-                pass
-            elif 'then' in curr_line_lower and 'end' in curr_line_lower:
-                pass
-            else:
-                if open_count > close_count:
-                    indent += 1
-                elif 'else' == curr_line_lower: 
-                    indent += 1
-
-        return "\n".join(formatted)
-
-# --- MELOTEN OBFUSCATOR V8 (ABYSS) ---
-class MelotenObfuscatorV8:
-    def __init__(self, source, layers=1):
-        self.original_source = source
-        self.layers = layers
-        
-    def _n(self):
-        length = random.randint(15, 30)
-        suffix = ''.join(random.choices("Il1O0", k=length))
-        return f"_{suffix}"
-
-    def _generate_names(self):
-        self.key = random.randint(50, 200)
-        self.vars = {k: self._n() for k in [
-            'vm', 'state', 'bytes', 'idx', 'xor', 'junk', 
-            'magic', 'dec', 'len', 'byte_val', 'table', 
-            'str_lib', 'bit_lib', 'cache', 'fake'
-        ]}
-
-    def _junk_code(self):
-        v1 = self.vars['junk']
-        ops = [
-            f"local {v1} = (5*5)-(20+5);",
-            f"if (os.clock() < 0) then while true do end end;", 
-            f"-- Opcode: 0x{random.randint(100,999):X}",
-            f"local _{random.randint(1,99)} = math.max(1, 0);",
-        ]
-        return random.choice(ops)
-
-    def _build_layer(self, source_code):
-        self._generate_names()
-        
-        b64_source = base64.b64encode(source_code.encode('utf-8')).decode('utf-8')
-        
-        raw_bytes = b64_source.encode('utf-8')
-        enc_bytes = []
-        for i, b in enumerate(raw_bytes):
-            mutator = (i * 3) % 200
-            dynamic_key = (self.key + mutator) % 255
-            val = (b ^ dynamic_key)
-            enc_bytes.append(val)
-        
-        payload = "".join([f"\\{b}" for b in enc_bytes])
-
-        vm_script = f"""--[[ Meloten Secure V8 (Abyss) ]]
-local {self.vars['str_lib']} = string
-local {self.vars['table']} = table
-local {self.vars['bit_lib']} = bit32 or require('bit')
-
-local function {self.vars['xor']}(a, b)
-    if {self.vars['bit_lib']} then return {self.vars['bit_lib']}.bxor(a, b) end
-    local p,c=1,0
-    while a>0 and b>0 do
-        local ra,rb=a%2,b%2; if ra~=rb then c=c+p end
-        a,b,p=(a-ra)/2,(b-rb)/2,p*2
-    end
-    if a<b then a=b end
-    while a>0 do local ra=a%2; if ra>0 then c=c+p end a,p=(a-ra)/2,p*2 end
-    return c
-end
-
-local function {self.vars['vm']}({self.vars['bytes']})
-    local {self.vars['state']} = 1000
-    local {self.vars['dec']} = {{}}
-    local {self.vars['idx']} = 1
-    local {self.vars['len']} = #{self.vars['bytes']}
-    local {self.vars['magic']} = {self.key}
-    
-    while {self.vars['state']} ~= 0 do
-        {self._junk_code()}
-        
-        if {self.vars['state']} == 1000 then
-            {self.vars['idx']} = 1
-            {self.vars['state']} = 750
-            
-        elseif {self.vars['state']} == 750 then
-            if {self.vars['idx']} <= {self.vars['len']} then
-                {self.vars['state']} = 500
-            else
-                {self.vars['state']} = 999
-            end
-        
-        elseif {self.vars['state']} == 500 then
-            local {self.vars['byte_val']} = {self.vars['str_lib']}.byte({self.vars['bytes']}, {self.vars['idx']})
-            local mut = ({self.vars['idx']} - 1) * 3 % 200
-            local dyn = ({self.vars['magic']} + mut) % 255
-            local clean = {self.vars['xor']}({self.vars['byte_val']}, dyn)
-            
-            {self.vars['table']}.insert({self.vars['dec']}, {self.vars['str_lib']}.char(clean))
-            {self.vars['idx']} = {self.vars['idx']} + 1
-            {self.vars['state']} = 750
-            
-        elseif {self.vars['state']} == 999 then
-             if ({self.vars['str_lib']} ~= string) then while true do end end
-             {self.vars['state']} = 0
-        end
-    end
-    
-    return {self.vars['table']}.concat({self.vars['dec']})
-end
-
-local _payload = "{payload}"
-local _res = {self.vars['vm']}(_payload)
-
-local b='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
-local function _d(d)
-    d = string.gsub(d, '[^'..b..'=]', '')
-    return (d:gsub('.', function(x)
-        if (x == '=') then return '' end
-        local r,f='',(b:find(x)-1)
-        for i=6,1,-1 do r=r..(f%2^i-f%2^(i-1)>0 and '1' or '0') end
-        return r;
-    end):gsub('%d%d%d?%d?%d?%d?%d?%d?', function(x)
-        if (#x ~= 8) then return '' end
-        local c=0
-        for i=1,8 do c=c+(x:sub(i,i)=='1' and 2^(8-i) or 0) end
-        return string.char(c)
-    end))
-end
-
-local _final = _d(_res)
-local _load = loadstring or load
-if getgenv then getgenv().SCRIPT_OWNER = "Meloten" end
-pcall(_load(_final))
-"""
-        return vm_script
-
-    def build(self):
-        code = self.original_source
-        for _ in range(self.layers):
-            code = self._build_layer(code)
-        return code
-
-# --- ОБРАБОТЧИКИ ---
-
-@dp.message(Command("start"))
-async def start(message: types.Message):
-    await message.answer(
-        "🛡 **Meloten Obfuscator V8 (Abyss)**\n\n"
-        "🔥 **Функции:**\n"
-        "1️⃣ Скинь `.lua` — защищу (V8 Abyss).\n"
-        "2️⃣ `/bypass <url>` — обход ссылок (Linkvertise, Lootlabs).\n"
-        "3️⃣ `/beautify` (с файлом) — улучшу код.\n"
-        "4️⃣ `/loadstring <url>` — генератор.\n"
-        "5️⃣ `/ping` — проверка скорости.\n\n"
-        "⚙️ Настройки: `/setlayers 1-3`\n"
-        "📢 Канал: @MelotenBot",
-        parse_mode="Markdown"
-    )
-
-@dp.message(Command("help"))
-async def help_cmd(message: types.Message):
-    await message.answer(
-        "📚 **Меню помощи:**\n\n"
-        "🔓 **Bypass (Обход ссылок):**\n"
-        "• `/bypass <ссылка>` — Получить ключ или ссылку без рекламы.\n"
-        "• Поддерживает: Linkvertise, Lootlabs, Plato, Delta и др.\n\n"
-        "🖥 **Основные:**\n"
-        "• `/start` — Перезапуск\n"
-        "• `/ping` — Узнать пинг бота\n"
-        "• `/loadstring <url>` — Создать Remote Loadstring\n\n"
-        "🛠 **Работа с кодом:**\n"
-        "• `/beautify` — Отправь эту команду ВМЕСТЕ с файлом (в описании).\n"
-        "• **Просто файл** — Отправь файл для обфускации.\n\n"
-        "🛡 **Защита V8:**\n"
-        "• `/setlayers <1-3>` — Выбор силы защиты.\n",
-        parse_mode="Markdown"
-    )
-
-@dp.message(Command("ping"))
-async def ping_handler(message: types.Message):
-    start_time = time.time()
-    msg = await message.answer("📶 **Pinging...**", parse_mode="Markdown")
-    end_time = time.time()
-    ping_ms = int((end_time - start_time) * 1000)
-    await msg.edit_text(f"📶 **Pong!**\nЗадержка: `{ping_ms}ms`", parse_mode="Markdown")
-
-@dp.message(Command("setlayers"))
-async def set_layers(message: types.Message, command: CommandObject):
-    if not command.args:
-        await message.answer("⚠️ Пример: `/setlayers 2`")
-        return
-    
-    is_premium = (message.from_user.username == "Gokuoriginal")
-    max_limit = 10 if is_premium else 3
-    
-    try:
-        n = int(command.args)
-        if 1 <= n <= max_limit:
-            user_settings[message.from_user.id] = n
-            await message.answer(f"✅ Установлено слоев защиты V8: **{n}**")
-        else:
-            await message.answer(f"⚠️ Лимит: 1-{max_limit} слоя.")
-    except:
-        await message.answer("⚠️ Введите число.")
-
-@dp.message(Command("loadstring"))
-async def make_loadstring(message: types.Message, command: CommandObject):
-    if not command.args:
-        await message.answer("⚠️ Пример: `/loadstring https://...`")
-        return
-    url = command.args.strip()
-    content = f'loadstring(game:HttpGet("{url}"))()'
-    await message.answer(f"✅ **Loadstring готов:**\n\n`{content}`", parse_mode="Markdown")
-
-# --- НОВАЯ КОМАНДА BYPASS ---
 @dp.message(Command("bypass"))
 async def bypass_handler(message: types.Message, command: CommandObject):
     if not command.args:
@@ -272,92 +5,34 @@ async def bypass_handler(message: types.Message, command: CommandObject):
         return
 
     url = command.args.strip()
-    wait_msg = await message.answer("⏳ **Обхожу рекламу...**\n_Это может занять 5-10 секунд._", parse_mode="Markdown")
+    wait_msg = await message.answer("⏳ **Обхожу рекламу через новый API...**", parse_mode="Markdown")
 
-    # Используем публичный API. Если этот перестанет работать, попробуй другие endpoints.
-    # Пример endpoint'а: https://api.bypass.vip/bypass?url=...
-    api_url = f"https://api.bypass.vip/bypass?url={url}"
+    # Используем новый API (Adrinan)
+    api_url = f"https://api.adrinan.com.br/bypass?url={url}"
 
     try:
-        # Таймаут 20 секунд, чтобы бот не завис
-        timeout = aiohttp.ClientTimeout(total=20)
+        timeout = aiohttp.ClientTimeout(total=25)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(api_url) as response:
                 
                 if response.status != 200:
-                    await wait_msg.edit_text(f"❌ **API недоступен.** Код: {response.status}")
+                    await wait_msg.edit_text(f"❌ **Сервис перегружен.** Попробуйте позже.")
                     return
 
                 data = await response.json()
                 
-                # Обработка ответа
-                status = data.get('status', '')
-                result = data.get('result', '')
+                # У Adrinan API структура ответа может отличаться
+                # Обычно результат лежит в поле 'bypassed' или 'result'
+                result = data.get('bypassed') or data.get('result')
 
-                if status == 'success' or result:
-                    final_link = result if result else "Ссылка получена, но пуста"
+                if result:
                     await wait_msg.edit_text(
-                        f"✅ **Успешно!**\n\n"
-                        f"🔗 **Результат:**\n`{final_link}`", 
+                        f"✅ **Готово!**\n\n🔗 **Результат:**\n`{result}`", 
                         parse_mode="Markdown"
                     )
                 else:
-                    error_msg = data.get('message', 'Неизвестная ошибка API')
-                    await wait_msg.edit_text(f"❌ **Не удалось обойти:**\n_{error_msg}_", parse_mode="Markdown")
+                    await wait_msg.edit_text(f"❌ **Не удалось получить ссылку.** Возможно, этот сайт не поддерживается.")
 
-    except asyncio.TimeoutError:
-        await wait_msg.edit_text("❌ **Ошибка:** Превышено время ожидания API.")
     except Exception as e:
         logging.error(e)
-        await wait_msg.edit_text(f"❌ **Критическая ошибка:**\n`{e}`", parse_mode="Markdown")
-
-
-@dp.message(F.document)
-async def handle_files(message: types.Message):
-    if not message.document.file_name.endswith(('.lua', '.txt')):
-        return
-
-    is_beautify = (message.caption and "/beautify" in message.caption)
-    
-    file_id = message.document.file_id
-    file_info = await bot.get_file(file_id)
-    downloaded = await bot.download_file(file_info.file_path)
-    source_code = downloaded.read().decode('utf-8', errors='ignore')
-
-    if is_beautify:
-        status = await message.answer("✨ **Улучшаю код (Beautify)...**", parse_mode="Markdown")
-        try:
-            beauty = LuaBeautifier(source_code)
-            formatted_code = beauty.format()
-            
-            out = BufferedInputFile(formatted_code.encode(), filename=f"Clean_{message.document.file_name}")
-            await message.answer_document(out, caption="✨ **Код отформатирован!**")
-            await status.delete()
-        except Exception as e:
-            await message.answer(f"❌ Ошибка: {e}")
-        return
-
-    layers = user_settings.get(message.from_user.id, 1)
-    status = await message.answer(f"🔒 **Защита V8 (Abyss) | Layers: {layers}...**", parse_mode="Markdown")
-    
-    try:
-        obf = MelotenObfuscatorV8(source_code, layers=layers)
-        protected_code = obf.build()
-        
-        out = BufferedInputFile(protected_code.encode(), filename=f"Protected_{message.document.file_name}")
-        await message.answer_document(out, caption=f"✅ **Готово (V8 Abyss)**\n🛡 Layers: {layers}")
-        await status.delete()
-        
-    except Exception as e:
-        logging.error(e)
-        await message.answer(f"❌ Ошибка: {e}")
-
-async def main():
-    print("--- MELOTEN V8 ABYSS STARTED ---")
-    await dp.start_polling(bot)
-
-if __name__ == '__main__':
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        print("Bot off")
+        await wait_msg.edit_text(f"❌ **Ошибка подключения.**")
