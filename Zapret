@@ -1,38 +1,56 @@
+# --- ОБНОВЛЕННАЯ КОМАНДА BYPASS ---
 @dp.message(Command("bypass"))
 async def bypass_handler(message: types.Message, command: CommandObject):
     if not command.args:
-        await message.answer("⚠️ **Ошибка:** Вставь ссылку!\nПример: `/bypass https://linkvertise.com/123/xyz`")
+        await message.answer(
+            "⚠️ **Ошибка:** Вставь ссылку!\n"
+            "Пример: `/bypass https://auth.platorelay.com/...`", 
+            parse_mode="Markdown"
+        )
         return
 
     url = command.args.strip()
-    wait_msg = await message.answer("⏳ **Обхожу рекламу через новый API...**", parse_mode="Markdown")
+    wait_msg = await message.answer(
+        "⏳ **Обхожу систему ключей...**\n"
+        "_Для Plato/Fluxus это может занять чуть больше времени._", 
+        parse_mode="Markdown"
+    )
 
-    # Используем новый API (Adrinan)
-    api_url = f"https://api.adrinan.com.br/bypass?url={url}"
+    # Используем API StickmanCyrus (хорошо справляется с Plato и игровыми ссылками)
+    api_url = f"https://stickmancyrus.com/api/bypass?url={url}"
 
     try:
-        timeout = aiohttp.ClientTimeout(total=25)
+        # Увеличим время ожидания до 30 секунд, так как Plato иногда долго грузится
+        timeout = aiohttp.ClientTimeout(total=30)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(api_url) as response:
                 
                 if response.status != 200:
-                    await wait_msg.edit_text(f"❌ **Сервис перегружен.** Попробуйте позже.")
+                    await wait_msg.edit_text("❌ **Ошибка:** Сервис обхода временно недоступен.")
                     return
 
                 data = await response.json()
                 
-                # У Adrinan API структура ответа может отличаться
-                # Обычно результат лежит в поле 'bypassed' или 'result'
-                result = data.get('bypassed') or data.get('result')
+                # Извлекаем результат (в этом API он обычно в поле 'result')
+                result = data.get('result')
 
                 if result:
+                    # Если результат слишком длинный (например, огромный ключ), 
+                    # бот отправит его в моноширинном шрифте для удобства копирования
                     await wait_msg.edit_text(
-                        f"✅ **Готово!**\n\n🔗 **Результат:**\n`{result}`", 
+                        f"✅ **Обход завершен!**\n\n"
+                        f"🔑 **Ваш результат/ключ:**\n`{result}`", 
                         parse_mode="Markdown"
                     )
                 else:
-                    await wait_msg.edit_text(f"❌ **Не удалось получить ссылку.** Возможно, этот сайт не поддерживается.")
+                    await wait_msg.edit_text(
+                        "❌ **Не удалось обойти.**\n"
+                        "Возможно, ссылка уже устарела или чекпоинт не пройден.", 
+                        parse_mode="Markdown"
+                    )
 
+    except asyncio.TimeoutError:
+        await wait_msg.edit_text("❌ **Тайм-аут:** Сайт слишком долго не отвечал.")
     except Exception as e:
-        logging.error(e)
-        await wait_msg.edit_text(f"❌ **Ошибка подключения.**")
+        logging.error(f"Bypass error: {e}")
+        await wait_msg.edit_text(f"❌ **Ошибка:** Произошел сбой при обработке ссылки.")
