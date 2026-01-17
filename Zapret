@@ -1,31 +1,91 @@
-local ReplicatedStorage=game:GetService("ReplicatedStorage")
-local units=ReplicatedStorage:FindFirstChild("Units") or Instance.new("Folder",ReplicatedStorage);units.Name="Units"
-local edit=ReplicatedStorage:FindFirstChild("UnitToEdit") or (function(v)local s=Instance.new("StringValue",ReplicatedStorage);s.Name="UnitToEdit";s.Value="";return s end)()
-local defaults={Health=100,Damage=10,Speed=16,Cost=1,AttackRadius=8,AttackSpeed=1,SpawnSpeed=1,Task="AttackEnemies"}
-local function ensure(parent,name,val)
-	local e=parent:FindFirstChild(name)
-	if e then
-		local ok=(type(val)=="string" and e:IsA("StringValue")) or (type(val)~="string" and (e:IsA("NumberValue") or e:IsA("IntValue")))
-		if ok then return e end
-		e:Destroy()
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local units = ReplicatedStorage:FindFirstChild("Units") or (function()
+	local f = Instance.new("Folder")
+	f.Name = "Units"
+	f.Parent = ReplicatedStorage
+	return f
+end)()
+
+local edit = ReplicatedStorage:FindFirstChild("UnitToEdit") or (function()
+	local s = Instance.new("StringValue")
+	s.Name = "UnitToEdit"
+	s.Value = ""
+	s.Parent = ReplicatedStorage
+	return s
+end)()
+
+local defaults = {
+	Health = 100,
+	Damage = 10,
+	Speed = 16,
+	Cost = 1,
+	AttackRadius = 8,
+	AttackSpeed = 1,
+	SpawnSpeed = 1,
+	Task = "AttackEnemies"
+}
+
+local function ensure(parent, name, val)
+	local existing = parent:FindFirstChild(name)
+	if existing then
+		local ok = (type(val) == "string" and existing:IsA("StringValue")) or
+				   (type(val) == "number" and (existing:IsA("NumberValue") or existing:IsA("IntValue")))
+		if ok then
+			return existing
+		else
+			existing:Destroy()
+		end
 	end
-	local t
-	if type(val)=="string" then t=Instance.new("StringValue") t.Value=val
-	elseif math.type(val)=="integer" then t=Instance.new("IntValue") t.Value=val
-	else t=Instance.new("NumberValue") t.Value=val end
-	t.Name=name;t.Parent=parent;return t
+	local v
+	if type(val) == "string" then
+		v = Instance.new("StringValue")
+		v.Value = val
+	elseif type(val) == "number" and math.floor(val) == val then
+		v = Instance.new("IntValue")
+		v.Value = val
+	else
+		v = Instance.new("NumberValue")
+		v.Value = val
+	end
+	v.Name = name
+	v.Parent = parent
+	return v
 end
-local function setPrim(m)
-	if not m:IsA("Model") then return end
-	if m.PrimaryPart and m.PrimaryPart.Parent then return end
-	for _,d in ipairs(m:GetDescendants()) do if d:IsA("BasePart") then m.PrimaryPart=d;break end end
+
+local function setPrimary(model)
+	if not model or not model:IsA("Model") then return end
+	if model.PrimaryPart and model.PrimaryPart.Parent then return end
+	for _, d in ipairs(model:GetDescendants()) do
+		if d:IsA("BasePart") then
+			model.PrimaryPart = d
+			break
+		end
+	end
 end
-local function proc(m)
-	if not m or not m:IsA("Model") then return end
-	setPrim(m)
-	for k,v in pairs(defaults) do ensure(m,k,v) end
-	ensure(m,"Description","")
-	if not m:FindFirstChild("MelotenProcessed") then local b=Instance.new("BoolValue",m);b.Name="MelotenProcessed";b.Value=true end
+
+local function process(model)
+	if not model or not model:IsA("Model") then return end
+	setPrimary(model)
+	for k, v in pairs(defaults) do
+		ensure(model, k, v)
+	end
+	ensure(model, "Description", "")
+	if not model:FindFirstChild("MelotenProcessed") then
+		local b = Instance.new("BoolValue")
+		b.Name = "MelotenProcessed"
+		b.Value = true
+		b.Parent = model
+	end
 end
-if edit.Value~="" then proc(units:FindFirstChild(edit.Value)) end
-edit.Changed:Connect(function() if edit.Value~="" then proc(units:FindFirstChild(edit.Value)) end end)
+
+if edit.Value ~= "" then
+	local target = units:FindFirstChild(edit.Value)
+	if target then process(target) end
+end
+
+edit.Changed:Connect(function()
+	if edit.Value ~= "" then
+		local t = units:FindFirstChild(edit.Value)
+		if t then process(t) end
+	end
+end)
