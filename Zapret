@@ -1,42 +1,15 @@
--- Обновленный скрипт системы данных (Server Script)
+-- Скрипт обновления текста (Local Script)
+local player = game.Players.LocalPlayer
+-- Ждем, пока папка и значение появятся (т.к. они создаются сервером)
+local privateStats = player:WaitForChild("PrivateStats")
+local energyValue = privateStats:WaitForChild("Energy")
+local label = script.Parent
 
-local MAX_ENERGY = 10
-local REGEN_TIME = 2
-local START_ENERGY = 5
+-- Функция обновления текста на экране
+local function updateText()
+	label.Text = "ЭНЕРГИЯ: " .. energyValue.Value
+end
 
-game.Players.PlayerAdded:Connect(function(player)
-	-- 1. Создаем публичную статистику (Wins и Cups)
-	local leaderstats = Instance.new("Folder")
-	leaderstats.Name = "leaderstats"
-	leaderstats.Parent = player
-
-	local wins = Instance.new("IntValue")
-	wins.Name = "Wins"
-	wins.Value = 0
-	wins.Parent = leaderstats
-
-	local cups = Instance.new("IntValue")
-	cups.Name = "Cups"
-	cups.Value = 0
-	cups.Parent = leaderstats
-
-	-- 2. Создаем папку для скрытых данных (Энергия)
-	local privateStats = Instance.new("Folder")
-	privateStats.Name = "PrivateStats"
-	privateStats.Parent = player
-
-	local energy = Instance.new("IntValue")
-	energy.Name = "Energy"
-	energy.Value = START_ENERGY
-	energy.Parent = privateStats
-
-	-- 3. Цикл восстановления энергии
-	spawn(function()
-		while true do
-			task.wait(REGEN_TIME)
-			if energy.Value < MAX_ENERGY then
-				energy.Value = energy.Value + 1
-			end
-		end
-	end)
-end)
+-- Обновляем текст сразу и каждый раз, когда значение меняется
+updateText()
+energyValue:GetPropertyChangedSignal("Value"):Connect(updateText)
