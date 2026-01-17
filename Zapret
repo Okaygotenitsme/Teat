@@ -1,91 +1,147 @@
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local units = ReplicatedStorage:FindFirstChild("Units") or (function()
-	local f = Instance.new("Folder")
-	f.Name = "Units"
-	f.Parent = ReplicatedStorage
-	return f
-end)()
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
 
-local edit = ReplicatedStorage:FindFirstChild("UnitToEdit") or (function()
-	local s = Instance.new("StringValue")
-	s.Name = "UnitToEdit"
-	s.Value = ""
-	s.Parent = ReplicatedStorage
-	return s
-end)()
+local UnitAI = {}
 
-local defaults = {
-	Health = 100,
-	Damage = 10,
-	Speed = 16,
-	Cost = 1,
-	AttackRadius = 8,
-	AttackSpeed = 1,
-	SpawnSpeed = 1,
-	Task = "AttackEnemies"
-}
+local function getVal(model, name)
+	local v = model:FindFirstChild(name)
+	if not v then return nil end
+	if v:IsA("NumberValue") or v:IsA("IntValue") then return v.Value end
+	if v:IsA("StringValue") then return v.Value end
+	return nil
+end
 
-local function ensure(parent, name, val)
-	local existing = parent:FindFirstChild(name)
-	if existing then
-		local ok = (type(val) == "string" and existing:IsA("StringValue")) or
-				   (type(val) == "number" and (existing:IsA("NumberValue") or existing:IsA("IntValue")))
-		if ok then
-			return existing
-		else
-			existing:Destroy()
+local function findEnemies(selfModel)
+	local out = {}
+	local owner = selfModel:FindFirstChild("Owner")
+	local ownerName = owner and owner.Value or nil
+	local spawned = Workspace:FindFirstChild("SpawnedUnits")
+	if not spawned then return out end
+	for _, m in ipairs(spawned:GetChildren()) do
+		if m ~= selfModel and m:IsA("Model") then
+			local o = m:FindFirstChild("Owner")
+			local on = o and o.Value or nil
+			if on ~= ownerName then table.insert(out, m) end
 		end
 	end
-	local v
-	if type(val) == "string" then
-		v = Instance.new("StringValue")
-		v.Value = val
-	elseif type(val) == "number" and math.floor(val) == val then
-		v = Instance.new("IntValue")
-		v.Value = val
+	return out
+end
+
+local function nearest(model, list)
+	if not model.PrimaryPart then return nil, math.huge end
+	local pos = model.PrimaryPart.Position
+	local best, bestDist = nil, math.huge
+	for _, m in ipairs(list) do
+		if m.PrimaryPart then
+			local d = (m.PrimaryPart.Position - pos).Magnitude
+			if d < bestDist then bestDist = d; best = m end
+		end
+	end
+	return best, bestDist
+end
+
+local function applyDamage(target, amount)
+	if not target then return end
+	local hp = target:FindFirstChild("Health")
+	if hp and (hp:IsA("NumberValue") or hp:IsA("IntValue")) then
+		hp.Value = hp.Value - amount
+		if hp.Value <= 0 then pcall(function() target:Destroy() end) end
 	else
-		v = Instance.new("NumberValue")
-		v.Value = val
+		pcall(function() target:Destroy() end)
 	end
-	v.Name = name
-	v.Parent = parent
-	return v
 end
 
-local function setPrimary(model)
-	if not model or not model:IsA("Model") then return end
-	if model.PrimaryPart and model.PrimaryPart.Parent then return end
-	for _, d in ipairs(model:GetDescendants()) do
-		if d:IsA("BasePart") then
-			model.PrimaryPart = d
-			break
+local function movePart(part, targetPos, speed, dt)
+	if not part then return end
+	local cur = part.Position
+	local dir = targetPos - cur
+	local dist = dir.Magnitude
+	if dist < 0.001 then return end
+	local step = speed * dt
+	local nextPos = (dist <= step) and targetPos or (cur + dir.Unit * step)
+	local look = CFrame.new(nextPos, nextPos + (dir.Unit))
+	part.CFrame = look
+end
+
+function UnitAI.Attach(unitModel)
+	if not unitModel or not unitModel:IsA("Model") then return end
+	local Health = getVal(unitModel, "Health") or 100
+	local Damage = getVal(unitModel, "Damage") or 10
+	local Speed = getVal(unitModel, "Speed") or 16
+	local AttackRadius = getVal(unitModel, "AttackRadius") or 8
+	local AttackSpeed = getVal(unitModel, "AttackSpeed") or 1
+	local SpawnSpeed = getVal(unitModel, "SpawnSpeed") or 1
+	local Task = getVal(unitModel, "Task") or "AttackEnemies"
+
+	local hp = unitModel:FindFirstChild("Health")
+	if not hp then
+		hp = Instance.new("NumberValue")
+		hp.Name = "Health"
+		hp.Value = Health
+		hp.Parent = unitModel
+	end
+
+	local primary = unitModel.PrimaryPart
+	if not primary then
+		for _, d in ipairs(unitModel:GetDescendants()) do
+			if d:IsA("BasePart") then
+				primary = d
+				unitModel.PrimaryPart = d
+				break
+			end
 		end
 	end
+
+	if primary then
+		primary.Anchored = false
+		primary.CanCollide = false
+	end
+
+	local active = false
+	spawn(function() wait(SpawnSpeed); active = true end)
+
+	local conn
+	conn = RunService.Heartbeat:Connect(function(dt)
+		if not unitModel.Parent then conn:Disconnect(); return end
+		if not active then return end
+		if hp.Value <= 0 then pcall(function() unitModel:Destroy() end); conn:Disconnect(); return end
+
+		local enemies = findEnemies(unitModel)
+		if #enemies > 0 and Task ~= "ChargeTower" then
+			local target, dist = nearest(unitModel, enemies)
+			if target and target.PrimaryPart then
+				if dist <= AttackRadius then
+					applyDamage(target, Damage)
+					wait(AttackSpeed)
+				else
+					movePart(primary, target.PrimaryPart.Position, Speed, dt)
+				end
+			end
+		else
+			local towers = Workspace:FindFirstChild("Towers")
+			local targetTower = nil
+			if towers then
+				local list = {}
+				for _, t in ipairs(towers:GetChildren()) do
+					if t:IsA("Model") and t.PrimaryPart then table.insert(list, t) end
+				end
+				if #list > 0 then
+					targetTower = (function() local n, _ = nearest(unitModel, list); return n end)()
+				end
+			end
+			if targetTower and targetTower.PrimaryPart then
+				local d = (targetTower.PrimaryPart.Position - primary.Position).Magnitude
+				if d <= AttackRadius then
+					applyDamage(targetTower, Damage)
+					wait(AttackSpeed)
+				else
+					movePart(primary, targetTower.PrimaryPart.Position, Speed, dt)
+				end
+			else
+				movePart(primary, primary.Position + primary.CFrame.LookVector * 5, Speed, dt)
+			end
+		end
+	end)
 end
 
-local function process(model)
-	if not model or not model:IsA("Model") then return end
-	setPrimary(model)
-	for k, v in pairs(defaults) do
-		ensure(model, k, v)
-	end
-	ensure(model, "Description", "")
-	if not model:FindFirstChild("MelotenProcessed") then
-		local b = Instance.new("BoolValue")
-		b.Name = "MelotenProcessed"
-		b.Value = true
-		b.Parent = model
-	end
-end
-
-if edit.Value ~= "" then
-	local target = units:FindFirstChild(edit.Value)
-	if target then process(target) end
-end
-
-edit.Changed:Connect(function()
-	if edit.Value ~= "" then
-		local t = units:FindFirstChild(edit.Value)
-		if t then process(t) end
-	end
-end)
+return UnitAI
