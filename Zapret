@@ -1,86 +1,71 @@
--- ServerScriptService/UnitEditor
+-- ServerScriptService/InitServer
+local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local units = ReplicatedStorage:FindFirstChild("Units") or (function()
+
+local MAX_ENERGY = 10
+local ENERGY_REGEN_INTERVAL = 2
+
+local function ensureRemote(name)
+	local e = ReplicatedStorage:FindFirstChild(name)
+	if not e then
+		e = Instance.new("RemoteEvent")
+		e.Name = name
+		e.Parent = ReplicatedStorage
+	end
+	return e
+end
+
+ensureRemote("SpawnEvent")
+ensureRemote("SpawnResponse")
+
+if not ReplicatedStorage:FindFirstChild("Units") then
 	local f = Instance.new("Folder")
 	f.Name = "Units"
 	f.Parent = ReplicatedStorage
-	return f
-end)()
-
-local edit = ReplicatedStorage:FindFirstChild("UnitToEdit") or (function()
-	local s = Instance.new("StringValue")
-	s.Name = "UnitToEdit"
-	s.Value = ""
-	s.Parent = ReplicatedStorage
-	return s
-end)()
-
-local defaults = {
-	Health = 100,
-	Damage = 10,
-	Speed = 16,
-	Cost = 1,
-	AttackRadius = 8,
-	AttackSpeed = 1,
-	SpawnSpeed = 1,
-	Task = "AttackEnemies"
-}
-
-local function ensure(parent, name, val)
-	local existing = parent:FindFirstChild(name)
-	if existing then
-		local ok = (type(val) == "string" and existing:IsA("StringValue")) or
-				   (type(val) == "number" and (existing:IsA("NumberValue") or existing:IsA("IntValue")))
-		if ok then return existing else existing:Destroy() end
-	end
-	local v
-	if type(val) == "string" then
-		v = Instance.new("StringValue")
-		v.Value = val
-	elseif type(val) == "number" and math.floor(val) == val then
-		v = Instance.new("IntValue")
-		v.Value = val
-	else
-		v = Instance.new("NumberValue")
-		v.Value = val
-	end
-	v.Name = name
-	v.Parent = parent
-	return v
 end
 
-local function setPrimary(model)
-	if not model or not model:IsA("Model") then return end
-	if model.PrimaryPart and model.PrimaryPart.Parent then return end
-	for _, d in ipairs(model:GetDescendants()) do
-		if d:IsA("BasePart") then
-			model.PrimaryPart = d
-			break
-		end
+local function createStatsFor(player)
+	if not player.Parent then return end
+
+	if not player:FindFirstChild("leaderstats") then
+		local ls = Instance.new("Folder")
+		ls.Name = "leaderstats"
+		ls.Parent = player
+
+		local wins = Instance.new("IntValue")
+		wins.Name = "Wins"
+		wins.Value = 0
+		wins.Parent = ls
+
+		local cups = Instance.new("IntValue")
+		cups.Name = "Cups"
+		cups.Value = 0
+		cups.Parent = ls
+	end
+
+	if not player:FindFirstChild("PrivateStats") then
+		local private = Instance.new("Folder")
+		private.Name = "PrivateStats"
+		private.Parent = player
+
+		local energy = Instance.new("IntValue")
+		energy.Name = "Energy"
+		energy.Value = MAX_ENERGY
+		energy.Parent = private
+
+		spawn(function()
+			while player.Parent do
+				wait(ENERGY_REGEN_INTERVAL)
+				if energy.Value < MAX_ENERGY then
+					energy.Value = math.clamp(energy.Value + 1, 0, MAX_ENERGY)
+				end
+			end
+		end)
 	end
 end
 
-local function process(model)
-	if not model or not model:IsA("Model") then return end
-	setPrimary(model)
-	for k, v in pairs(defaults) do ensure(model, k, v) end
-	ensure(model, "Description", "")
-	if not model:FindFirstChild("MelotenProcessed") then
-		local b = Instance.new("BoolValue")
-		b.Name = "MelotenProcessed"
-		b.Value = true
-		b.Parent = model
-	end
-end
+Players.PlayerAdded:Connect(createStatsFor)
 
-if edit.Value ~= "" then
-	local target = units:FindFirstChild(edit.Value)
-	if target then process(target) end
+for _, pl in ipairs(Players:GetPlayers()) do
+	createStatsFor(pl)
 end
-
-edit.Changed:Connect(function()
-	if edit.Value ~= "" then
-		local t = units:FindFirstChild(edit.Value)
-		if t then process(t) end
-	end
-end)
