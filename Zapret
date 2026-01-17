@@ -1,107 +1,211 @@
--- ServerScriptService/UnitEditor
--- Пробегает ReplicatedStorage.Units и гарантирует:
--- 1) Model.PrimaryPart установлен (первая BasePart)
--- 2) В шаблон добавлены значения: Health, Damage, Speed, Cost, AttackRadius, AttackSpeed, SpawnSpeed, Task
+-- ServerScriptService/UnitAI (ModuleScript)
+-- Использование: require(script.Parent.UnitAI):Attach(unitModel)
 
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local UnitAI = {}
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
 
-local unitsFolder = ReplicatedStorage:FindFirstChild("Units")
-if not unitsFolder then
-    unitsFolder = Instance.new("Folder")
-    unitsFolder.Name = "Units"
-    unitsFolder.Parent = ReplicatedStorage
+local function getValue(model, name)
+    local v = model:FindFirstChild(name)
+    if not v then return nil end
+    if v:IsA("NumberValue") or v:IsA("IntValue") then return v.Value end
+    if v:IsA("StringValue") then return v.Value end
+    return nil
 end
 
-local DEFAULTS = {
-    Health = 100,
-    Damage = 10,
-    Speed = 16,            -- studs/sec
-    Cost = 1,
-    AttackRadius = 8,      -- studs
-    AttackSpeed = 1,       -- seconds between attacks
-    SpawnSpeed = 1,        -- seconds to stand before active
-    Task = "AttackEnemies" -- "AttackEnemies" or "ChargeTower"
-}
-
-local function ensureValue(parent, name, value)
-    local existing = parent:FindFirstChild(name)
-    if existing then
-        -- если значение другого типа — заменим
-        if existing:IsA("IntValue") or existing:IsA("NumberValue") or existing:IsA("StringValue") then
-            return existing
-        else
-            existing:Destroy()
+local function findEnemies(selfModel)
+    local enemies = {}
+    local ownerVal = selfModel:FindFirstChild("Owner")
+    local ownerName = ownerVal and ownerVal.Value or nil
+    local spawned = Workspace:FindFirstChild("SpawnedUnits")
+    if not spawned then return enemies end
+    for _, m in ipairs(spawned:GetChildren()) do
+        if m ~= selfModel and m:IsA("Model") then
+            local theirOwner = m:FindFirstChild("Owner")
+            local theirName = theirOwner and theirOwner.Value or nil
+            if theirName ~= ownerName then
+                -- считаем враждой
+                table.insert(enemies, m)
+            end
         end
     end
+    return enemies
+end
 
-    local val
-    if type(value) == "string" then
-        val = Instance.new("StringValue")
-        val.Value = value
-    elseif math.type(value) == "integer" then
-        val = Instance.new("IntValue")
-        val.Value = value
+local function findNearest(model, list)
+    if not model.PrimaryPart then return nil, math.huge end
+    local pos = model.PrimaryPart.Position
+    local nearest, bestDist = nil, math.huge
+    for _,m in ipairs(list) do
+        if m.PrimaryPart then
+            local d = (m.PrimaryPart.Position - pos).Magnitude
+            if d < bestDist then
+                bestDist = d
+                nearest = m
+            end
+        end
+    end
+    return nearest, bestDist
+end
+
+local function applyDamageTo(targetModel, amount)
+    if not targetModel then return end
+    local hp = targetModel:FindFirstChild("Health")
+    if hp and (hp:IsA("NumberValue") or hp:IsA("IntValue")) then
+        hp.Value = hp.Value - amount
+        if hp.Value <= 0 then
+            -- убить модель
+            pcall(function() targetModel:Destroy() end)
+        end
     else
-        -- float -> NumberValue
-        val = Instance.new("NumberValue")
-        val.Value = value
+        -- если нет Health — просто уничтожаем
+        pcall(function() targetModel:Destroy() end)
     end
-    val.Name = name
-    val.Parent = parent
-    return val
 end
 
-local function setPrimaryPartIfMissing(model)
-    if not model:IsA("Model") then return end
-    if model.PrimaryPart and model.PrimaryPart.Parent then return end
-    for _,desc in ipairs(model:GetDescendants()) do
-        if desc:IsA("BasePart") then
-            model.PrimaryPart = desc
-            break
+-- Простейшее движение: CFrame.Lerp по PrimaryPart
+local function moveTowards(primaryPart, targetPos, speed, dt)
+    if not primaryPart then return end
+    local current = primaryPart.Position
+    local dir = targetPos - current
+    local dist = dir.Magnitude
+    if dist < 0.001 then return end
+    local maxStep = speed * dt
+    local nextPos
+    if dist <= maxStep then
+        nextPos = targetPos
+    else
+        nextPos = current + dir.Unit * maxStep
+    end
+    local look = CFrame.new(nextPos, nextPos + dir.Unit)
+    primaryPart.CFrame = look
+end
+
+-- Главная функция attach
+function UnitAI.Attach(unitModel)
+    if not unitModel or not unitModel:IsA("Model") then return end
+    -- значения (безопасные fallback)
+    local Health = getValue(unitModel, "Health") or 100
+    local Damage = getValue(unitModel, "Damage") or 10
+    local Speed = getValue(unitModel, "Speed") or 16
+    local AttackRadius = getValue(unitModel, "AttackRadius") or 8
+    local AttackSpeed = getValue(unitModel, "AttackSpeed") or 1
+    local SpawnSpeed = getValue(unitModel, "SpawnSpeed") or 1
+    local Task = getValue(unitModel, "Task") or "AttackEnemies"
+
+    -- создаём/обновляем Health в самом экземпляре (чтобы AI мог изменять)
+    local healthObj = unitModel:FindFirstChild("Health")
+    if not healthObj then
+        healthObj = Instance.new("NumberValue")
+        healthObj.Name = "Health"
+        healthObj.Value = Health
+        healthObj.Parent = unitModel
+    end
+
+    -- PrimaryPart проверка
+    local primary = unitModel.PrimaryPart
+    if not primary then
+        for _,d in ipairs(unitModel:GetDescendants()) do
+            if d:IsA("BasePart") then
+                primary = d
+                unitModel.PrimaryPart = d
+                break
+            end
         end
     end
-end
+    if primary then
+        primary.Anchored = false
+        primary.CanCollide = true
+    end
 
-local function sanitizeParts(model)
-    for _, part in ipairs(model:GetDescendants()) do
-        if part:IsA("BasePart") then
-            -- превью/шаблон: не менять физику шаблона, но убедимся, что нет странных velocities
-            part.CanCollide = true
-            part.Anchored = false
-            part.Massless = false
+    -- Состояния
+    local active = false
+    local alive = true
+
+    -- Подождать SpawnSpeed перед активацией (модель уже стоит на месте)
+    spawn(function()
+        wait(SpawnSpeed)
+        active = true
+    end)
+
+    -- Heartbeat loop
+    local conn
+    conn = RunService.Heartbeat:Connect(function(dt)
+        if not alive then
+            if conn then conn:Disconnect() end
+            return
         end
-    end
+
+        if not unitModel.Parent then
+            alive = false
+            if conn then conn:Disconnect() end
+            return
+        end
+
+        if not active then return end
+
+        -- обновляем HP (если 0 — умираем)
+        if healthObj.Value <= 0 then
+            alive = false
+            pcall(function() unitModel:Destroy() end)
+            if conn then conn:Disconnect() end
+            return
+        end
+
+        -- Найдём врагов
+        local enemies = findEnemies(unitModel)
+        if #enemies > 0 and Task ~= "ChargeTower" then
+            -- атакуем ближайшего врага
+            local target, dist = findNearest(unitModel, enemies)
+            if target and target.PrimaryPart then
+                local targetPos = target.PrimaryPart.Position
+                -- если в радиусе — атакуем
+                if dist <= AttackRadius then
+                    -- атака: наносим урон и ждем AttackSpeed
+                    applyDamageTo(target, Damage)
+                    wait(AttackSpeed)
+                else
+                    -- движемся к цели
+                    if primary then
+                        moveTowards(primary, targetPos, Speed, dt)
+                    end
+                end
+            end
+        else
+            -- нет врагов или задача ChargeTower => идём к ближайшей башне (если есть), иначе двигаемся по +X
+            local towersParent = Workspace:FindFirstChild("Towers")
+            local targetTower = nil
+            if towersParent then
+                -- собираем все башни (ожидаем, что башни - модели с PrimaryPart)
+                local list = {}
+                for _,t in ipairs(towersParent:GetChildren()) do
+                    if t:IsA("Model") and t.PrimaryPart then
+                        table.insert(list, t)
+                    end
+                end
+                targetTower = (#list > 0) and (function() 
+                    local nearest, _ = findNearest(unitModel, list)
+                    return nearest
+                end)() or nil
+            end
+
+            if targetTower and targetTower.PrimaryPart then
+                local dist = (targetTower.PrimaryPart.Position - primary.Position).Magnitude
+                if dist <= AttackRadius then
+                    applyDamageTo(targetTower, Damage)
+                    wait(AttackSpeed)
+                else
+                    moveTowards(primary, targetTower.PrimaryPart.Position, Speed, dt)
+                end
+            else
+                -- fallback: движение в направлении +X (шаг вперёд)
+                if primary then
+                    local forward = primary.CFrame * CFrame.new(10,0,0)
+                    moveTowards(primary, forward.p, Speed, dt)
+                end
+            end
+        end
+    end)
 end
 
-local function processTemplate(model)
-    if not model or not model:IsA("Model") then return end
-    setPrimaryPartIfMissing(model)
-    sanitizeParts(model)
-    -- values
-    for name,def in pairs(DEFAULTS) do
-        ensureValue(model, name, def)
-    end
-    -- optional: метаданные
-    ensureValue(model, "Description", "") -- string
-    -- пометим, что шаблон обработан
-    if not model:FindFirstChild("MelotenProcessed") then
-        local tag = Instance.new("BoolValue")
-        tag.Name = "MelotenProcessed"
-        tag.Value = true
-        tag.Parent = model
-    end
-end
-
--- Обработать существующие шаблоны
-for _, model in ipairs(unitsFolder:GetChildren()) do
-    processTemplate(model)
-end
-
--- Следим за новыми шаблонами, которые добавят в будущем
-unitsFolder.ChildAdded:Connect(function(child)
-    -- небольшая задержка на случай, если модель ещё клонируется в память
-    wait(0.1)
-    pcall(function() processTemplate(child) end)
-end)
-
-print("[UnitEditor] Done — templates processed")
+return UnitAI
