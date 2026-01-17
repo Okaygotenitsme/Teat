@@ -1,211 +1,97 @@
--- ServerScriptService/UnitAI (ModuleScript)
--- Использование: require(script.Parent.UnitAI):Attach(unitModel)
-
-local UnitAI = {}
-local RunService = game:GetService("RunService")
+-- ServerScriptService/GameSpawner
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Workspace = game:GetService("Workspace")
 
-local function getValue(model, name)
-    local v = model:FindFirstChild(name)
-    if not v then return nil end
-    if v:IsA("NumberValue") or v:IsA("IntValue") then return v.Value end
-    if v:IsA("StringValue") then return v.Value end
+local spawnEvent = ReplicatedStorage:FindFirstChild("SpawnEvent")
+if not spawnEvent then
+    spawnEvent = Instance.new("RemoteEvent")
+    spawnEvent.Name = "SpawnEvent"
+    spawnEvent.Parent = ReplicatedStorage
+end
+
+local spawnResponse = ReplicatedStorage:FindFirstChild("SpawnResponse")
+if not spawnResponse then
+    spawnResponse = Instance.new("RemoteEvent")
+    spawnResponse.Name = "SpawnResponse"
+    spawnResponse.Parent = ReplicatedStorage
+end
+
+local unitsFolder = ReplicatedStorage:WaitForChild("Units")
+local workspaceSpawned = workspace:FindFirstChild("SpawnedUnits") or Instance.new("Folder")
+workspaceSpawned.Name = "SpawnedUnits"
+workspaceSpawned.Parent = Workspace
+
+local UnitAI = require(script:FindFirstChild("UnitAI") or script.Parent:WaitForChild("UnitAI"))
+
+local ENERGY_COST_PER_SPAWN = 1
+
+local function findFirstBasePart(model)
+    for _,v in ipairs(model:GetDescendants()) do
+        if v:IsA("BasePart") then return v end
+    end
     return nil
 end
 
-local function findEnemies(selfModel)
-    local enemies = {}
-    local ownerVal = selfModel:FindFirstChild("Owner")
-    local ownerName = ownerVal and ownerVal.Value or nil
-    local spawned = Workspace:FindFirstChild("SpawnedUnits")
-    if not spawned then return enemies end
-    for _, m in ipairs(spawned:GetChildren()) do
-        if m ~= selfModel and m:IsA("Model") then
-            local theirOwner = m:FindFirstChild("Owner")
-            local theirName = theirOwner and theirOwner.Value or nil
-            if theirName ~= ownerName then
-                -- считаем враждой
-                table.insert(enemies, m)
-            end
-        end
+local function findTemplate(name)
+    if not name or name == "" then
+        return unitsFolder:GetChildren()[1]
     end
-    return enemies
+    return unitsFolder:FindFirstChild(name) or unitsFolder:GetChildren()[1]
 end
 
-local function findNearest(model, list)
-    if not model.PrimaryPart then return nil, math.huge end
-    local pos = model.PrimaryPart.Position
-    local nearest, bestDist = nil, math.huge
-    for _,m in ipairs(list) do
-        if m.PrimaryPart then
-            local d = (m.PrimaryPart.Position - pos).Magnitude
-            if d < bestDist then
-                bestDist = d
-                nearest = m
-            end
-        end
+spawnEvent.OnServerEvent:Connect(function(player, unitName, position)
+    if typeof(position) ~= "Vector3" then
+        spawnResponse:FireClient(player, false, "InvalidPosition")
+        return
     end
-    return nearest, bestDist
-end
+    local private = player:FindFirstChild("PrivateStats")
+    if not private then spawnResponse:FireClient(player, false, "NoPrivateStats"); return end
+    local energy = private:FindFirstChild("Energy")
+    if not energy or not energy:IsA("IntValue") then spawnResponse:FireClient(player, false, "NoEnergyValue"); return end
+    if energy.Value < ENERGY_COST_PER_SPAWN then spawnResponse:FireClient(player, false, "NotEnoughEnergy"); return end
 
-local function applyDamageTo(targetModel, amount)
-    if not targetModel then return end
-    local hp = targetModel:FindFirstChild("Health")
-    if hp and (hp:IsA("NumberValue") or hp:IsA("IntValue")) then
-        hp.Value = hp.Value - amount
-        if hp.Value <= 0 then
-            -- убить модель
-            pcall(function() targetModel:Destroy() end)
-        end
-    else
-        -- если нет Health — просто уничтожаем
-        pcall(function() targetModel:Destroy() end)
-    end
-end
+    local template = findTemplate(unitName)
+    if not template then spawnResponse:FireClient(player, false, "NoTemplate"); return end
 
--- Простейшее движение: CFrame.Lerp по PrimaryPart
-local function moveTowards(primaryPart, targetPos, speed, dt)
-    if not primaryPart then return end
-    local current = primaryPart.Position
-    local dir = targetPos - current
-    local dist = dir.Magnitude
-    if dist < 0.001 then return end
-    local maxStep = speed * dt
-    local nextPos
-    if dist <= maxStep then
-        nextPos = targetPos
-    else
-        nextPos = current + dir.Unit * maxStep
-    end
-    local look = CFrame.new(nextPos, nextPos + dir.Unit)
-    primaryPart.CFrame = look
-end
+    -- вычитаем энергию
+    energy.Value = math.max(0, energy.Value - ENERGY_COST_PER_SPAWN)
 
--- Главная функция attach
-function UnitAI.Attach(unitModel)
-    if not unitModel or not unitModel:IsA("Model") then return end
-    -- значения (безопасные fallback)
-    local Health = getValue(unitModel, "Health") or 100
-    local Damage = getValue(unitModel, "Damage") or 10
-    local Speed = getValue(unitModel, "Speed") or 16
-    local AttackRadius = getValue(unitModel, "AttackRadius") or 8
-    local AttackSpeed = getValue(unitModel, "AttackSpeed") or 1
-    local SpawnSpeed = getValue(unitModel, "SpawnSpeed") or 1
-    local Task = getValue(unitModel, "Task") or "AttackEnemies"
+    local clone = template:Clone()
+    clone.Name = template.Name .. "_" .. player.Name .. "_" .. tostring(tick())
+    -- проставим Owner для AI
+    local owner = Instance.new("StringValue")
+    owner.Name = "Owner"
+    owner.Value = player.Name
+    owner.Parent = clone
 
-    -- создаём/обновляем Health в самом экземпляре (чтобы AI мог изменять)
-    local healthObj = unitModel:FindFirstChild("Health")
-    if not healthObj then
-        healthObj = Instance.new("NumberValue")
-        healthObj.Name = "Health"
-        healthObj.Value = Health
-        healthObj.Parent = unitModel
-    end
+    -- если в шаблоне есть параметры, они уже есть как значения в модели; клон их унаследует
+    -- переместим в Workspace.SpawnedUnits
+    clone.Parent = workspaceSpawned
 
-    -- PrimaryPart проверка
-    local primary = unitModel.PrimaryPart
-    if not primary then
-        for _,d in ipairs(unitModel:GetDescendants()) do
-            if d:IsA("BasePart") then
-                primary = d
-                unitModel.PrimaryPart = d
-                break
-            end
-        end
-    end
-    if primary then
-        primary.Anchored = false
-        primary.CanCollide = true
-    end
-
-    -- Состояния
-    local active = false
-    local alive = true
-
-    -- Подождать SpawnSpeed перед активацией (модель уже стоит на месте)
-    spawn(function()
-        wait(SpawnSpeed)
-        active = true
-    end)
-
-    -- Heartbeat loop
-    local conn
-    conn = RunService.Heartbeat:Connect(function(dt)
-        if not alive then
-            if conn then conn:Disconnect() end
-            return
-        end
-
-        if not unitModel.Parent then
-            alive = false
-            if conn then conn:Disconnect() end
-            return
-        end
-
-        if not active then return end
-
-        -- обновляем HP (если 0 — умираем)
-        if healthObj.Value <= 0 then
-            alive = false
-            pcall(function() unitModel:Destroy() end)
-            if conn then conn:Disconnect() end
-            return
-        end
-
-        -- Найдём врагов
-        local enemies = findEnemies(unitModel)
-        if #enemies > 0 and Task ~= "ChargeTower" then
-            -- атакуем ближайшего врага
-            local target, dist = findNearest(unitModel, enemies)
-            if target and target.PrimaryPart then
-                local targetPos = target.PrimaryPart.Position
-                -- если в радиусе — атакуем
-                if dist <= AttackRadius then
-                    -- атака: наносим урон и ждем AttackSpeed
-                    applyDamageTo(target, Damage)
-                    wait(AttackSpeed)
-                else
-                    -- движемся к цели
-                    if primary then
-                        moveTowards(primary, targetPos, Speed, dt)
-                    end
-                end
-            end
+    -- Убедимся, что есть PrimaryPart и ставим модель на поверхность (position) корректно
+    local root = findFirstBasePart(clone)
+    if root then
+        local yOffset = root.Size.Y / 2
+        -- попытаемся аккуратно разместить
+        if clone.PrimaryPart then
+            clone:SetPrimaryPartCFrame(CFrame.new(position + Vector3.new(0, yOffset, 0)))
         else
-            -- нет врагов или задача ChargeTower => идём к ближайшей башне (если есть), иначе двигаемся по +X
-            local towersParent = Workspace:FindFirstChild("Towers")
-            local targetTower = nil
-            if towersParent then
-                -- собираем все башни (ожидаем, что башни - модели с PrimaryPart)
-                local list = {}
-                for _,t in ipairs(towersParent:GetChildren()) do
-                    if t:IsA("Model") and t.PrimaryPart then
-                        table.insert(list, t)
-                    end
-                end
-                targetTower = (#list > 0) and (function() 
-                    local nearest, _ = findNearest(unitModel, list)
-                    return nearest
-                end)() or nil
-            end
-
-            if targetTower and targetTower.PrimaryPart then
-                local dist = (targetTower.PrimaryPart.Position - primary.Position).Magnitude
-                if dist <= AttackRadius then
-                    applyDamageTo(targetTower, Damage)
-                    wait(AttackSpeed)
-                else
-                    moveTowards(primary, targetTower.PrimaryPart.Position, Speed, dt)
-                end
-            else
-                -- fallback: движение в направлении +X (шаг вперёд)
-                if primary then
-                    local forward = primary.CFrame * CFrame.new(10,0,0)
-                    moveTowards(primary, forward.p, Speed, dt)
-                end
-            end
+            clone:MoveTo(position + Vector3.new(0, yOffset, 0))
         end
-    end)
-end
+    end
 
-return UnitAI
+    -- Отключаем любую клиентскую логику, скрипты шаблона (мы будем работать с серверным AI)
+    for _,desc in ipairs(clone:GetDescendants()) do
+        if desc:IsA("Script") then
+            pcall(function() desc.Disabled = true end)
+        end
+    end
+
+    -- Запускаем AI (Module) — он сам подождёт SpawnSpeed перед активацией
+    pcall(function()
+        UnitAI.Attach(clone)
+    end)
+
+    spawnResponse:FireClient(player, true, "Spawned", clone:GetFullName())
+end)
