@@ -1,138 +1,143 @@
+local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local Workspace = game:GetService("Workspace")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
 
-local spawnEvent = ReplicatedStorage:FindFirstChild("SpawnEvent") or (function()
-	local e = Instance.new("RemoteEvent")
-	e.Name = "SpawnEvent"
-	e.Parent = ReplicatedStorage
-	return e
-end)()
+local player = Players.LocalPlayer
+local mouse = player:GetMouse()
+local spawnEvent = ReplicatedStorage:WaitForChild("SpawnEvent")
+local spawnResponse = ReplicatedStorage:WaitForChild("SpawnResponse")
 
-local spawnResponse = ReplicatedStorage:FindFirstChild("SpawnResponse") or (function()
-	local e = Instance.new("RemoteEvent")
-	e.Name = "SpawnResponse"
-	e.Parent = ReplicatedStorage
-	return e
-end)()
-
+local gui = script.Parent
+local spawnBtn = gui:WaitForChild("SpawnButton")
+local energyLabel = gui:WaitForChild("EnergyLabel")
+local hintLabel = gui:FindFirstChild("HintLabel")
 local units = ReplicatedStorage:WaitForChild("Units")
-local spawnedFolder = Workspace:FindFirstChild("SpawnedUnits") or (function()
-	local f = Instance.new("Folder")
-	f.Name = "SpawnedUnits"
-	f.Parent = Workspace
-	return f
-end)()
+local selectedUnit = (units:GetChildren()[1] and units:GetChildren()[1].Name) or nil
 
-local UnitAI
-local ok, mod = pcall(function()
-	return require(script:FindFirstChild("UnitAI") or script.Parent:WaitForChild("UnitAI"))
-end)
-if ok then UnitAI = mod end
+local placing = false
+local preview = nil
+local spawnPending = false
+local TIMEOUT = 3
 
-local lastSpawn = {}
-local DUP_T = 0.6
-local DUP_D = 1.0
-local ENERGY_DEF = 1
-
-local function firstPart(model)
-	for _, v in ipairs(model:GetDescendants()) do
-		if v:IsA("BasePart") then return v end
-	end
-	return nil
-end
-
-local function isFree(pos, minDist)
-	for _, m in ipairs(spawnedFolder:GetChildren()) do
-		if m:IsA("Model") and m.PrimaryPart then
-			if (m.PrimaryPart.Position - pos).Magnitude < minDist then
-				return false
-			end
-		end
-	end
-	return true
-end
-
-local function findFree(basePos, primarySize)
-	local minDist = (primarySize and primarySize.Magnitude or 4) + 1
-	if isFree(basePos, minDist) then return basePos end
-	for r = 2, 20, 2 do
-		for a = 0, 360, 30 do
-			local rad = math.rad(a)
-			local off = Vector3.new(math.cos(rad) * r, 0, math.sin(rad) * r)
-			local cand = basePos + off
-			if isFree(cand, minDist) then return cand end
-		end
-	end
-	return basePos
-end
-
-local function findTemplate(name)
-	if not name or name == "" then return units:GetChildren()[1] end
-	return units:FindFirstChild(name) or units:GetChildren()[1]
-end
-
-spawnEvent.OnServerEvent:Connect(function(player, unitName, position)
-	if typeof(position) ~= "Vector3" then spawnResponse:FireClient(player, false, "InvalidPosition"); return end
-	local now = os.clock()
-	local last = lastSpawn[player]
-	if last and now - last.time < DUP_T and (position - last.pos).Magnitude < DUP_D then
-		spawnResponse:FireClient(player, false, "Duplicate")
-		return
-	end
-	lastSpawn[player] = { time = now, pos = position }
-
-	local private = player:FindFirstChild("PrivateStats")
-	if not private then spawnResponse:FireClient(player, false, "NoPrivateStats"); return end
-	local energy = private:FindFirstChild("Energy")
-	if not energy or not energy:IsA("IntValue") then spawnResponse:FireClient(player, false, "NoEnergyValue"); return end
-
-	local template = findTemplate(unitName)
-	if not template then spawnResponse:FireClient(player, false, "NoTemplate"); return end
-
-	local cost = (template:FindFirstChild("Cost") and template.Cost.Value) or ENERGY_DEF
-	if energy.Value < cost then spawnResponse:FireClient(player, false, "NotEnoughEnergy"); return end
-
-	energy.Value = math.max(0, energy.Value - cost)
-
-	local clone = template:Clone()
-	clone.Name = template.Name .. "_" .. player.Name .. "_" .. tostring(tick())
-	local owner = Instance.new("StringValue")
-	owner.Name = "Owner"
-	owner.Value = player.Name
-	owner.Parent = clone
-
-	for _, d in ipairs(clone:GetDescendants()) do
+local function createPreview(template)
+	if not template then return nil end
+	local p = template:Clone()
+	for _, d in ipairs(p:GetDescendants()) do
 		if d:IsA("BasePart") then
 			d.CanCollide = false
+			d.Anchored = true
 			d.Massless = true
-			d.Anchored = false
+			d.Transparency = (d.Transparency or 0) + 0.45
+		elseif d:IsA("ParticleEmitter") or d:IsA("Trail") then
+			pcall(function() d.Enabled = false end)
 		elseif d:IsA("Script") then
 			pcall(function() d.Disabled = true end)
 		end
 	end
-
-	clone.Parent = spawnedFolder
-
-	local root = firstPart(clone)
-	if root then
-		local rp = RaycastParams.new()
-		rp.FilterDescendantsInstances = { player.Character, clone }
-		rp.FilterType = Enum.RaycastFilterType.Blacklist
-		local ray = workspace:Raycast(position + Vector3.new(0, 10, 0), Vector3.new(0, -60, 0), rp)
-		local place = position
-		if ray and ray.Position then place = ray.Position end
-		local freePos = findFree(place, root.Size)
-		local yOff = root.Size.Y / 2
-		if clone.PrimaryPart then
-			clone:SetPrimaryPartCFrame(CFrame.new(freePos + Vector3.new(0, yOff, 0)))
-		else
-			clone:MoveTo(freePos + Vector3.new(0, yOff, 0))
+	if not p.PrimaryPart then
+		for _, d in ipairs(p:GetDescendants()) do
+			if d:IsA("BasePart") then
+				p.PrimaryPart = d
+				break
+			end
 		end
 	end
+	p.Parent = workspace
+	return p
+end
 
-	if UnitAI then
-		pcall(function() UnitAI.Attach(clone) end)
+local function updatePreviewPosition()
+	if not preview or not preview.PrimaryPart then return end
+	local rp = RaycastParams.new()
+	rp.FilterDescendantsInstances = { player.Character, preview }
+	rp.FilterType = Enum.RaycastFilterType.Blacklist
+	local targetPos = nil
+	if mouse.Target then
+		targetPos = mouse.Hit.Position
+	else
+		local cam = workspace.CurrentCamera
+		local mx, my = UserInputService:GetMouseLocation().X, UserInputService:GetMouseLocation().Y
+		local ray = cam:ScreenPointToRay(mx, my)
+		local res = workspace:Raycast(ray.Origin, ray.Direction * 5000, rp)
+		if res then targetPos = res.Position end
 	end
+	if not targetPos then return end
+	local root
+	for _, v in ipairs(preview:GetDescendants()) do
+		if v:IsA("BasePart") then root = v; break end
+	end
+	local yOff = (root and root.Size.Y / 2) or 0
+	local down = workspace:Raycast(targetPos + Vector3.new(0, 5, 0), Vector3.new(0, -30, 0), rp)
+	local finalPos = (down and down.Position) or targetPos
+	pcall(function() preview:SetPrimaryPartCFrame(CFrame.new(finalPos + Vector3.new(0, yOff, 0))) end)
+end
 
-	spawnResponse:FireClient(player, true, "Spawned", clone:GetFullName())
+local function startPlacement()
+	if placing then return end
+	placing = true
+	local t = units:FindFirstChild(selectedUnit) or units:GetChildren()[1]
+	preview = createPreview(t)
+end
+
+local function stopPlacement(destroyPreview)
+	placing = false
+	if destroyPreview and preview and preview.Parent then preview:Destroy() end
+	preview = nil
+end
+
+local function tryPlaceAtMouse()
+	if not preview then return end
+	if spawnPending then
+		if hintLabel then hintLabel.Text = "Spawn pending..." end
+		delay(1.2, function() if hintLabel and hintLabel.Parent then hintLabel.Text = "" end end)
+		return
+	end
+	local pos = preview.PrimaryPart and preview.PrimaryPart.Position or mouse.Hit.Position
+	spawnPending = true
+	spawnEvent:FireServer(selectedUnit, pos)
+	delay(TIMEOUT, function()
+		if spawnPending then
+			spawnPending = false
+			if hintLabel then
+				hintLabel.Text = "Spawn timed out"
+				delay(1.2, function() if hintLabel and hintLabel.Parent then hintLabel.Text = "" end end)
+			end
+		end
+	end)
+end
+
+spawnBtn.MouseButton1Click:Connect(function()
+	if not placing then startPlacement() else stopPlacement(true) end
 end)
+
+mouse.Button1Down:Connect(function()
+	if placing then tryPlaceAtMouse() end
+end)
+
+spawnResponse.OnClientEvent:Connect(function(success, code)
+	spawnPending = false
+	if success then
+		if hintLabel then hintLabel.Text = "Spawned" end
+		stopPlacement(true)
+	else
+		if hintLabel then
+			if code == "NotEnoughEnergy" then hintLabel.Text = "No energy"
+			elseif code == "Duplicate" then hintLabel.Text = "Duplicate ignored"
+			else hintLabel.Text = "Spawn failed: "..tostring(code) end
+			delay(1.2, function() if hintLabel and hintLabel.Parent then hintLabel.Text = "" end end)
+		end
+	end
+end)
+
+local function bindEnergyLabel()
+	local p = player:WaitForChild("PrivateStats", 5)
+	if not p then energyLabel.Text = "Energy: ?" return end
+	local e = p:WaitForChild("Energy", 5)
+	if not e then energyLabel.Text = "Energy: ?" return end
+	energyLabel.Text = "Energy: "..tostring(e.Value)
+	e.Changed:Connect(function(val) energyLabel.Text = "Energy: "..tostring(e.Value) end)
+end
+
+RunService.RenderStepped:Connect(function() if placing then updatePreviewPosition() end end)
+bindEnergyLabel()
