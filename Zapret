@@ -1,97 +1,57 @@
--- ServerScriptService/GameSpawner
-local Players = game:GetService("Players")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local Workspace = game:GetService("Workspace")
+-- Заменить старую функцию updatePreviewPosition на эту:
+local function updatePreviewPosition()
+    if not previewModel or not previewModel.PrimaryPart then return end
 
-local spawnEvent = ReplicatedStorage:FindFirstChild("SpawnEvent")
-if not spawnEvent then
-    spawnEvent = Instance.new("RemoteEvent")
-    spawnEvent.Name = "SpawnEvent"
-    spawnEvent.Parent = ReplicatedStorage
-end
+    local rayParams = RaycastParams.new()
+    rayParams.FilterDescendantsInstances = {player.Character, previewModel}
+    rayParams.FilterType = Enum.RaycastFilterType.Blacklist
+    rayParams.IgnoreWater = false
 
-local spawnResponse = ReplicatedStorage:FindFirstChild("SpawnResponse")
-if not spawnResponse then
-    spawnResponse = Instance.new("RemoteEvent")
-    spawnResponse.Name = "SpawnResponse"
-    spawnResponse.Parent = ReplicatedStorage
-end
-
-local unitsFolder = ReplicatedStorage:WaitForChild("Units")
-local workspaceSpawned = workspace:FindFirstChild("SpawnedUnits") or Instance.new("Folder")
-workspaceSpawned.Name = "SpawnedUnits"
-workspaceSpawned.Parent = Workspace
-
-local UnitAI = require(script:FindFirstChild("UnitAI") or script.Parent:WaitForChild("UnitAI"))
-
-local ENERGY_COST_PER_SPAWN = 1
-
-local function findFirstBasePart(model)
-    for _,v in ipairs(model:GetDescendants()) do
-        if v:IsA("BasePart") then return v end
-    end
-    return nil
-end
-
-local function findTemplate(name)
-    if not name or name == "" then
-        return unitsFolder:GetChildren()[1]
-    end
-    return unitsFolder:FindFirstChild(name) or unitsFolder:GetChildren()[1]
-end
-
-spawnEvent.OnServerEvent:Connect(function(player, unitName, position)
-    if typeof(position) ~= "Vector3" then
-        spawnResponse:FireClient(player, false, "InvalidPosition")
-        return
-    end
-    local private = player:FindFirstChild("PrivateStats")
-    if not private then spawnResponse:FireClient(player, false, "NoPrivateStats"); return end
-    local energy = private:FindFirstChild("Energy")
-    if not energy or not energy:IsA("IntValue") then spawnResponse:FireClient(player, false, "NoEnergyValue"); return end
-    if energy.Value < ENERGY_COST_PER_SPAWN then spawnResponse:FireClient(player, false, "NotEnoughEnergy"); return end
-
-    local template = findTemplate(unitName)
-    if not template then spawnResponse:FireClient(player, false, "NoTemplate"); return end
-
-    -- вычитаем энергию
-    energy.Value = math.max(0, energy.Value - ENERGY_COST_PER_SPAWN)
-
-    local clone = template:Clone()
-    clone.Name = template.Name .. "_" .. player.Name .. "_" .. tostring(tick())
-    -- проставим Owner для AI
-    local owner = Instance.new("StringValue")
-    owner.Name = "Owner"
-    owner.Value = player.Name
-    owner.Parent = clone
-
-    -- если в шаблоне есть параметры, они уже есть как значения в модели; клон их унаследует
-    -- переместим в Workspace.SpawnedUnits
-    clone.Parent = workspaceSpawned
-
-    -- Убедимся, что есть PrimaryPart и ставим модель на поверхность (position) корректно
-    local root = findFirstBasePart(clone)
-    if root then
-        local yOffset = root.Size.Y / 2
-        -- попытаемся аккуратно разместить
-        if clone.PrimaryPart then
-            clone:SetPrimaryPartCFrame(CFrame.new(position + Vector3.new(0, yOffset, 0)))
-        else
-            clone:MoveTo(position + Vector3.new(0, yOffset, 0))
+    -- получаем экранную позицию курсора (удобнее через mouse.Hit)
+    local targetPos = nil
+    if mouse.Target then
+        targetPos = mouse.Hit.Position
+    else
+        -- fallback: рейкаст от камеры через курсор
+        local cam = workspace.CurrentCamera
+        local mouseX, mouseY = UserInputService:GetMouseLocation().X, UserInputService:GetMouseLocation().Y
+        local ray = cam:ScreenPointToRay(mouseX, mouseY)
+        local result = workspace:Raycast(ray.Origin, ray.Direction * 5000, rayParams)
+        if result then
+            targetPos = result.Position
         end
     end
 
-    -- Отключаем любую клиентскую логику, скрипты шаблона (мы будем работать с серверным AI)
-    for _,desc in ipairs(clone:GetDescendants()) do
-        if desc:IsA("Script") then
-            pcall(function() desc.Disabled = true end)
+    if not targetPos then return end
+
+    -- Найдём высоту превью (первый BasePart)
+    local root
+    for _, v in ipairs(previewModel:GetDescendants()) do
+        if v:IsA("BasePart") then
+            root = v
+            break
         end
     end
+    local yOffset = 0
+    if root then yOffset = root.Size.Y / 2 end
 
-    -- Запускаем AI (Module) — он сам подождёт SpawnSpeed перед активацией
-    pcall(function()
-        UnitAI.Attach(clone)
-    end)
+    -- Raycast вниз от чуть выше точки (на случай неровностей поверхности) чтобы точно положить на поверхность
+    local downOrigin = targetPos + Vector3.new(0, 5, 0)
+    local downResult = workspace:Raycast(downOrigin, Vector3.new(0, -30, 0), rayParams)
+    local finalPos = targetPos
+    if downResult then finalPos = downResult.Position end
 
-    spawnResponse:FireClient(player, true, "Spawned", clone:GetFullName())
-end)
+    -- Ставим превью так, чтобы оно просто стояло на поверхности, без поворота к камере:
+    local newCFrame = CFrame.new(finalPos + Vector3.new(0, yOffset, 0))
+    -- если есть PrimaryPart, используем SetPrimaryPartCFrame; иначе пробуем сдвинуть все BasePart'ы относительно смещения
+    if previewModel.PrimaryPart then
+        pcall(function() previewModel:SetPrimaryPartCFrame(newCFrame) end)
+    else
+        local offset = newCFrame.p
+        for _, p in ipairs(previewModel:GetDescendants()) do
+            if p:IsA("BasePart") then
+                p.CFrame = CFrame.new(offset)
+            end
+        end
+    end
+end
