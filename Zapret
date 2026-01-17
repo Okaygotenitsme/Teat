@@ -1,15 +1,60 @@
--- Скрипт обновления текста (Local Script)
-local player = game.Players.LocalPlayer
--- Ждем, пока папка и значение появятся (т.к. они создаются сервером)
-local privateStats = player:WaitForChild("PrivateStats")
-local energyValue = privateStats:WaitForChild("Energy")
-local label = script.Parent
+local RE = game.ReplicatedStorage:WaitForChild("SpawnEvent")
+local unitsFolder = game.ReplicatedStorage:WaitForChild("Units")
 
--- Функция обновления текста на экране
-local function updateText()
-	label.Text = "ЭНЕРГИЯ: " .. energyValue.Value
-end
+local MAX_ENERGY = 10
+local REGEN_TIME = 2
+local START_ENERGY = 5
 
--- Обновляем текст сразу и каждый раз, когда значение меняется
-updateText()
-energyValue:GetPropertyChangedSignal("Value"):Connect(updateText)
+game.Players.PlayerAdded:Connect(function(player)
+	local leaderstats = Instance.new("Folder")
+	leaderstats.Name = "leaderstats"
+	leaderstats.Parent = player
+
+	local wins = Instance.new("IntValue")
+	wins.Name = "Wins"
+	wins.Value = 0
+	wins.Parent = leaderstats
+
+	local cups = Instance.new("IntValue")
+	cups.Name = "Cups"
+	cups.Value = 0
+	cups.Parent = leaderstats
+
+	local privateStats = Instance.new("Folder")
+	privateStats.Name = "PrivateStats"
+	privateStats.Parent = player
+
+	local energy = Instance.new("IntValue")
+	energy.Name = "Energy"
+	energy.Value = START_ENERGY
+	energy.Parent = privateStats
+
+	spawn(function()
+		while true do
+			task.wait(REGEN_TIME)
+			if energy.Value < MAX_ENERGY then
+				energy.Value += 1
+			end
+		end
+	end)
+end)
+
+RE.OnServerEvent:Connect(function(player, spawnPos)
+	local troopModel = unitsFolder:FindFirstChild("Troop")
+	if not troopModel then return end
+	
+	local energy = player.PrivateStats.Energy
+	local cost = troopModel:GetAttribute("Cost")
+	
+	if energy.Value >= cost then
+		energy.Value -= cost
+		
+		local newTroop = troopModel:Clone()
+		newTroop:SetPrimaryPartCFrame(CFrame.new(spawnPos + Vector3.new(0, 3, 0)))
+		newTroop.Parent = workspace
+		
+		local ai = script.TroopAI:Clone()
+		ai.Parent = newTroop
+		ai.Disabled = false
+	end
+end)
