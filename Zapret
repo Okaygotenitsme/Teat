@@ -1,71 +1,49 @@
--- ServerScriptService/InitServer
-local Players = game:GetService("Players")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
+-- ServerScriptService/TowerInit
+local Workspace = game:GetService("Workspace")
 
-local MAX_ENERGY = 10
-local ENERGY_REGEN_INTERVAL = 2
-
-local function ensureRemote(name)
-	local e = ReplicatedStorage:FindFirstChild(name)
-	if not e then
-		e = Instance.new("RemoteEvent")
-		e.Name = name
-		e.Parent = ReplicatedStorage
-	end
-	return e
+-- Создаем папку для башен, если её нет
+local towersFolder = Workspace:FindFirstChild("Towers")
+if not towersFolder then
+	towersFolder = Instance.new("Folder")
+	towersFolder.Name = "Towers"
+	towersFolder.Parent = Workspace
 end
 
-ensureRemote("SpawnEvent")
-ensureRemote("SpawnResponse")
+-- Настройки здоровья
+local HP_MAIN = 2000
+local HP_SIDE = 1000
 
-if not ReplicatedStorage:FindFirstChild("Units") then
-	local f = Instance.new("Folder")
-	f.Name = "Units"
-	f.Parent = ReplicatedStorage
-end
-
-local function createStatsFor(player)
-	if not player.Parent then return end
-
-	if not player:FindFirstChild("leaderstats") then
-		local ls = Instance.new("Folder")
-		ls.Name = "leaderstats"
-		ls.Parent = player
-
-		local wins = Instance.new("IntValue")
-		wins.Name = "Wins"
-		wins.Value = 0
-		wins.Parent = ls
-
-		local cups = Instance.new("IntValue")
-		cups.Name = "Cups"
-		cups.Value = 0
-		cups.Parent = ls
-	end
-
-	if not player:FindFirstChild("PrivateStats") then
-		local private = Instance.new("Folder")
-		private.Name = "PrivateStats"
-		private.Parent = player
-
-		local energy = Instance.new("IntValue")
-		energy.Name = "Energy"
-		energy.Value = MAX_ENERGY
-		energy.Parent = private
-
-		spawn(function()
-			while player.Parent do
-				wait(ENERGY_REGEN_INTERVAL)
-				if energy.Value < MAX_ENERGY then
-					energy.Value = math.clamp(energy.Value + 1, 0, MAX_ENERGY)
+local function setupTower(name, healthValue)
+	-- Ищем модель башни в Workspace
+	local tower = Workspace:FindFirstChild(name)
+	if tower and tower:IsA("Model") then
+		tower.Parent = towersFolder -- Переносим в специальную папку
+		
+		-- Добавляем или обновляем значение здоровья
+		local hp = tower:FindFirstChild("Health")
+		if not hp then
+			hp = Instance.new("IntValue")
+			hp.Name = "Health"
+			hp.Parent = tower
+		end
+		hp.Value = healthValue
+		
+		-- Убедимся, что у башни есть PrimaryPart, иначе юниты её не увидят
+		if not tower.PrimaryPart then
+			for _, part in ipairs(tower:GetDescendants()) do
+				if part:IsA("BasePart") then
+					tower.PrimaryPart = part
+					break
 				end
 			end
-		end)
+		end
+		print("[TowerInit] Башня " .. name .. " настроена. HP: " .. healthValue)
+	else
+		warn("[TowerInit] Башня " .. name .. " не найдена в Workspace!")
 	end
 end
 
-Players.PlayerAdded:Connect(createStatsFor)
-
-for _, pl in ipairs(Players:GetPlayers()) do
-	createStatsFor(pl)
-end
+-- Запускаем настройку для твоих башен
+setupTower("MainTower", HP_MAIN)
+setupTower("TowerLeft", HP_SIDE)
+setupTower("TowerRight", HP_SIDE)
