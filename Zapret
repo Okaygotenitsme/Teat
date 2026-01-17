@@ -1,27 +1,185 @@
-local player = game.Players.LocalPlayer
-local mouse = player:GetMouse()
-local RE = game.ReplicatedStorage:WaitForChild("SpawnEvent")
+-- ServerScriptService/GameStatsAndSpawner
+-- Создаёт leaderstats (Wins, Cups), PrivateStats.Energy с регеном,
+-- обрабатывает RemoteEvent SpawnEvent (из ReplicatedStorage) для спавна юнитов.
 
-local gui = script.Parent
-local energyLabel = gui:WaitForChild("EnergyLabel")
-local spawnBtn = gui:WaitForChild("SpawnButton")
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
 
-local isSelecting = false
+-- Настройки
+local MAX_ENERGY = 10
+local ENERGY_REGEN_INTERVAL = 2 -- секунды
+local ENERGY_COST_PER_SPAWN = 1
 
-local energyValue = player:WaitForChild("PrivateStats"):WaitForChild("Energy")
+-- Найти или создать RemoteEvent'ы
+local spawnEvent = ReplicatedStorage:FindFirstChild("SpawnEvent")
+if not spawnEvent then
+    spawnEvent = Instance.new("RemoteEvent")
+    spawnEvent.Name = "SpawnEvent"
+    spawnEvent.Parent = ReplicatedStorage
+end
 
-energyValue:GetPropertyChangedSignal("Value"):Connect(function()
-	energyLabel.Text = "ENERGY: " .. energyValue.Value
+-- Создадим SpawnResponse если его нет — сервер будет шлёт ответ клиенту
+local spawnResponse = ReplicatedStorage:FindFirstChild("SpawnResponse")
+if not spawnResponse then
+    spawnResponse = Instance.new("RemoteEvent")
+    spawnResponse.Name = "SpawnResponse"
+    spawnResponse.Parent = ReplicatedStorage
+end
+
+-- Убедимся, что есть папка-templates Units
+local unitsFolder = ReplicatedStorage:FindFirstChild("Units")
+if not unitsFolder then
+    unitsFolder = Instance.new("Folder")
+    unitsFolder.Name = "Units"
+    unitsFolder.Parent = ReplicatedStorage
+end
+
+-- Папка для spawned models в workspace
+local workspaceSpawned = workspace:FindFirstChild("SpawnedUnits") or Instance.new("Folder")
+workspaceSpawned.Name = "SpawnedUnits"
+workspaceSpawned.Parent = workspace
+
+-- Helper: безопасное добавление энергию
+local function safeAddEnergy(intValue, amount)
+    if not intValue or not intValue:IsA("IntValue") then return end
+    intValue.Value = math.clamp(intValue.Value + amount, 0, MAX_ENERGY)
+end
+
+-- PlayerAdded: leaderstats и PrivateStats + старт регена
+Players.PlayerAdded:Connect(function(player)
+    -- leaderstats (видимы всем)
+    local leaderstats = Instance.new("Folder")
+    leaderstats.Name = "leaderstats"
+    leaderstats.Parent = player
+
+    local wins = Instance.new("IntValue")
+    wins.Name = "Wins"
+    wins.Value = 0
+    wins.Parent = leaderstats
+
+    local cups = Instance.new("IntValue")
+    cups.Name = "Cups"
+    cups.Value = 0
+    cups.Parent = leaderstats
+
+    -- PrivateStats (видит сервер и сам игрок)
+    local private = Instance.new("Folder")
+    private.Name = "PrivateStats"
+    private.Parent = player
+
+    local energy = Instance.new("IntValue")
+    energy.Name = "Energy"
+    energy.Value = MAX_ENERGY -- стартуем с макса; при желании поменяй
+    energy.Parent = private
+
+    -- Регенерация энергии (серверный цикл)
+    spawn(function()
+        while player.Parent do
+            wait(ENERGY_REGEN_INTERVAL)
+            if energy.Value < MAX_ENERGY then
+                safeAddEnergy(energy, 1)
+            end
+        end
+    end)
 end)
-energyLabel.Text = "ENERGY: " .. energyValue.Value
 
-spawnBtn.MouseButton1Click:Connect(function()
-	isSelecting = true
-end)
+-- Helper: находит шаблон юнита в ReplicatedStorage.Units
+local function findUnitTemplate(name)
+    if not name or name == "" then
+        -- если имя не передано — берём первый
+        return unitsFolder:GetChildren()[1]
+    end
+    return unitsFolder:FindFirstChild(name)
+end
 
-mouse.Button1Down:Connect(function()
-	if isSelecting then
-		RE:FireServer(mouse.Hit.Position)
-		isSelecting = false
-	end
+-- Helper: find first BasePart recursively
+local function findFirstBasePart(model)
+    for _, v in ipairs(model:GetDescendants()) do
+        if v:IsA("BasePart") then
+            return v
+        end
+    end
+    return nil
+end
+
+-- Обработка спавна от клиента
+spawnEvent.OnServerEvent:Connect(function(player, unitName, position, orientation)
+    -- basic validation
+    if not player or not player.Parent then return end
+    if typeof(position) ~= "Vector3" then
+        -- некорректная позиция
+        spawnResponse:FireClient(player, false, "InvalidPosition")
+        return
+    end
+
+    local private = player:FindFirstChild("PrivateStats")
+    if not private then
+        spawnResponse:FireClient(player, false, "NoPrivateStats")
+        return
+    end
+    local energy = private:FindFirstChild("Energy")
+    if not energy or not energy:IsA("IntValue") then
+        spawnResponse:FireClient(player, false, "NoEnergyValue")
+        return
+    end
+
+    if energy.Value < ENERGY_COST_PER_SPAWN then
+        spawnResponse:FireClient(player, false, "NotEnoughEnergy")
+        return
+    end
+
+    -- найти шаблон
+    local template = findUnitTemplate(unitName)
+    if not template then
+        spawnResponse:FireClient(player, false, "NoTemplate")
+        return
+    end
+
+    -- Deduct energy (сервер сохраняет авторитет)
+    energy.Value = math.max(0, energy.Value - ENERGY_COST_PER_SPAWN)
+
+    -- Клонируем модель и помещаем в workspace.SpawnedUnits
+    local clone = template:Clone()
+    clone.Name = template.Name .. "_" .. player.Name .. "_" .. tostring(tick())
+    clone.Parent = workspaceSpawned
+
+    -- Отключаем исполняемые Server Script'ы в превью/клоне, если они есть
+    for _, desc in ipairs(clone:GetDescendants()) do
+        if desc:IsA("Script") then
+            -- Script имеет Disabled property
+            pcall(function() desc.Disabled = true end)
+        end
+    end
+
+    -- Разместим модель в нужной позиции
+    local root = findFirstBasePart(clone)
+    if root then
+        -- попытка аккуратно поместить модель так, чтобы корень стоял на surface
+        local yOffset = root.Size.Y / 2
+        local targetCFrame = CFrame.new(position + Vector3.new(0, yOffset, 0))
+        -- если есть PrimaryPart - используем SetPrimaryPartCFrame
+        if clone.PrimaryPart then
+            clone:SetPrimaryPartCFrame(targetCFrame)
+        else
+            -- MoveTo помещает модель так, что её первичный BasePart окажется в target
+            -- Используем MoveTo на найденном root
+            local ok, err = pcall(function()
+                clone:MoveTo(position + Vector3.new(0, yOffset, 0))
+            end)
+            if not ok then
+                -- как fallback, просто смещаем все BasePart'ы вручную
+                for _, part in ipairs(clone:GetDescendants()) do
+                    if part:IsA("BasePart") then
+                        part.CFrame = CFrame.new(position + Vector3.new(0, yOffset, 0))
+                    end
+                end
+            end
+        end
+    else
+        -- нет BasePart — просто оставляем где есть
+    end
+
+    -- Успешный спавн — сообщаем клиенту
+    spawnResponse:FireClient(player, true, "Spawned", clone:GetFullName())
 end)
