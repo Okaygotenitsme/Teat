@@ -1,158 +1,48 @@
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
+-- ServerScriptService/TowerInit
 local Workspace = game:GetService("Workspace")
 
-local spawnEvent = ReplicatedStorage:FindFirstChild("SpawnEvent") or (function()
-	local e = Instance.new("RemoteEvent")
-	e.Name = "SpawnEvent"
-	e.Parent = ReplicatedStorage
-	return e
-end)()
+local towersFolder = Workspace:FindFirstChild("Towers") or Instance.new("Folder", Workspace)
+towersFolder.Name = "Towers"
 
-local spawnResponse = ReplicatedStorage:FindFirstChild("SpawnResponse") or (function()
-	local e = Instance.new("RemoteEvent")
-	e.Name = "SpawnResponse"
-	e.Parent = ReplicatedStorage
-	return e
-end)()
-
-local units = ReplicatedStorage:WaitForChild("Units")
-local spawnedFolder = Workspace:FindFirstChild("SpawnedUnits") or (function()
-	local f = Instance.new("Folder")
-	f.Name = "SpawnedUnits"
-	f.Parent = Workspace
-	return f
-end)()
-
-local UnitAI
-local ok, mod = pcall(function()
-	return require(script:FindFirstChild("UnitAI") or script.Parent:WaitForChild("UnitAI"))
-end)
-if ok then UnitAI = mod end
-
-local lastSpawn = {}
-local DUP_T = 0.6
-local DUP_D = 1.0
-local ENERGY_DEF = 1
-
-local function firstPart(model)
-	if model.PrimaryPart then return model.PrimaryPart end
-	for _, v in ipairs(model:GetDescendants()) do
-		if v:IsA("BasePart") then return v end
-	end
-	return nil
+local function createTowerUI(tower)
+	local head = tower.PrimaryPart
+	if not head then return end
+	
+	local bgui = Instance.new("BillboardGui", head)
+	bgui.Name = "HealthGui"
+	bgui.Size = UDim2.new(6, 0, 1.5, 0)
+	bgui.AlwaysOnTop = true
+	bgui.ExtentsOffset = Vector3.new(0, 5, 0)
+	
+	local label = Instance.new("TextLabel", bgui)
+	label.Size = UDim2.new(1, 0, 1, 0)
+	label.BackgroundTransparency = 1
+	label.TextColor3 = Color3.new(1, 0.8, 0) -- Золотистый цвет для башен
+	label.TextStrokeTransparency = 0
+	label.TextScaled = true
+	label.Text = tostring(tower:GetAttribute("Health") or 0)
+	
+	tower:GetAttributeChangedSignal("Health"):Connect(function()
+		label.Text = tostring(math.max(0, math.floor(tower:GetAttribute("Health") or 0)))
+	end)
 end
 
-local function isFree(pos, minDist)
-	for _, m in ipairs(spawnedFolder:GetChildren()) do
-		if m:IsA("Model") and m.PrimaryPart then
-			if (m.PrimaryPart.Position - pos).Magnitude < minDist then
-				return false
+local function setupTower(name, healthValue)
+	local tower = Workspace:FindFirstChild(name)
+	if tower and tower:IsA("Model") then
+		tower.Parent = towersFolder
+		tower:SetAttribute("Health", healthValue)
+		
+		if not tower.PrimaryPart then
+			for _, part in ipairs(tower:GetDescendants()) do
+				if part:IsA("BasePart") then tower.PrimaryPart = part; break end
 			end
 		end
-	end
-	return true
-end
-
-local function findFree(basePos, primarySize)
-	local minDist = (primarySize and primarySize.Magnitude or 4) + 1
-	if isFree(basePos, minDist) then return basePos end
-	for r = 2, 20, 2 do
-		for a = 0, 360, 30 do
-			local rad = math.rad(a)
-			local off = Vector3.new(math.cos(rad) * r, 0, math.sin(rad) * r)
-			local cand = basePos + off
-			if isFree(cand, minDist) then return cand end
-		end
-	end
-	return basePos
-end
-
-local function findTemplate(name)
-	if not name or name == "" then return units:GetChildren()[1] end
-	return units:FindFirstChild(name) or units:GetChildren()[1]
-end
-
-spawnEvent.OnServerEvent:Connect(function(player, unitName, position)
-	if typeof(position) ~= "Vector3" then 
-		spawnResponse:FireClient(player, false, "InvalidPosition") 
-		return 
-	end
-
-	local now = os.clock()
-	local last = lastSpawn[player]
-	if last and now - last.time < DUP_T and (position - last.pos).Magnitude < DUP_D then
-		spawnResponse:FireClient(player, false, "Duplicate")
-		return
-	end
-	lastSpawn[player] = { time = now, pos = position }
-
-	local private = player:FindFirstChild("PrivateStats")
-	if not private then 
-		spawnResponse:FireClient(player, false, "NoPrivateStats") 
-		return 
-	end
-
-	local energy = private:FindFirstChild("Energy")
-	if not energy then 
-		spawnResponse:FireClient(player, false, "NoEnergyValue") 
-		return 
-	end
-
-	local template = findTemplate(unitName)
-	if not template then 
-		spawnResponse:FireClient(player, false, "NoTemplate") 
-		return 
-	end
-
-	local cost = template:GetAttribute("Cost") or ENERGY_DEF
-	if energy.Value < cost then 
-		spawnResponse:FireClient(player, false, "NotEnoughEnergy") 
-		return 
-	end
-
-	energy.Value = math.max(0, energy.Value - cost)
-
-	local clone = template:Clone()
-	clone.Name = template.Name
-	
-	local owner = Instance.new("StringValue")
-	owner.Name = "Owner"
-	owner.Value = player.Name
-	owner.Parent = clone
-
-	for _, d in ipairs(clone:GetDescendants()) do
-		if d:IsA("BasePart") then
-			d.CanCollide = false
-			d.Massless = true
-			d.Anchored = false
-		end
-	end
-
-	clone.Parent = spawnedFolder
-
-	local root = firstPart(clone)
-	if root then
-		local rp = RaycastParams.new()
-		rp.FilterDescendantsInstances = {player.Character, clone}
-		rp.FilterType = Enum.RaycastFilterType.Blacklist
-		local ray = workspace:Raycast(position + Vector3.new(0, 10, 0), Vector3.new(0, -60, 0), rp)
-		local place = position
-		if ray and ray.Position then place = ray.Position end
-		local freePos = findFree(place, root.Size)
-		local yOff = root.Size.Y / 2
 		
-		if clone.PrimaryPart then
-			clone:SetPrimaryPartCFrame(CFrame.new(freePos + Vector3.new(0, yOff, 0)))
-		else
-			clone:MoveTo(freePos + Vector3.new(0, yOff, 0))
-		end
+		createTowerUI(tower)
 	end
+end
 
-	if UnitAI then
-		task.spawn(function()
-			UnitAI.Attach(clone)
-		end)
-	end
-
-	spawnResponse:FireClient(player, true, "Spawned", clone:GetFullName())
-end)
+setupTower("MainTower", 2000)
+setupTower("TowerLeft", 1000)
+setupTower("TowerRight", 1000)
