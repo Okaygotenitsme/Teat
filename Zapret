@@ -1,3 +1,4 @@
+-- StarterGui/ScreenGui/LocalScript
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
@@ -124,7 +125,7 @@ spawnResponse.OnClientEvent:Connect(function(success, code)
 		if hintLabel then
 			if code == "NotEnoughEnergy" then hintLabel.Text = "No energy"
 			elseif code == "Duplicate" then hintLabel.Text = "Duplicate ignored"
-			else hintLabel.Text = "Spawn failed: "..tostring(code) end
+			else hintLabel.Text = "Spawn failed: " .. tostring(code) end
 			delay(1.2, function() if hintLabel and hintLabel.Parent then hintLabel.Text = "" end end)
 		end
 	end
@@ -135,8 +136,8 @@ local function bindEnergyLabel()
 	if not p then energyLabel.Text = "Energy: ?" return end
 	local e = p:WaitForChild("Energy", 5)
 	if not e then energyLabel.Text = "Energy: ?" return end
-	energyLabel.Text = "Energy: "..tostring(e.Value)
-	e.Changed:Connect(function(val) energyLabel.Text = "Energy: "..tostring(e.Value) end)
+	energyLabel.Text = "Energy: " .. tostring(e.Value)
+	e.Changed:Connect(function() energyLabel.Text = "Energy: " .. tostring(e.Value) end)
 end
 
 RunService.RenderStepped:Connect(function() if placing then updatePreviewPosition() end end)
