@@ -3,13 +3,13 @@ local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
 local UnitAI = {}
 
-local function getVal(model, name)
-	local v = model:FindFirstChild(name)
-	if not v then return nil end
-	return v.Value
+-- Функция для получения атрибута или значения по умолчанию
+local function getStat(model, name, default)
+	local attr = model:GetAttribute(name)
+	if attr ~= nil then return attr end
+	return default
 end
 
--- Ищем только ВРАЖЕСКИЕ цели (юнитов)
 local function findEnemies(selfModel, myOwner)
 	local out = {}
 	local spawned = Workspace:FindFirstChild("SpawnedUnits")
@@ -23,15 +23,17 @@ local function findEnemies(selfModel, myOwner)
 	return out
 end
 
--- Ищем только ВРАЖЕСКИЕ башни
 local function findEnemyTowers(myOwner)
 	local out = {}
 	local towers = Workspace:FindFirstChild("Towers")
-	if not towers then return out end
+	if not towers then 
+		warn("ПАПКА TOWERS НЕ НАЙДЕНА В WORKSPACE!")
+		return out 
+	end
+	
 	for _, t in ipairs(towers:GetChildren()) do
 		if t:IsA("Model") and t.PrimaryPart then
 			local o = t:FindFirstChild("Owner")
-			-- Если у башни нет владельца или владелец другой - это враг
 			if not o or o.Value ~= myOwner then
 				table.insert(out, t)
 			end
@@ -53,56 +55,63 @@ end
 
 local function movePart(part, targetPos, speed, dt)
 	local cur = part.Position
-	local dir = (targetPos - cur) * Vector3.new(1, 0, 1) -- Игнорируем высоту (Y)
-	if dir.Magnitude < 0.1 then return end
+	local dir = (targetPos - cur) * Vector3.new(1, 0, 1) -- Движение только по X и Z
+	if dir.Magnitude < 0.2 then return end
 	
 	local nextPos = cur + dir.Unit * speed * dt
 	part.CFrame = CFrame.new(nextPos, nextPos + dir.Unit)
 end
 
 function UnitAI.Attach(unitModel)
-	local Damage = getVal(unitModel, "Damage") or 10
-	local Speed = getVal(unitModel, "Speed") or 16
-	local AttackRadius = getVal(unitModel, "AttackRadius") or 8
-	local AttackSpeed = getVal(unitModel, "AttackSpeed") or 1
-	local myOwner = getVal(unitModel, "Owner") or ""
+	-- ЧИТАЕМ ТВОИ АТРИБУТЫ
+	local Damage = getStat(unitModel, "Damage", 10)
+	local Speed = getStat(unitModel, "Speed", 16) -- ДОБАВЬ ЭТОТ АТРИБУТ!
+	local Range = getStat(unitModel, "Range", 8)
+	local AttackSpeed = getStat(unitModel, "AttackSpeed", 1)
+	local myOwner = ""
+	local ownerObj = unitModel:WaitForChild("Owner", 5)
+	if ownerObj then myOwner = ownerObj.Value end
 
-	local hp = unitModel:FindFirstChild("Health")
 	local primary = unitModel.PrimaryPart
-	
 	local lastAttackTime = 0
 	local active = false
-	task.delay(getVal(unitModel, "SpawnSpeed") or 1, function() active = true end)
+	
+	-- Небольшая задержка перед активацией (SpawnSpeed)
+	task.delay(getStat(unitModel, "SpawnSpeed", 0.5), function() active = true end)
 
 	local conn
 	conn = RunService.Heartbeat:Connect(function(dt)
-		if not unitModel.Parent or hp.Value <= 0 then 
+		if not unitModel.Parent then conn:Disconnect(); return end
+		
+		-- Проверка здоровья (используем атрибут Health)
+		local currentHealth = unitModel:GetAttribute("Health") or 0
+		if currentHealth <= 0 then
 			conn:Disconnect()
 			unitModel:Destroy()
-			return 
+			return
 		end
+
 		if not active or not primary then return end
 
-		-- 1. Сначала ищем ближайшего вражеского юнита
+		-- Поиск цели
 		local targets = findEnemies(unitModel, myOwner)
 		local target, dist = nearest(unitModel, targets)
 
-		-- 2. Если вражеских юнитов нет, ищем башни
 		if not target then
 			local towers = findEnemyTowers(myOwner)
 			target, dist = nearest(unitModel, towers)
 		end
 
-		-- 3. Логика действия
+		-- Логика
 		if target and target.PrimaryPart then
-			if dist <= AttackRadius then
-				-- АТАКА (вместо wait используем время)
+			if dist <= Range then
+				-- АТАКА
 				if tick() - lastAttackTime >= AttackSpeed then
 					lastAttackTime = tick()
-					local targetHP = target:FindFirstChild("Health")
-					if targetHP then
-						targetHP.Value = targetHP.Value - Damage
-						-- Если цель умерла, она сама себя удалит через свой скрипт
+					-- Уменьшаем здоровье через атрибут цели
+					local tHealth = target:GetAttribute("Health")
+					if tHealth then
+						target:SetAttribute("Health", tHealth - Damage)
 					end
 				end
 			else
