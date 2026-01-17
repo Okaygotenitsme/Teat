@@ -1,46 +1,27 @@
-local troop = script.Parent
-local humanoid = troop:WaitForChild("Humanoid")
-local root = troop:WaitForChild("HumanoidRootPart")
+local player = game.Players.LocalPlayer
+local mouse = player:GetMouse()
+local RE = game.ReplicatedStorage:WaitForChild("SpawnEvent")
 
-local damage = troop:GetAttribute("Damage")
-local attackRange = troop:GetAttribute("Range")
-local attackSpeed = troop:GetAttribute("AttackSpeed")
+local gui = script.Parent
+local energyLabel = gui:WaitForChild("EnergyLabel")
+local spawnBtn = gui:WaitForChild("SpawnButton")
 
-local function findTarget()
-	local target = nil
-	local minDist = math.huge
-	
-	for _, obj in pairs(workspace:GetChildren()) do
-		if obj:FindFirstChild("Humanoid") and obj ~= troop then
-			local targetRoot = obj:FindFirstChild("HumanoidRootPart")
-			if targetRoot then
-				local dist = (root.Position - targetRoot.Position).Magnitude
-				if dist < minDist then
-					minDist = dist
-					target = obj
-				end
-			end
-		end
+local isSelecting = false
+
+local energyValue = player:WaitForChild("PrivateStats"):WaitForChild("Energy")
+
+energyValue:GetPropertyChangedSignal("Value"):Connect(function()
+	energyLabel.Text = "ENERGY: " .. energyValue.Value
+end)
+energyLabel.Text = "ENERGY: " .. energyValue.Value
+
+spawnBtn.MouseButton1Click:Connect(function()
+	isSelecting = true
+end)
+
+mouse.Button1Down:Connect(function()
+	if isSelecting then
+		RE:FireServer(mouse.Hit.Position)
+		isSelecting = false
 	end
-	
-	return target or workspace:FindFirstChild("EnemyTower")
-end
-
-while task.wait(0.5) do
-	local target = findTarget()
-	if target and target:FindFirstChild("HumanoidRootPart") then
-		local targetPart = target.HumanoidRootPart
-		local distance = (root.Position - targetPart.Position).Magnitude
-		
-		if distance <= attackRange then
-			humanoid:MoveTo(root.Position)
-			local targetHum = target:FindFirstChild("Humanoid")
-			if targetHum and targetHum.Health > 0 then
-				targetHum:TakeDamage(damage)
-				task.wait(attackSpeed)
-			end
-		else
-			humanoid:MoveTo(targetPart.Position)
-		end
-	end
-end
+end)
