@@ -1,147 +1,138 @@
-local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Workspace = game:GetService("Workspace")
 
-local UnitAI = {}
+local spawnEvent = ReplicatedStorage:FindFirstChild("SpawnEvent") or (function()
+	local e = Instance.new("RemoteEvent")
+	e.Name = "SpawnEvent"
+	e.Parent = ReplicatedStorage
+	return e
+end)()
 
-local function getVal(model, name)
-	local v = model:FindFirstChild(name)
-	if not v then return nil end
-	if v:IsA("NumberValue") or v:IsA("IntValue") then return v.Value end
-	if v:IsA("StringValue") then return v.Value end
+local spawnResponse = ReplicatedStorage:FindFirstChild("SpawnResponse") or (function()
+	local e = Instance.new("RemoteEvent")
+	e.Name = "SpawnResponse"
+	e.Parent = ReplicatedStorage
+	return e
+end)()
+
+local units = ReplicatedStorage:WaitForChild("Units")
+local spawnedFolder = Workspace:FindFirstChild("SpawnedUnits") or (function()
+	local f = Instance.new("Folder")
+	f.Name = "SpawnedUnits"
+	f.Parent = Workspace
+	return f
+end)()
+
+local UnitAI
+local ok, mod = pcall(function()
+	return require(script:FindFirstChild("UnitAI") or script.Parent:WaitForChild("UnitAI"))
+end)
+if ok then UnitAI = mod end
+
+local lastSpawn = {}
+local DUP_T = 0.6
+local DUP_D = 1.0
+local ENERGY_DEF = 1
+
+local function firstPart(model)
+	for _, v in ipairs(model:GetDescendants()) do
+		if v:IsA("BasePart") then return v end
+	end
 	return nil
 end
 
-local function findEnemies(selfModel)
-	local out = {}
-	local owner = selfModel:FindFirstChild("Owner")
-	local ownerName = owner and owner.Value or nil
-	local spawned = Workspace:FindFirstChild("SpawnedUnits")
-	if not spawned then return out end
-	for _, m in ipairs(spawned:GetChildren()) do
-		if m ~= selfModel and m:IsA("Model") then
-			local o = m:FindFirstChild("Owner")
-			local on = o and o.Value or nil
-			if on ~= ownerName then table.insert(out, m) end
-		end
-	end
-	return out
-end
-
-local function nearest(model, list)
-	if not model.PrimaryPart then return nil, math.huge end
-	local pos = model.PrimaryPart.Position
-	local best, bestDist = nil, math.huge
-	for _, m in ipairs(list) do
-		if m.PrimaryPart then
-			local d = (m.PrimaryPart.Position - pos).Magnitude
-			if d < bestDist then bestDist = d; best = m end
-		end
-	end
-	return best, bestDist
-end
-
-local function applyDamage(target, amount)
-	if not target then return end
-	local hp = target:FindFirstChild("Health")
-	if hp and (hp:IsA("NumberValue") or hp:IsA("IntValue")) then
-		hp.Value = hp.Value - amount
-		if hp.Value <= 0 then pcall(function() target:Destroy() end) end
-	else
-		pcall(function() target:Destroy() end)
-	end
-end
-
-local function movePart(part, targetPos, speed, dt)
-	if not part then return end
-	local cur = part.Position
-	local dir = targetPos - cur
-	local dist = dir.Magnitude
-	if dist < 0.001 then return end
-	local step = speed * dt
-	local nextPos = (dist <= step) and targetPos or (cur + dir.Unit * step)
-	local look = CFrame.new(nextPos, nextPos + (dir.Unit))
-	part.CFrame = look
-end
-
-function UnitAI.Attach(unitModel)
-	if not unitModel or not unitModel:IsA("Model") then return end
-	local Health = getVal(unitModel, "Health") or 100
-	local Damage = getVal(unitModel, "Damage") or 10
-	local Speed = getVal(unitModel, "Speed") or 16
-	local AttackRadius = getVal(unitModel, "AttackRadius") or 8
-	local AttackSpeed = getVal(unitModel, "AttackSpeed") or 1
-	local SpawnSpeed = getVal(unitModel, "SpawnSpeed") or 1
-	local Task = getVal(unitModel, "Task") or "AttackEnemies"
-
-	local hp = unitModel:FindFirstChild("Health")
-	if not hp then
-		hp = Instance.new("NumberValue")
-		hp.Name = "Health"
-		hp.Value = Health
-		hp.Parent = unitModel
-	end
-
-	local primary = unitModel.PrimaryPart
-	if not primary then
-		for _, d in ipairs(unitModel:GetDescendants()) do
-			if d:IsA("BasePart") then
-				primary = d
-				unitModel.PrimaryPart = d
-				break
+local function isFree(pos, minDist)
+	for _, m in ipairs(spawnedFolder:GetChildren()) do
+		if m:IsA("Model") and m.PrimaryPart then
+			if (m.PrimaryPart.Position - pos).Magnitude < minDist then
+				return false
 			end
 		end
 	end
+	return true
+end
 
-	if primary then
-		primary.Anchored = false
-		primary.CanCollide = false
+local function findFree(basePos, primarySize)
+	local minDist = (primarySize and primarySize.Magnitude or 4) + 1
+	if isFree(basePos, minDist) then return basePos end
+	for r = 2, 20, 2 do
+		for a = 0, 360, 30 do
+			local rad = math.rad(a)
+			local off = Vector3.new(math.cos(rad) * r, 0, math.sin(rad) * r)
+			local cand = basePos + off
+			if isFree(cand, minDist) then return cand end
+		end
+	end
+	return basePos
+end
+
+local function findTemplate(name)
+	if not name or name == "" then return units:GetChildren()[1] end
+	return units:FindFirstChild(name) or units:GetChildren()[1]
+end
+
+spawnEvent.OnServerEvent:Connect(function(player, unitName, position)
+	if typeof(position) ~= "Vector3" then spawnResponse:FireClient(player, false, "InvalidPosition"); return end
+	local now = os.clock()
+	local last = lastSpawn[player]
+	if last and now - last.time < DUP_T and (position - last.pos).Magnitude < DUP_D then
+		spawnResponse:FireClient(player, false, "Duplicate")
+		return
+	end
+	lastSpawn[player] = { time = now, pos = position }
+
+	local private = player:FindFirstChild("PrivateStats")
+	if not private then spawnResponse:FireClient(player, false, "NoPrivateStats"); return end
+	local energy = private:FindFirstChild("Energy")
+	if not energy or not energy:IsA("IntValue") then spawnResponse:FireClient(player, false, "NoEnergyValue"); return end
+
+	local template = findTemplate(unitName)
+	if not template then spawnResponse:FireClient(player, false, "NoTemplate"); return end
+
+	local cost = (template:FindFirstChild("Cost") and template.Cost.Value) or ENERGY_DEF
+	if energy.Value < cost then spawnResponse:FireClient(player, false, "NotEnoughEnergy"); return end
+
+	energy.Value = math.max(0, energy.Value - cost)
+
+	local clone = template:Clone()
+	clone.Name = template.Name .. "_" .. player.Name .. "_" .. tostring(tick())
+	local owner = Instance.new("StringValue")
+	owner.Name = "Owner"
+	owner.Value = player.Name
+	owner.Parent = clone
+
+	for _, d in ipairs(clone:GetDescendants()) do
+		if d:IsA("BasePart") then
+			d.CanCollide = false
+			d.Massless = true
+			d.Anchored = false
+		elseif d:IsA("Script") then
+			pcall(function() d.Disabled = true end)
+		end
 	end
 
-	local active = false
-	spawn(function() wait(SpawnSpeed); active = true end)
+	clone.Parent = spawnedFolder
 
-	local conn
-	conn = RunService.Heartbeat:Connect(function(dt)
-		if not unitModel.Parent then conn:Disconnect(); return end
-		if not active then return end
-		if hp.Value <= 0 then pcall(function() unitModel:Destroy() end); conn:Disconnect(); return end
-
-		local enemies = findEnemies(unitModel)
-		if #enemies > 0 and Task ~= "ChargeTower" then
-			local target, dist = nearest(unitModel, enemies)
-			if target and target.PrimaryPart then
-				if dist <= AttackRadius then
-					applyDamage(target, Damage)
-					wait(AttackSpeed)
-				else
-					movePart(primary, target.PrimaryPart.Position, Speed, dt)
-				end
-			end
+	local root = firstPart(clone)
+	if root then
+		local rp = RaycastParams.new()
+		rp.FilterDescendantsInstances = { player.Character, clone }
+		rp.FilterType = Enum.RaycastFilterType.Blacklist
+		local ray = workspace:Raycast(position + Vector3.new(0, 10, 0), Vector3.new(0, -60, 0), rp)
+		local place = position
+		if ray and ray.Position then place = ray.Position end
+		local freePos = findFree(place, root.Size)
+		local yOff = root.Size.Y / 2
+		if clone.PrimaryPart then
+			clone:SetPrimaryPartCFrame(CFrame.new(freePos + Vector3.new(0, yOff, 0)))
 		else
-			local towers = Workspace:FindFirstChild("Towers")
-			local targetTower = nil
-			if towers then
-				local list = {}
-				for _, t in ipairs(towers:GetChildren()) do
-					if t:IsA("Model") and t.PrimaryPart then table.insert(list, t) end
-				end
-				if #list > 0 then
-					targetTower = (function() local n, _ = nearest(unitModel, list); return n end)()
-				end
-			end
-			if targetTower and targetTower.PrimaryPart then
-				local d = (targetTower.PrimaryPart.Position - primary.Position).Magnitude
-				if d <= AttackRadius then
-					applyDamage(targetTower, Damage)
-					wait(AttackSpeed)
-				else
-					movePart(primary, targetTower.PrimaryPart.Position, Speed, dt)
-				end
-			else
-				movePart(primary, primary.Position + primary.CFrame.LookVector * 5, Speed, dt)
-			end
+			clone:MoveTo(freePos + Vector3.new(0, yOff, 0))
 		end
-	end)
-end
+	end
 
-return UnitAI
+	if UnitAI then
+		pcall(function() UnitAI.Attach(clone) end)
+	end
+
+	spawnResponse:FireClient(player, true, "Spawned", clone:GetFullName())
+end)
