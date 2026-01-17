@@ -1,57 +1,31 @@
--- Заменить старую функцию updatePreviewPosition на эту:
-local function updatePreviewPosition()
-    if not previewModel or not previewModel.PrimaryPart then return end
-
-    local rayParams = RaycastParams.new()
-    rayParams.FilterDescendantsInstances = {player.Character, previewModel}
-    rayParams.FilterType = Enum.RaycastFilterType.Blacklist
-    rayParams.IgnoreWater = false
-
-    -- получаем экранную позицию курсора (удобнее через mouse.Hit)
-    local targetPos = nil
-    if mouse.Target then
-        targetPos = mouse.Hit.Position
-    else
-        -- fallback: рейкаст от камеры через курсор
-        local cam = workspace.CurrentCamera
-        local mouseX, mouseY = UserInputService:GetMouseLocation().X, UserInputService:GetMouseLocation().Y
-        local ray = cam:ScreenPointToRay(mouseX, mouseY)
-        local result = workspace:Raycast(ray.Origin, ray.Direction * 5000, rayParams)
-        if result then
-            targetPos = result.Position
-        end
-    end
-
-    if not targetPos then return end
-
-    -- Найдём высоту превью (первый BasePart)
-    local root
-    for _, v in ipairs(previewModel:GetDescendants()) do
-        if v:IsA("BasePart") then
-            root = v
-            break
-        end
-    end
-    local yOffset = 0
-    if root then yOffset = root.Size.Y / 2 end
-
-    -- Raycast вниз от чуть выше точки (на случай неровностей поверхности) чтобы точно положить на поверхность
-    local downOrigin = targetPos + Vector3.new(0, 5, 0)
-    local downResult = workspace:Raycast(downOrigin, Vector3.new(0, -30, 0), rayParams)
-    local finalPos = targetPos
-    if downResult then finalPos = downResult.Position end
-
-    -- Ставим превью так, чтобы оно просто стояло на поверхности, без поворота к камере:
-    local newCFrame = CFrame.new(finalPos + Vector3.new(0, yOffset, 0))
-    -- если есть PrimaryPart, используем SetPrimaryPartCFrame; иначе пробуем сдвинуть все BasePart'ы относительно смещения
-    if previewModel.PrimaryPart then
-        pcall(function() previewModel:SetPrimaryPartCFrame(newCFrame) end)
-    else
-        local offset = newCFrame.p
-        for _, p in ipairs(previewModel:GetDescendants()) do
-            if p:IsA("BasePart") then
-                p.CFrame = CFrame.new(offset)
-            end
-        end
-    end
+local ReplicatedStorage=game:GetService("ReplicatedStorage")
+local units=ReplicatedStorage:FindFirstChild("Units") or Instance.new("Folder",ReplicatedStorage);units.Name="Units"
+local edit=ReplicatedStorage:FindFirstChild("UnitToEdit") or (function(v)local s=Instance.new("StringValue",ReplicatedStorage);s.Name="UnitToEdit";s.Value="";return s end)()
+local defaults={Health=100,Damage=10,Speed=16,Cost=1,AttackRadius=8,AttackSpeed=1,SpawnSpeed=1,Task="AttackEnemies"}
+local function ensure(parent,name,val)
+	local e=parent:FindFirstChild(name)
+	if e then
+		local ok=(type(val)=="string" and e:IsA("StringValue")) or (type(val)~="string" and (e:IsA("NumberValue") or e:IsA("IntValue")))
+		if ok then return e end
+		e:Destroy()
+	end
+	local t
+	if type(val)=="string" then t=Instance.new("StringValue") t.Value=val
+	elseif math.type(val)=="integer" then t=Instance.new("IntValue") t.Value=val
+	else t=Instance.new("NumberValue") t.Value=val end
+	t.Name=name;t.Parent=parent;return t
 end
+local function setPrim(m)
+	if not m:IsA("Model") then return end
+	if m.PrimaryPart and m.PrimaryPart.Parent then return end
+	for _,d in ipairs(m:GetDescendants()) do if d:IsA("BasePart") then m.PrimaryPart=d;break end end
+end
+local function proc(m)
+	if not m or not m:IsA("Model") then return end
+	setPrim(m)
+	for k,v in pairs(defaults) do ensure(m,k,v) end
+	ensure(m,"Description","")
+	if not m:FindFirstChild("MelotenProcessed") then local b=Instance.new("BoolValue",m);b.Name="MelotenProcessed";b.Value=true end
+end
+if edit.Value~="" then proc(units:FindFirstChild(edit.Value)) end
+edit.Changed:Connect(function() if edit.Value~="" then proc(units:FindFirstChild(edit.Value)) end end)
