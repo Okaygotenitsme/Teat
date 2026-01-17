@@ -1,219 +1,107 @@
--- StarterGui/ScreenGui/SpawnLocal (LocalScript)
--- Управляет GUI: показывает энергию, режим placement с превью и посылкой SpawnEvent
+-- ServerScriptService/UnitEditor
+-- Пробегает ReplicatedStorage.Units и гарантирует:
+-- 1) Model.PrimaryPart установлен (первая BasePart)
+-- 2) В шаблон добавлены значения: Health, Damage, Speed, Cost, AttackRadius, AttackSpeed, SpawnSpeed, Task
 
-local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local RunService = game:GetService("RunService")
-local UserInputService = game:GetService("UserInputService")
 
-local player = Players.LocalPlayer
-local mouse = player:GetMouse()
-
-local spawnEvent = ReplicatedStorage:WaitForChild("SpawnEvent")
-local spawnResponse = ReplicatedStorage:WaitForChild("SpawnResponse")
-
--- UI элементы (подстрой под своё)
-local screenGui = script.Parent
-local spawnButton = screenGui:WaitForChild("SpawnButton") -- TextButton
-local energyLabel = screenGui:WaitForChild("EnergyLabel") -- TextLabel
-local hintLabel -- optional feedback
-if screenGui:FindFirstChild("HintLabel") then
-    hintLabel = screenGui:FindFirstChild("HintLabel")
+local unitsFolder = ReplicatedStorage:FindFirstChild("Units")
+if not unitsFolder then
+    unitsFolder = Instance.new("Folder")
+    unitsFolder.Name = "Units"
+    unitsFolder.Parent = ReplicatedStorage
 end
 
--- Unit selection: берём первый шаблон в ReplicatedStorage.Units (можно расширить UI выбора)
-local unitsFolder = ReplicatedStorage:WaitForChild("Units")
-local function getDefaultUnitName()
-    local first = unitsFolder:GetChildren()[1]
-    return first and first.Name or nil
-end
-local selectedUnitName = getDefaultUnitName()
+local DEFAULTS = {
+    Health = 100,
+    Damage = 10,
+    Speed = 16,            -- studs/sec
+    Cost = 1,
+    AttackRadius = 8,      -- studs
+    AttackSpeed = 1,       -- seconds between attacks
+    SpawnSpeed = 1,        -- seconds to stand before active
+    Task = "AttackEnemies" -- "AttackEnemies" or "ChargeTower"
+}
 
--- Placement state
-local placing = false
-local previewModel = nil
-
--- Utility: создать визуальную "превью" копию (anchored, прозрачная)
-local function createPreviewFromTemplate(template)
-    if not template then return nil end
-    local preview = template:Clone()
-    preview.Name = "Preview_" .. template.Name
-    -- отключаем скрипты и компонентные эффекты внутри превью и делаем части анкерованными и прозрачными
-    for _, desc in ipairs(preview:GetDescendants()) do
-        if desc:IsA("BasePart") then
-            desc.CanCollide = false
-            desc.Anchored = true
-            -- сделать слегка прозрачным (не полностью)
-            desc.Transparency = math.clamp(desc.Transparency + 0.4, 0.25, 0.9)
-        elseif desc:IsA("ParticleEmitter") or desc:IsA("Trail") then
-            desc.Enabled = false
-        elseif desc:IsA("Script") then
-            pcall(function() desc.Disabled = true end)
-        end
-    end
-    preview.Parent = workspace
-    return preview
-end
-
--- Обновление позиции превью по курсору (raycast, игнорируем персонажа игрока)
-local function updatePreviewPosition()
-    if not previewModel then return end
-    local target = mouse.Target
-    local pos
-    if target then
-        pos = mouse.Hit.Position
-    else
-        -- Если курсор в пустоте, используем UnitRay + большой Raycast
-        local unitRay = workspace.CurrentCamera:ScreenPointToRay(UserInputService:GetMouseLocation().X, UserInputService:GetMouseLocation().Y)
-        local rayParams = RaycastParams.new()
-        rayParams.FilterDescendantsInstances = {player.Character}
-        rayParams.FilterType = Enum.RaycastFilterType.Blacklist
-        local raycast = workspace:Raycast(unitRay.Origin, unitRay.Direction * 5000, rayParams)
-        if raycast then
-            pos = raycast.Position
+local function ensureValue(parent, name, value)
+    local existing = parent:FindFirstChild(name)
+    if existing then
+        -- если значение другого типа — заменим
+        if existing:IsA("IntValue") or existing:IsA("NumberValue") or existing:IsA("StringValue") then
+            return existing
         else
-            return
+            existing:Destroy()
         end
     end
-    -- Немного поднять превью над поверхностью, чтобы не "втыкалось"
-    -- Найдём первый BasePart в превью для определения высоты подъёма
-    local root
-    for _, v in ipairs(previewModel:GetDescendants()) do
-        if v:IsA("BasePart") then
-            root = v
+
+    local val
+    if type(value) == "string" then
+        val = Instance.new("StringValue")
+        val.Value = value
+    elseif math.type(value) == "integer" then
+        val = Instance.new("IntValue")
+        val.Value = value
+    else
+        -- float -> NumberValue
+        val = Instance.new("NumberValue")
+        val.Value = value
+    end
+    val.Name = name
+    val.Parent = parent
+    return val
+end
+
+local function setPrimaryPartIfMissing(model)
+    if not model:IsA("Model") then return end
+    if model.PrimaryPart and model.PrimaryPart.Parent then return end
+    for _,desc in ipairs(model:GetDescendants()) do
+        if desc:IsA("BasePart") then
+            model.PrimaryPart = desc
             break
         end
     end
-    local yOffset = 0
-    if root then
-        yOffset = root.Size.Y / 2
-    end
-    -- Устанавливаем CFrame превью (с учётом ориентации камеры)
-    local cam = workspace.CurrentCamera
-    local look = cam.CFrame - cam.CFrame.p
-    previewModel:SetPrimaryPartCFrame(CFrame.new(pos + Vector3.new(0, yOffset, 0)) * CFrame.Angles(0, 0, 0))
 end
 
--- Toggle placement mode
-local function startPlacement()
-    if placing then return end
-    placing = true
-    -- подготовим шаблон: выберем выбранный unit или первый
-    local template = unitsFolder:FindFirstChild(selectedUnitName) or unitsFolder:GetChildren()[1]
-    if not template then
-        if hintLabel then hintLabel.Text = "No unit templates found in ReplicatedStorage.Units" end
-        placing = false
-        return
-    end
-    previewModel = createPreviewFromTemplate(template)
-    -- если модель не имеет PrimaryPart — установим первую BasePart как PrimaryPart
-    if previewModel and not previewModel.PrimaryPart then
-        for _, p in ipairs(previewModel:GetDescendants()) do
-            if p:IsA("BasePart") then
-                previewModel.PrimaryPart = p
-                break
-            end
+local function sanitizeParts(model)
+    for _, part in ipairs(model:GetDescendants()) do
+        if part:IsA("BasePart") then
+            -- превью/шаблон: не менять физику шаблона, но убедимся, что нет странных velocities
+            part.CanCollide = true
+            part.Anchored = false
+            part.Massless = false
         end
     end
-    -- визуально обновлять превью каждый кадр
-    previewModel.Parent = workspace
 end
 
-local function stopPlacement(destroyPreview)
-    placing = false
-    if destroyPreview and previewModel and previewModel.Parent then
-        previewModel:Destroy()
+local function processTemplate(model)
+    if not model or not model:IsA("Model") then return end
+    setPrimaryPartIfMissing(model)
+    sanitizeParts(model)
+    -- values
+    for name,def in pairs(DEFAULTS) do
+        ensureValue(model, name, def)
     end
-    previewModel = nil
+    -- optional: метаданные
+    ensureValue(model, "Description", "") -- string
+    -- пометим, что шаблон обработан
+    if not model:FindFirstChild("MelotenProcessed") then
+        local tag = Instance.new("BoolValue")
+        tag.Name = "MelotenProcessed"
+        tag.Value = true
+        tag.Parent = model
+    end
 end
 
--- Обработка клика для финального спавна
-local function tryPlaceAtMouse()
-    if not previewModel then return end
-    -- берем позицию из preview PrimaryPart
-    local pos
-    if previewModel.PrimaryPart then
-        pos = previewModel.PrimaryPart.Position
-    else
-        -- fallback — позиция курсора
-        pos = mouse.Hit.Position
-    end
-    -- FireServer: имя юнита и Vector3 position
-    spawnEvent:FireServer(selectedUnitName, pos)
-    -- ждём ответа от сервера (через SpawnResponse.OnClientEvent)
-    -- В onClientEvent мы обработаем успех/фейл и закроем режим если успешно
+-- Обработать существующие шаблоны
+for _, model in ipairs(unitsFolder:GetChildren()) do
+    processTemplate(model)
 end
 
--- SpawnResponse обработка от сервера
-spawnResponse.OnClientEvent:Connect(function(success, code, extra)
-    if success then
-        -- успешный спавн: закроем режим placement и удалим превью
-        if hintLabel then hintLabel.Text = "Spawned!" end
-        stopPlacement(true)
-    else
-        -- неуспешно: показать причину
-        local msg = code or "SpawnFailed"
-        if msg == "NotEnoughEnergy" then
-            if hintLabel then
-                hintLabel.Text = "Not enough Energy!"
-                -- небольшой таймер чтобы очистить сообщение
-                delay(1.3, function() if hintLabel and hintLabel.Parent then hintLabel.Text = "" end end)
-            end
-        else
-            if hintLabel then
-                hintLabel.Text = "Spawn failed: " .. tostring(msg)
-                delay(1.5, function() if hintLabel and hintLabel.Parent then hintLabel.Text = "" end end)
-            end
-        end
-        -- оставляем превью активным (пользователь может выбрать другое место)
-    end
+-- Следим за новыми шаблонами, которые добавят в будущем
+unitsFolder.ChildAdded:Connect(function(child)
+    -- небольшая задержка на случай, если модель ещё клонируется в память
+    wait(0.1)
+    pcall(function() processTemplate(child) end)
 end)
 
--- UI: показывать энергию
-local function bindEnergyLabel()
-    local private = player:WaitForChild("PrivateStats", 5)
-    if not private then
-        energyLabel.Text = "Energy: ?"
-        return
-    end
-    local energy = private:WaitForChild("Energy", 5)
-    if not energy then
-        energyLabel.Text = "Energy: ?"
-        return
-    end
-    energyLabel.Text = "Energy: " .. tostring(energy.Value)
-    energy.Changed:Connect(function(val)
-        if typeof(val) == "number" then
-            energyLabel.Text = "Energy: " .. tostring(val)
-        else
-            energyLabel.Text = "Energy: " .. tostring(energy.Value)
-        end
-    end)
-end
-
--- Bindings: кнопка SpawnButton
-spawnButton.MouseButton1Click:Connect(function()
-    if not placing then
-        startPlacement()
-    else
-        -- уже в режиме размещения — отмена
-        stopPlacement(true)
-    end
-end)
-
--- ЛКМ для финального размещения (когда в режиме placement)
-mouse.Button1Down:Connect(function()
-    if placing then
-        tryPlaceAtMouse()
-    end
-end)
-
--- Обновление превью каждую визуальную итерацию
-RunService.RenderStepped:Connect(function()
-    if placing and previewModel then
-        updatePreviewPosition()
-    end
-end)
-
--- Запускаем привязку энергии
-bindEnergyLabel()
+print("[UnitEditor] Done — templates processed")
