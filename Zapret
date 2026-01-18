@@ -1,29 +1,78 @@
 import telebot
 import os
+import time
 from obfuscator import obfuscate_script
 
-API_TOKEN = 'ТВОЙ_ТОКЕН' # <--- НЕ ЗАБУДЬ ВСТАВИТЬ ТОКЕН
+# Вставь сюда свой токен
+API_TOKEN = 'ВАШ_ТОКЕН_ЗДЕСЬ'
+
 bot = telebot.TeleBot(API_TOKEN)
+
+@bot.message_handler(commands=['start', 'help'])
+def send_welcome(message):
+    bot.reply_to(message, "🚀 Привет! Я бот-обфускатор.\n\n"
+                          "Отправь мне файл **.lua** или **.txt**, и я наложу на него защиту уровня Shift-Cipher (как в GOKU/Sunjingwoo).\n"
+                          "Все файлы удаляются с сервера сразу после обработки.")
 
 @bot.message_handler(content_types=['document'])
 def handle_docs(message):
     file_name = message.document.file_name
-    try:
-        file_info = bot.get_file(message.document.file_id)
-        downloaded = bot.download_file(file_info.file_path)
-        
-        # Вызываем нашу VM-генерацию
-        result = obfuscate_script(downloaded)
-        
-        new_name = "VM_" + file_name
-        with open(new_name, "w", encoding="utf-8") as f:
-            f.write(result)
-            
-        with open(new_name, "rb") as f:
-            bot.send_document(message.chat.id, f, caption="💀 **VM Obfuscation Complete**\nЭтот код работает внутри виртуального процессора.")
-            
-        os.remove(new_name)
-    except Exception as e:
-        bot.reply_to(message, f"Error: {e}")
+    new_file_name = "Protected_" + file_name
+    
+    # Проверка расширения
+    if not (file_name.endswith('.lua') or file_name.endswith('.txt')):
+        bot.reply_to(message, "❌ Пожалуйста, отправь файл .lua или .txt")
+        return
 
-bot.infinity_polling()
+    status_msg = bot.reply_to(message, "🔒 Файл получен. Шифрую...")
+
+    try:
+        # 1. Получаем путь и скачиваем файл
+        file_info = bot.get_file(message.document.file_id)
+        downloaded_file = bot.download_file(file_info.file_path)
+
+        # 2. Сохраняем исходный файл (временно)
+        with open(file_name, 'wb') as new_file:
+            new_file.write(downloaded_file)
+
+        # 3. Обфусицируем (читаем байты)
+        protected_code = obfuscate_script(downloaded_file)
+
+        # 4. Сохраняем результат в файл (чтобы отправить как документ)
+        # Lua код это строка, нам нужно записать её как байты (utf-8)
+        with open(new_file_name, 'w', encoding='utf-8') as f:
+            f.write(protected_code)
+
+        # 5. Отправляем файл пользователю
+        with open(new_file_name, 'rb') as doc:
+            bot.send_document(
+                message.chat.id, 
+                doc, 
+                caption="✅ Твой скрипт защищен!\n🔐 Метод: Dynamic Hex + Shift Cipher\n🗑 Файлы удалены с сервера."
+            )
+        
+        # Удаляем сообщение "Шифрую..."
+        bot.delete_message(message.chat.id, status_msg.message_id)
+
+    except Exception as e:
+        bot.reply_to(message, f"⚠️ Произошла ошибка: {e}")
+        print(f"Error: {e}")
+
+    finally:
+        # 6. ОЧИСТКА: Удаляем оба файла (исходный и защищенный)
+        # Используем try-except, чтобы ошибка удаления не ломала бота
+        try:
+            if os.path.exists(file_name):
+                os.remove(file_name)
+                print(f"Deleted input: {file_name}")
+            
+            if os.path.exists(new_file_name):
+                os.remove(new_file_name)
+                print(f"Deleted output: {new_file_name}")
+        except Exception as cleanup_error:
+            print(f"Cleanup error: {cleanup_error}")
+
+# Запуск
+if __name__ == '__main__':
+    print("Бот запущен и готов к работе...")
+    bot.infinity_polling()
