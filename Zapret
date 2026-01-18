@@ -1,345 +1,88 @@
-import lupa
-from lupa import LuaRuntime
-import logging
-import subprocess
+import asyncio
 import os
-import tempfile
-import re
-import binascii
-import time
+import logging
+import uuid
+from aiogram import Bot, Dispatcher, F, types
+from aiogram.types import FSInputFile
+from aiogram.filters import Command
 
-logger = logging.getLogger("DeobfuscatorEngine")
+# Импортируем наш мощный движок
+from engine import DeobfuscatorEngine
 
-class DeobfuscatorEngine:
-    def __init__(self):
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        self.unluac_path = os.path.join(base_dir, "unluac.jar")
+# --- CONFIG ---
+API_TOKEN = 'ТВОЙ_ТОКЕН_ЗДЕСЬ' 
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(message)s")
+logger = logging.getLogger("Bot")
+
+bot = Bot(token=API_TOKEN)
+dp = Dispatcher()
+engine = DeobfuscatorEngine()
+
+@dp.message(Command("start"))
+async def start_handler(msg: types.Message):
+    await msg.answer(
+        "🗡️ **Ultimate Lua Deobfuscator**\n\n"
+        "Поддерживает:\n"
+        "📦 **MoonSec V3 / IronBrew** (Bit32 Emulation)\n"
+        "💉 **Synapse/Krnl Checks** (Env Mocking)\n"
+        "🕸️ **Stack Crawler** (Upvalue Stealing)\n\n"
+        "Просто скинь файл `.lua`."
+    )
+
+@dp.message(F.document)
+async def doc_handler(msg: types.Message):
+    uid = uuid.uuid4().hex[:6]
+    f_in = f"temp_{uid}.lua"
+    f_out = f"Deobfuscated_{msg.document.file_name}_{uid}.txt"
+    
+    status = await msg.answer("🕵️ **Инициализация...**")
+    
+    # Получаем loop для threadsafe обновлений
+    loop = asyncio.get_running_loop()
+    
+    def callback(text):
+        if loop.is_closed(): return
+        asyncio.run_coroutine_threadsafe(
+            status.edit_text(f"⚙️ {text}"), loop
+        )
+
+    try:
+        # Скачиваем
+        file = await bot.get_file(msg.document.file_id)
+        await bot.download_file(file.file_path, f_in)
         
-    def process(self, content, status_callback=None):
-        def update_status(msg):
-            if status_callback: status_callback(msg)
-            logger.info(f"[STATUS] {msg}")
+        with open(f_in, "rb") as f: content = f.read()
 
-        if not self._check_java():
-            return b"-- [FATAL] Java not found. Install Java JDK."
-
-        update_status("🔥 Запуск Ultimate Emulation Core...")
-
-        # Инициализируем Lua (LuaJIT)
-        try:
-            lua = LuaRuntime(unpack_returned_tuples=True)
-        except Exception as e:
-            return f"-- [FATAL] Lua init error: {e}".encode('utf-8')
-
-        # --- LUA: THE SPYWARE KERNEL ---
-        # Этот скрипт создает фейковое окружение, максимально похожее на реальный Roblox + Exploit
-        lua_script = r"""
-        -- [[ 1. PREPARE STORAGE ]] --
-        _G.CAPTURED_CHUNKS = {}
-        _G.DETECTED_STRINGS = {}
-        _G.ACTION_LOG = {}
-        _G.UPVALUES_DUMP = {}
-        _G.START_TIME = os.time()
-
-        local function log(msg)
-            if #_G.ACTION_LOG < 500 then table.insert(_G.ACTION_LOG, msg) end
-        end
-
-        local function save_str(s, context)
-            if type(s) == "string" and #s > 3 then
-                -- Фильтр системного мусора
-                if not s:find("stack") and not s:find("trace") then
-                    _G.DETECTED_STRINGS[s] = context or "Unknown"
-                end
-            end
-            return s
-        end
-
-        -- [[ 2. BIT32 POLYFILL (CRITICAL FOR MOONSEC) ]] --
-        local bit = {}
-        function bit.bnot(a) return 4294967295 - a % 4294967296 end
-        function bit.band(a, b) 
-            local r, m = 0, 2147483648
-            repeat local s,aa,bb = a+b+m, a%m, b%m; r,m = r + m*4%(s-aa-bb), m/2 until m < 1
-            return r 
-        end
-        function bit.bor(a, b) return 4294967295 - bit.band(4294967295 - a, 4294967295 - b) end
-        function bit.bxor(a, b) return bit.band(bit.bor(a, b), bit.bnot(bit.band(a, b))) end
-        function bit.lshift(a, b) return (a * 2^b) % 4294967296 end
-        function bit.rshift(a, b) return math.floor(a / 2^b) % 4294967296 end
+        # Запускаем в отдельном потоке, чтобы не блочить бота
+        # Увеличили таймаут до 3 минут, так как эмуляция тяжелая
+        res_data = await asyncio.wait_for(
+            asyncio.to_thread(engine.process, content, callback),
+            timeout=180.0
+        )
         
-        _G.bit = bit
-        _G.bit32 = bit -- MoonSec V3 проверяет именно bit32
-
-        -- [[ 3. ROBLOX INSTANCE MOCKING ]] --
-        local function create_instance(className, parent)
-            local proxy = newproxy(true)
-            local meta = getmetatable(proxy)
-            local store = {
-                ClassName = className,
-                Name = className,
-                Parent = parent,
-                Archivable = true
-            }
-            
-            meta.__index = function(t, k)
-                if store[k] then return store[k] end
-                log("Read Instance: " .. tostring(className) .. "." .. tostring(k))
-                
-                -- Эмуляция важных свойств
-                if k == "UserId" then return 1234567 end
-                if k == "PlaceId" then return 9876543 end
-                if k == "AccountAge" then return 1000 end
-                if k == "OsPlatform" then return "Windows" end
-                if k == "GetChildren" then return function() return {} end end
-                if k == "FindFirstChild" then return function() return nil end end
-                if k == "WaitForChild" then return function(_, n) return create_instance(n or "Part") end end
-                if k == "IsA" then return function(_, type) return type == className end end
-                if k == "Clone" then return function() return proxy end end
-                
-                return create_instance("Unknown_"..tostring(k))
-            end
-            
-            meta.__newindex = function(t, k, v)
-                store[k] = v
-                log("Write Instance: " .. tostring(className) .. "." .. tostring(k) .. " = " .. tostring(v))
-            end
-            
-            meta.__tostring = function() return store.Name end
-            return proxy
-        end
-
-        -- Глобальные сервисы
-        local game_proxy = create_instance("DataModel")
-        _G.game = game_proxy
-        _G.workspace = create_instance("Workspace", game_proxy)
-        _G.script = create_instance("LocalScript", game_proxy)
+        # Пишем результат
+        with open(f_out, "wb") as f: f.write(res_data)
         
-        -- [[ 4. EXPLOIT ENVIRONMENT EMULATION (Synapse/Krnl) ]] --
-        _G.getgenv = function() return _G end
-        _G.getrenv = function() return _G end
-        _G.syn = { request = function() return {Body="{}", StatusCode=200} end }
-        _G.fluxus = { request = _G.syn.request }
-        _G.request = _G.syn.request
-        _G.checkcaller = function() return true end
-        _G.iscclosure = function(f) return false end
-        _G.newcclosure = function(f) return f end
-        _G.loadstring = function(chunk) 
-            save_str(chunk, "LOADSTRING_CALL")
-            if type(chunk) == "string" and #chunk > 50 then
-                table.insert(_G.CAPTURED_CHUNKS, {data=chunk, method="loadstring"})
-            end
-            return load(chunk)
-        end
-        _G.identifyexecutor = function() return "Synapse X", "2.0.0" end
-
-        -- [[ 5. AGGRESSIVE HOOKS ]] --
-        
-        -- String Decryption Hook
-        local raw_char = string.char
-        string.char = function(...)
-            local res = raw_char(...)
-            save_str(res, "string.char")
-            return res
-        end
-        
-        local raw_byte = string.byte
-        string.byte = function(s, i, j)
-            -- save_str(s, "string.byte") -- Слишком много шума
-            return raw_byte(s, i, j)
-        end
-        
-        -- Table Concat Hook (Сборка скрипта)
-        local raw_concat = table.concat
-        table.concat = function(t, sep, i, j)
-            local res = raw_concat(t, sep, i, j)
-            save_str(res, "table.concat")
-            return res
-        end
-
-        -- [[ 6. DEBUG CRAWLER (THE UPVALUE STEALER) ]] --
-        -- Эта функция пробегает по стеку и ищет локальные переменные (ключи шифрования)
-        _G.scan_stack = function()
-            -- Scan Registry
-            local reg = debug.getregistry()
-            for k, v in pairs(reg) do
-                if type(v) == "function" then
-                    -- Scan Upvalues (Closure variables)
-                    local i = 1
-                    while true do
-                        local name, val = debug.getupvalue(v, i)
-                        if not name then break end
-                        if type(val) == "string" and #val > 4 then
-                            _G.UPVALUES_DUMP["Upval: "..name] = val
-                        end
-                        i = i + 1
-                    end
-                end
-            end
-        end
-
-        """
-
-        try:
-            update_status("💉 Внедрение Spyware...")
-            env = lua.execute(lua_script)
+        # Отправляем
+        caption = "✅ **Успешно!**\nПроверь секцию `[CAPTURED UPVALUES]` и `[DECRYPTED STRINGS]`."
+        if b"RUNTIME_ERR" in res_data:
+            caption = "⚠️ **Частичный успех.** Скрипт упал во время эмуляции, но данные собраны."
             
-            update_status("🌪️ Исполнение обфусцированного кода...")
-            
-            # Обертка для безопасного запуска
-            safe_runner = lua.eval("""
-                function(code)
-                    -- Перехват load
-                    local f, err = load(code, "TargetScript")
-                    if not f then 
-                        return "LOAD_ERR: " .. tostring(err) 
-                    end
-                    
-                    -- Запускаем в защищенном режиме
-                    local status, res = pcall(f)
-                    
-                    -- ПОСЛЕ выполнения сканируем память на наличие ключей
-                    pcall(_G.scan_stack)
-                    
-                    if not status then return "RUNTIME_ERR: " .. tostring(res) end
-                    return "SUCCESS"
-                end
-            """)
-            
-            start_time = time.time()
-            result = safe_runner(content)
-            exec_time = time.time() - start_time
-            logger.info(f"Execution finished in {exec_time:.2f}s with result: {result}")
+        await msg.answer_document(FSInputFile(f_out), caption=caption)
 
-            # --- ИЗВЛЕЧЕНИЕ ТРОФЕЕВ ---
-            g = lua.globals()
-            
-            detected_strings = dict(g.DETECTED_STRINGS)
-            captured_chunks = list(g.CAPTURED_CHUNKS)
-            upvalues = dict(g.UPVALUES_DUMP)
-            logs = list(g.ACTION_LOG)
+    except asyncio.TimeoutError:
+        await status.edit_text("💀 **Тайм-аут.** Скрипт слишком сложный или имеет защиту от зависания.")
+    except Exception as e:
+        await status.edit_text(f"❌ **Ошибка:** {e}")
+    finally:
+        # Уборка
+        for f in [f_in, f_out]:
+            if os.path.exists(f): os.remove(f)
 
-            # Логика выбора лучшего чанка (payload)
-            target_bytecode = content
-            best_label = "Original"
-            
-            if captured_chunks:
-                # Ищем самый большой чанк, который похож на Lua Bytecode
-                max_size = 0
-                for c in captured_chunks:
-                    data = c['data']
-                    if len(data) > max_size:
-                        max_size = len(data)
-                        target_bytecode = data
-                        best_label = f"Captured ({c['method']})"
+async def main():
+    await bot.delete_webhook(drop_pending_updates=True)
+    await dp.start_polling(bot)
 
-            return self._finalize_report(target_bytecode, detected_strings, upvalues, logs, best_label, update_status)
-
-        except Exception as e:
-            return f"-- [CRASH]: Engine failure: {str(e)}".encode('utf-8')
-
-    def _check_java(self):
-        try:
-            subprocess.run(["java", "-version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            return True
-        except: return False
-
-    def _finalize_report(self, bytecode, strings, upvalues, logs, source_label, callback):
-        """Генерация мощного отчета"""
-        
-        if callback: callback(f"🧬 Декомпиляция ({source_label})...")
-        
-        # Попытка декомпиляции
-        decompiled_src = self._try_decompile(bytecode)
-        
-        # --- ФОРМИРОВАНИЕ ФАЙЛА ---
-        out = []
-        out.append(f"-- [[ ROBLOX DEOBFUSCATOR REPORT V2 ]]")
-        out.append(f"-- Source: {source_label}")
-        out.append(f"-- Bytecode Size: {len(bytecode)} bytes")
-        out.append("-" * 60)
-        
-        # 1. SECRET KEYS & UPVALUES (Самое ценное)
-        if upvalues:
-            out.append("\n-- [CAPTURED UPVALUES / KEYS]")
-            out.append("-- Переменные, найденные внутри функций (замыкания):")
-            for k, v in upvalues.items():
-                clean_v = self._safe_str(v)
-                out.append(f"-- {k} = {clean_v}")
-
-        # 2. DECRYPTED STRINGS
-        if strings:
-            out.append("\n-- [DECRYPTED STRINGS]")
-            out.append("-- Строки, перехваченные во время выполнения:")
-            # Сортируем по контексту
-            sorted_strs = sorted(strings.items(), key=lambda x: x[1])
-            seen = set()
-            for s, ctx in sorted_strs:
-                clean_s = self._safe_str(s)
-                if clean_s not in seen and len(clean_s) > 3:
-                    out.append(f"-- [{ctx}] {clean_s}")
-                    seen.add(clean_s)
-
-        out.append("\n" + "="*60 + "\n")
-
-        # 3. CODE SECTION
-        if decompiled_src:
-            out.append("-- [DECOMPILED SOURCE CODE]")
-            out.append(self._beautify(decompiled_src))
-        else:
-            out.append("-- [WARNING] Unluac Failed (Custom VM Detected)")
-            out.append("-- Dumping Raw Payload (Text Representation):")
-            try:
-                out.append(bytecode.decode('utf-8'))
-            except:
-                out.append(f"-- Binary Blob: {binascii.hexlify(bytecode[:64]).decode()}... (truncated)")
-
-        # 4. EXECUTION LOG
-        out.append("\n" + "="*60 + "\n")
-        out.append("-- [EXECUTION TRACE]")
-        for l in logs[-50:]:
-            out.append(f"-- {l}")
-
-        return "\n".join(out).encode('utf-8')
-
-    def _try_decompile(self, data):
-        if not os.path.exists(self.unluac_path): return None
-        try:
-            with tempfile.NamedTemporaryFile(delete=False, mode='wb') as f:
-                f.write(data)
-                fname = f.name
-            
-            # Запускаем unluac
-            res = subprocess.run(
-                ["java", "-jar", self.unluac_path, fname],
-                capture_output=True, timeout=15
-            )
-            os.remove(fname)
-            
-            if res.returncode == 0 and res.stdout:
-                return res.stdout.decode('utf-8', errors='ignore')
-            return None
-        except: return None
-
-    def _safe_str(self, obj):
-        """Очистка строк от непечатаемых символов"""
-        s = str(obj)
-        return s.replace('\n', ' ').replace('\r', '').replace('\0', '')
-
-    def _beautify(self, src):
-        """Простой форматтер Lua"""
-        src = re.sub(r'(\s)(local|function|if|for|while|repeat)(\s)', r'\n\2 ', src)
-        src = src.replace(';', ';\n').replace(' then ', ' then\n').replace(' do ', ' do\n').replace(' end ', '\nend\n')
-        lines = src.splitlines()
-        res = []
-        indent = 0
-        for line in lines:
-            line = line.strip()
-            if not line: continue
-            if line.startswith(('end', 'until', '}', 'elseif', 'else')): indent = max(0, indent - 1)
-            res.append('\t' * indent + line)
-            if line.endswith(('then', 'do', 'repeat', '{', '(')) or ('function' in line and not line.endswith('end')):
-                indent += 1
-            if line.startswith(('if', 'elseif', 'else')):
-                 pass # indent logic handled above mostly
-        return "\n".join(res)
+if __name__ == "__main__":
+    asyncio.run(main())
