@@ -1,226 +1,24 @@
-import lupa
-from lupa import LuaRuntime
-import re
-import logging
-import asyncio
+    # ... (код выше без изменений)
 
-# Логгер
-logger = logging.getLogger("DeobfuscatorEngine")
-
-class DeobfuscatorEngine:
-    def __init__(self):
-        pass
-
-    def process(self, content, status_callback=None):
-        """
-        Главный метод обработки.
-        """
-        def update_status(msg):
-            if status_callback: status_callback(msg)
-            logger.info(f"[STATUS] {msg}")
-
-        # --- ЭТАП 1: Подготовка ---
-        update_status("🛠 Подготовка 'Черной дыры' (Universal Proxy)...")
-        
+        # 2. ЗАПУСК
         try:
-            lua = LuaRuntime(unpack_returned_tuples=True)
-        except Exception as e:
-            # Возвращаем байты, чтобы бот мог их записать
-            return f"-- [FATAL]: Ошибка старта Lua: {e}".encode('utf-8')
+            # result_code теперь будет типа BYTES
+            result_code = await asyncio.wait_for(
+                asyncio.to_thread(engine.process, content, sync_status_updater),
+                timeout=120.0
+            )
+        except asyncio.TimeoutError:
+            result_code = b"-- [TIMEOUT] Script too long." # Байтовая строка
+            await status_msg.edit_text("❌ **Ошибка:** Время вышло.")
 
-        # --- ЭТАП 2: Полифилл BIT ---
-        bit_polyfill = """
-        local bit = {}
-        function bit.tobit(x) x = x % 4294967296; if x >= 2147483648 then x = x - 4294967296 end; return x end
-        function bit.bnot(x) return 4294967295 - x % 4294967296 end
+        # 3. Сохранение (ИСПРАВЛЕНО: используем "wb")
+        await status_msg.edit_text("✅ **Готово!** Загружаю файл...")
         
-        local function bit_oper(a, b, oper)
-            local r, m, s = 0, 2^31, nil
-            repeat
-                s,a,b = a+b+m, a%m, b%m
-                r,m = r + m*oper%(s-a-b), m/2
-            until m < 1
-            return r
-        end
-        
-        function bit.band(a, b) return bit_oper(a, b, 4) end
-        function bit.bor(a, b)  return bit_oper(a, b, 1) end
-        function bit.bxor(a, b) return bit_oper(a, b, 3) end
-        function bit.lshift(a, b) return (a * 2^b) % 4294967296 end
-        function bit.rshift(a, b) return math.floor(a / 2^b) % 4294967296 end
-        
-        package.loaded.bit = bit
-        _G.bit = bit
-        _G.bit32 = bit
-        """
+        # ВАЖНО: "wb" вместо "w", и убираем encoding
+        with open(output_path, "wb") as f:
+            f.write(result_code) # result_code уже в байтах
 
-        # --- ЭТАП 3: Создание Среды-Ловушки ---
-        update_status("🛡️ Активация режима эмуляции эксплойта...")
-        
-        sandbox_setup = bit_polyfill + """
-        _G.CAPTURED = nil
-        _G.LOGS = {}
-        
-        _G.log = function(msg) table.insert(_G.LOGS, msg) end
-        local log = _G.log
+        output_file = FSInputFile(output_path, filename=f"Deobf_{file_name}")
+        await message.answer_document(output_file, caption="✅ Успешная деобфускация (Binary/Source).")
 
-        -- [[ ХУК STRING.DUMP ]] --
-        local real_dump = string.dump
-        local function hooked_dump(func)
-            log("[HOOK] Попытка string.dump!")
-            local success, bytecode = pcall(real_dump, func)
-            if success and #bytecode > 50 then
-                 _G.CAPTURED = bytecode
-                 log("[!!!] ДЖЕКПОТ! string.dump перехвачен.")
-            end
-            return bytecode or ""
-        end
-
-        -- [[ ХУК LOADSTRING ]] --
-        local function hooked_loadstring(chunk, chunkname)
-            if type(chunk) == "string" and #chunk > 50 then
-                _G.CAPTURED = chunk
-                log("[!!!] ДЖЕКПОТ! loadstring перехватил код.")
-                return function() end 
-            end
-            local f = load(chunk)
-            return f or function() end
-        end
-
-        -- [[ PROXY ]] --
-        local function create_proxy(name)
-            local proxy = {}
-            local meta = {}
-            meta.__index = function(t, k) return create_proxy(name .. "." .. tostring(k)) end
-            meta.__call = function(t, ...) return create_proxy(name .. "()") end
-            meta.__tostring = function() return name end
-            meta.__len = function() return 0 end
-            meta.__add = function() return 0 end
-            meta.__sub = function() return 0 end
-            meta.__mul = function() return 0 end
-            meta.__div = function() return 1 end 
-            meta.__eq = function() return true end 
-            meta.__lt = function() return false end
-            meta.__metatable = "LOCKED"
-            setmetatable(proxy, meta)
-            return proxy
-        end
-
-        -- [[ ENV ]] --
-        local env = {
-            loadstring = hooked_loadstring,
-            load = hooked_loadstring,
-            string = string, math = math, table = table, 
-            bit = _G.bit, bit32 = _G.bit,
-            pairs = pairs, ipairs = ipairs, next = next,
-            type = type, tostring = tostring, tonumber = tonumber,
-            pcall = pcall, xpcall = xpcall, select = select,
-            error = error, unpack = unpack or table.unpack,
-            assert = assert,
-            
-            getgenv = function() return _G.sandbox_env end,
-            getrenv = function() return _G.sandbox_env end,
-            getreg = function() return {} end,
-            getgc = function() return {} end,
-            checkcaller = function() return true end,
-            
-            getfenv = function(f) return _G.sandbox_env end,
-            setfenv = function(f, t) return f end,
-            
-            game = create_proxy("game"),
-            workspace = create_proxy("workspace"),
-            script = create_proxy("script"),
-            task = { wait = function() end, spawn = function(f) f() end, delay = function(t, f) f() end },
-            Instance = { new = function(n) return create_proxy("Instance.new("..n..")") end }
-        }
-        
-        env.string.dump = hooked_dump
-        setmetatable(env, { __index = function(t, k) return create_proxy(tostring(k)) end })
-
-        env._G = env
-        env.shared = env
-        _G.sandbox_env = env
-        return env
-        """
-
-        # --- ЭТАП 4: Исполнение ---
-        update_status("🚀 Запуск (режим Binary Safe)...")
-        
-        try:
-            env = lua.execute(sandbox_setup)
-            
-            runner = lua.eval("""
-                function(code, env)
-                    local log = _G.log or function() end
-                    local f, err = load(code, "obf_script", "t", env)
-                    if not f then return false, "Syntax Error: " .. tostring(err) end
-                    
-                    log("Запуск...")
-                    local status, res = pcall(f)
-                    
-                    if not status then
-                        log("[ERROR] " .. tostring(res))
-                        return false, res
-                    end
-                    
-                    if type(res) == "function" then
-                        log("[HOOK] Return function detected")
-                        local s, dumped = pcall(string.dump, res)
-                        if s and #dumped > 50 then _G.CAPTURED = dumped end
-                    end
-                    
-                    return true, "Executed"
-                end
-            """)
-            
-            runner(content, env)
-            
-            # ВАЖНО: Не используем str(), берем как есть
-            captured = lua.globals().CAPTURED
-            logs = list(lua.globals().LOGS)
-            
-            if captured:
-                update_status("✅ УСПЕХ! Данные перехвачены.")
-                # Передаем raw object в clean_code
-                return self._clean_code(captured)
-            else:
-                log_str = "\n".join([str(l) for l in logs])
-                return f"-- [FAIL] Не удалось перехватить код.\n-- ЛОГИ:\n{log_str}".encode('utf-8')
-
-        except Exception as e:
-            return f"-- [CRASH]: {e}".encode('utf-8')
-
-    def _clean_code(self, code_obj):
-        """Обработка результата (байты или текст)"""
-        
-        # 1. Пытаемся понять, что нам пришло (строка или байты Lua)
-        # Lupa может вернуть 'bytes' или 'str' в зависимости от содержимого
-        
-        is_binary = False
-        
-        # Если это байты Python
-        if isinstance(code_obj, (bytes, bytearray)):
-            final_bytes = code_obj
-        # Если это строка Python, пытаемся закодировать в latin1 (так Lupa передает бинарники)
-        elif isinstance(code_obj, str):
-            try:
-                final_bytes = code_obj.encode('latin1') # Часто Lua-строки маппятся так
-            except:
-                final_bytes = code_obj.encode('utf-8')
-        else:
-            final_bytes = str(code_obj).encode('utf-8')
-
-        # Проверка на сигнатуру Lua (ESC Lua)
-        if final_bytes.startswith(b'\x1bLua') or final_bytes.startswith(b'\x1b\x4c'):
-            header = b"-- [[ BYTECODE CAPTURED ]] --\n-- Use 'unluac' to decompile.\n\n"
-            return header + final_bytes
-
-        # Если это текст (исходный код), декодируем и форматируем
-        try:
-            text_code = final_bytes.decode('utf-8')
-            # Простой форматировщик
-            formatted = text_code.replace(";", "\n")
-            return f"-- [[ DEOBFUSCATED SOURCE ]] --\n\n{formatted}".encode('utf-8')
-        except:
-            # Если не декодируется, возвращаем как байты
-            return b"-- [[ UNKNOWN BINARY DATA ]] --\n" + final_bytes
+    # ... (остальной код без изменений)
