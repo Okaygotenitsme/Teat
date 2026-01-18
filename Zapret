@@ -1,171 +1,103 @@
-import lupa
-from lupa import LuaRuntime
-import re
-import logging
 import asyncio
+import os
+import logging
+import sys
+from aiogram import Bot, Dispatcher, F, types
+from aiogram.types import FSInputFile
+from aiogram.filters import Command
+from aiogram.exceptions import TelegramBadRequest
 
-# Логгер
-logger = logging.getLogger("DeobfuscatorEngine")
+from engine import DeobfuscatorEngine
 
-class DeobfuscatorEngine:
-    def __init__(self):
-        pass
+# --- CONFIG ---
+API_TOKEN = 'ТВОЙ_ТОКЕН' 
 
-    def process(self, content, status_callback=None):
-        """
-        status_callback: функция, которую движок будет дергать, чтобы сообщить боту о прогрессе.
-        """
-        def update_status(msg):
-            if status_callback:
-                status_callback(msg)
-            logger.info(f"[STATUS] {msg}")
+# Логирование
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
+logger = logging.getLogger("Bot")
 
-        # --- ЭТАП 1: Подготовка ---
-        update_status("🛠 Подготовка песочницы Lua (v5.4 + Polyfills)...")
+bot = Bot(token=API_TOKEN)
+dp = Dispatcher()
+engine = DeobfuscatorEngine()
+
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message):
+    await message.answer("🤖 **Roblox Deobfuscator V2**\n\nПришли скрипт, и я вскрою его защиту.")
+
+@dp.message(F.document)
+async def handle_document(message: types.Message):
+    user_id = message.from_user.id
+    file_name = message.document.file_name
+    input_path = f"in_{user_id}_{file_name}"
+    output_path = f"out_{user_id}.lua"
+
+    # Стартовое сообщение
+    status_msg = await message.answer("⏳ **Инициализация...**")
+    
+    # Функция для обновления статуса в сообщении (вызывается из Engine)
+    # Мы используем кеширование, чтобы не долбить API телеграма слишком часто
+    last_status = [""]
+    
+    def sync_status_updater(text):
+        """Эта функция вызывается из синхронного кода Engine"""
+        if text == last_status[0]: return
+        last_status[0] = text
         
+        # Планируем асинхронное обновление сообщения
+        async def edit_coro():
+            try:
+                # Добавляем часики для красоты
+                await status_msg.edit_text(f"⚙️ **В работе...**\n\n🔹 {text}")
+            except TelegramBadRequest:
+                pass # Игнорируем ошибки (если сообщение не изменилось)
+        
+        # Безопасно передаем задачу в главный цикл событий бота
+        asyncio.run_coroutine_threadsafe(edit_coro(), bot.loop)
+
+    try:
+        # 1. Скачивание
+        file = await bot.get_file(message.document.file_id)
+        await bot.download_file(file.file_path, input_path)
+
+        with open(input_path, "r", encoding="utf-8", errors="ignore") as f:
+            content = f.read()
+
+        # 2. ЗАПУСК (Передаем нашу функцию обновления статуса)
+        # Ждем максимум 120 секунд
         try:
-            # Создаем Lua Runtime
-            lua = LuaRuntime(unpack_returned_tuples=True)
-        except Exception as e:
-            return f"-- [FATAL ERROR]: Не удалось запустить Lua: {e}"
+            result_code = await asyncio.wait_for(
+                asyncio.to_thread(engine.process, content, sync_status_updater),
+                timeout=120.0
+            )
+        except asyncio.TimeoutError:
+            result_code = "-- [TIMEOUT] Скрипт слишком сложный (более 2 минут)."
+            await status_msg.edit_text("❌ **Ошибка:** Время вышло.")
 
-        # --- ЭТАП 2: Внедрение библиотек (FIX для ошибки 'module bit not found') ---
-        update_status("💉 Внедрение патча для библиотеки 'bit'...")
+        # 3. Сохранение и отправка
+        await status_msg.edit_text("✅ **Готово!** Загружаю файл...")
         
-        # Этот скрипт создает библиотеку bit на чистом Lua (работает везде)
-        bit_polyfill = """
-        local bit = {}
-        function bit.tobit(x) x = x % 4294967296; if x >= 2147483648 then x = x - 4294967296 end; return x end
-        function bit.bnot(x) return 4294967295 - x % 4294967296 end
-        
-        -- Простая реализация через деление (медленно, но надежно для эмуляции)
-        local function bit_oper(a, b, oper)
-            local r, m, s = 0, 2^31, nil
-            repeat
-                s,a,b = a+b+m, a%m, b%m
-                r,m = r + m*oper%(s-a-b), m/2
-            until m < 1
-            return r
-        end
-        
-        function bit.band(a, b) return bit_oper(a, b, 4) end
-        function bit.bor(a, b)  return bit_oper(a, b, 1) end
-        function bit.bxor(a, b) return bit_oper(a, b, 3) end
-        function bit.lshift(a, b) return (a * 2^b) % 4294967296 end
-        function bit.rshift(a, b) return math.floor(a / 2^b) % 4294967296 end
-        
-        -- Регистрируем библиотеку, чтобы require('bit') работало
-        package.loaded.bit = bit
-        _G.bit = bit
-        _G.bit32 = bit -- Подмена bit32 тоже нужна
-        """
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write(result_code)
 
-        # --- ЭТАП 3: Настройка "Ядерной" среды ---
-        update_status("🛡️ Создание неубиваемого окружения (Anti-Anti-Tamper)...")
-        
-        sandbox_setup = bit_polyfill + """
-        _G.CAPTURED = nil
-        _G.LOGS = {}
+        output_file = FSInputFile(output_path, filename=f"Deobf_{file_name}")
+        await message.answer_document(output_file, caption="✅ Успешная деобфускация.")
 
-        local function log(msg) table.insert(_G.LOGS, msg) end
+    except Exception as e:
+        logger.error(f"Error: {e}")
+        await status_msg.edit_text(f"❌ **Критическая ошибка:**\n{e}")
 
-        -- 1. Мощный хук loadstring
-        local raw_load = load
-        local function hooked_loadstring(chunk, chunkname)
-            if type(chunk) == "string" and #chunk > 100 then
-                _G.CAPTURED = chunk
-                log("[SUCCESS] Скрытый код перехвачен через loadstring!")
-                return function() end -- Возвращаем пустышку, чтобы не выполнять вредоносный код
-            end
-            return raw_load(chunk, chunkname)
-        end
+    finally:
+        # Чистка
+        for p in [input_path, output_path]:
+            if os.path.exists(p):
+                try: os.remove(p) 
+                except: pass
 
-        -- 2. Среда-приманка
-        local env = {
-            loadstring = hooked_loadstring,
-            load = hooked_loadstring,
-            
-            -- Фейковые функции Roblox
-            print = function(...) local arg={...} log("[SCRIPT PRINT]: " .. tostring(arg[1])) end,
-            warn = function(...) end,
-            error = function(...) log("[SCRIPT ERROR]: " .. tostring((...))) end,
-            
-            -- Обход проверок окружения
-            getfenv = function() return _G.sandbox_env end,
-            setfenv = function(f, t) return f end,
-            
-            -- Подмена debug (чтобы скрипт не понял, что его анализируют)
-            debug = {
-                getinfo = function() return { source = "=[C]", what = "C" } end, -- Прикидываемся движком игры
-                getupvalue = function() return nil end,
-                setupvalue = debug.setupvalue,
-                traceback = debug.traceback
-            },
-            
-            string = string, math = math, table = table, pairs = pairs, ipairs = ipairs,
-            tonumber = tonumber, tostring = tostring, type = type, next = next,
-            pcall = pcall, xpcall = xpcall, select = select,
-            
-            game = { GetService = function() return {} end },
-            script = {}
-        }
-        
-        -- Замыкаем окружение
-        env._G = env
-        env.getgenv = function() return env end
-        _G.sandbox_env = env
-        
-        return env
-        """
+async def main():
+    # Важный хак: сохраняем loop в боте, чтобы вызывать его из потоков
+    bot.loop = asyncio.get_running_loop()
+    await bot.delete_webhook(drop_pending_updates=True)
+    await dp.start_polling(bot)
 
-        # --- ЭТАП 4: Запуск ---
-        update_status("🚀 Запуск обфусцированного кода в песочнице...")
-        
-        try:
-            env = lua.execute(sandbox_setup)
-            
-            # Запускаем скрипт пользователя
-            runner = lua.eval("""
-                function(code, env)
-                    -- Пытаемся загрузить код в защищенную среду
-                    local f, err = load(code, "target", "t", env)
-                    if not f then return false, "Syntax Error: " .. tostring(err) end
-                    
-                    -- Запускаем
-                    return pcall(f)
-                end
-            """)
-            
-            success, res = runner(content, env)
-            
-            # Проверяем результат
-            captured = lua.globals().CAPTURED
-            logs = list(lua.globals().LOGS)
-            
-            if captured:
-                update_status("✅ Код успешно перехвачен! Начинаю очистку...")
-                return self._clean_code(str(captured))
-            
-            elif not success:
-                log_str = "\n".join([str(l) for l in logs[-5:]]) # Последние 5 логов
-                return f"-- [FAIL] Ошибка выполнения Lua: {res}\n-- Последние логи:\n-- {log_str}"
-            
-            else:
-                return "-- [FAIL] Скрипт выполнился, но ничего не распаковал (возможно, используется другая техника)."
-
-        except Exception as e:
-            return f"-- [CRITICAL ERROR]: {str(e)}"
-
-    def _clean_code(self, code):
-        """Очистка мусора"""
-        # 1. Красивый заголовок
-        header = "-- [[ DEOBFUSCATED & CLEANED ]]\n\n"
-        
-        # 2. Убираем return в конце, который часто бывает в байткоде
-        code = re.sub(r"\s*return\s*$", "", code)
-        
-        # 3. Базовая формат-чистка
-        # Заменяем ; на новую строку для читаемости
-        code = code.replace(";", "\n")
-        
-        return header + code
+if __name__ == "__main__":
+    asyncio.run(main())
