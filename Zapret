@@ -4,27 +4,29 @@ import re
 
 class DeobfuscatorEngine:
     def __init__(self):
+        # Инициализация Lua движка
         self.lua = LuaRuntime(unpack_returned_tuples=True)
 
     def process_text(self, content):
+        # Передаем текст в песочницу
         return self.run_roblox_sandbox(content)
 
     def run_roblox_sandbox(self, code):
         logs = ["-- [[ MoonSec V3 + Roblox Environment ]] --\n"]
         
-        # 1. Пытаемся найти имя переменной с байт-кодом (например, _ngWOHRHfEJeL)
+        # 1. Поиск имени переменной с байт-кодом
         bytecode_var = "nil"
-        match = re.search(r"\(function\(a\) (\w+) = a; end\)\)", code)
-        if match:
-            bytecode_var = match.group(1)
+        var_match = re.search(r"\(function\(a\) (\w+) = a; end\)\)", code)
+        if var_match:
+            bytecode_var = var_match.group(1)
             logs.append(f"-- [SYSTEM]: Найдена переменная данных: {bytecode_var}")
 
-        # 2. Огромный скрипт эмуляции Roblox
+        # 2. Скрипт подготовки среды (Эмуляция Roblox)
         setup_script = f"""
         _G.LOGS = {{}}
         _G.CAPTURED_RESULT = nil
         
-        -- Полифиллы окружения
+        -- Полифиллы для совместимости версий Lua
         if not setfenv then
             local function find_env(f)
                 local i = 1
@@ -41,7 +43,7 @@ class DeobfuscatorEngine:
             end
         end
 
-        -- Умный прокси, который притворяется чем угодно
+        -- Универсальный прокси-объект
         local function create_proxy(name)
             local proxy = {{}}
             setmetatable(proxy, {{
@@ -53,50 +55,32 @@ class DeobfuscatorEngine:
             return proxy
         end
 
-        -- Эмуляция типов Roblox
-        local function create_roblox_types()
-            return {{
-                Vector3 = {{ new = function() return create_proxy("Vector3") end }},
-                CFrame = {{ new = function() return create_proxy("CFrame") end }},
-                Instance = {{ new = function() return create_proxy("Instance") end }},
-                Color3 = {{ fromRGB = function() return create_proxy("Color3") end }},
-                Enum = create_proxy("Enum"),
-                task = {{ wait = function() end, spawn = function(f) f() end, defer = function(f) f() end }},
-                workspace = create_proxy("workspace"),
-                game = create_proxy("game"),
-            }}
-        end
-
-        local roblox = create_roblox_types()
-        
-        -- Глобальная песочница
+        -- Среда Roblox
         local sandbox = {{
             print = function(...) table.insert(_G.LOGS, "[PRINT]: " .. table.concat({{...}}, " ")) end,
             warn = function(...) table.insert(_G.LOGS, "[WARN]: " .. table.concat({{...}}, " ")) end,
             loadstring = function(c)
                 _G.CAPTURED_RESULT = c
-                table.insert(_G.LOGS, "[!] УСПЕХ: Код захвачен!")
+                table.insert(_G.LOGS, "[!] ВЗЛОМ: Код успешно перехвачен!")
                 return function() end
             end,
-            -- Стандартные либы
+            -- Стандартные библиотеки
             bit32 = bit32, string = string, math = math, table = table, debug = debug,
             pairs = pairs, ipairs = ipairs, next = next, type = type, 
-            pcall = pcall, ypcall = pcall, unpack = unpack or table.unpack,
+            pcall = pcall, unpack = unpack or table.unpack,
             tick = function() return 1600000000 end,
             getgenv = function() return _G.sandbox_env end,
+            game = create_proxy("game"),
+            workspace = create_proxy("workspace"),
+            script = create_proxy("script"),
             _G = {{}},
             shared = {{}},
         }}
 
-        -- Добавляем элементы Roblox в песочницу
-        for k, v in pairs(roblox) do sandbox[k] = v end
-
-        -- ГЛАВНОЕ: Защита переменной байт-кода
+        -- Обработка неизвестных обращений
         local bytecode_var_name = "{bytecode_var}"
-
         setmetatable(sandbox, {{
             __index = function(t, k)
-                -- Если MoonSec просит переменную с байт-кодом, возвращаем её как строку из глобала
                 if k == bytecode_var_name then return _G[bytecode_var_name] end
                 return create_proxy(tostring(k))
             end
@@ -107,18 +91,17 @@ class DeobfuscatorEngine:
         """
 
         try:
-            # Запускаем подготовку среды
+            # Подготовка среды
             sandbox_env = self.lua.execute(setup_script)
             
-            # Перед запуском MoonSec, вытащим байт-код из текста и положим в реальный Lua-глобал
-            # Чтобы MoonSec видел его как строку, а не как прокси-таблицу
+            # 3. ПЕРЕДАЧА БАЙТ-КОДА (Исправлено: используем 'code' вместо 'content')
             if bytecode_var != "nil":
-                # Ищем саму строку байт-кода в кавычках сразу после gsub
-                data_match = re.search(r"'(.*?)'", content) # Упрощенный поиск данных
+                # Ищем длинную строку байт-кода в кавычках
+                data_match = re.search(r"['\"](.*?)['\"]", code) 
                 if data_match:
                     self.lua.globals()[bytecode_var] = data_match.group(1)
 
-            # Запуск обфускатора
+            # 4. Запуск обфускатора
             runner = self.lua.eval("""
                 function(code, env)
                     local f, err = load(code, "RobloxScript", "t", env)
@@ -129,13 +112,14 @@ class DeobfuscatorEngine:
 
             success, error_msg = runner(code, sandbox_env)
 
-            # Сбор результатов
+            # Собираем логи
             for i in range(len(self.lua.globals().LOGS)):
                 logs.append(self.lua.globals().LOGS[i+1])
 
+            # Проверяем захваченный результат
             captured = self.lua.globals().CAPTURED_RESULT
             if captured:
-                logs.append("\n" + "="*20 + " ДЕОБФУСЦИРОВАННЫЙ КОД " + "="*20)
+                logs.append("\n" + "="*30 + " РЕЗУЛЬТАТ ДЕОБФУСКАЦИИ " + "="*30)
                 logs.append(str(captured))
             elif not success:
                 logs.append(f"\n[ОШИБКА]: {error_msg}")
