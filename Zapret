@@ -1,157 +1,62 @@
-local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
-local UnitAI = {}
 
-local function getStat(model, name, default)
-	local attr = model:GetAttribute(name)
-	if attr ~= nil then return attr end
-	return default
+local towersFolder = Workspace:FindFirstChild("Towers") or Instance.new("Folder", Workspace)
+towersFolder.Name = "Towers"
+
+local function createTowerUI(obj)
+    -- Пытаемся найти деталь, к которой прикрепим полоску (PrimaryPart или сама деталь)
+    local adornee = (obj:IsA("Model") and obj.PrimaryPart) or (obj:IsA("BasePart") and obj)
+    
+    if not adornee then 
+        warn("Не удалось найти деталь для UI у башни: " .. obj.Name)
+        return 
+    end
+    
+    -- Создаем интерфейс
+    local bgui = Instance.new("BillboardGui")
+    bgui.Name = "HealthGui"
+    bgui.Size = UDim2.new(8, 0, 2, 0) -- Немного увеличим размер
+    bgui.AlwaysOnTop = true
+    bgui.ExtentsOffset = Vector3.new(0, 8, 0) -- Поднимаем выше над башней
+    bgui.Adornee = adornee
+    bgui.Parent = adornee
+    
+    local label = Instance.new("TextLabel")
+    label.Size = UDim2.new(1, 0, 1, 0)
+    label.BackgroundTransparency = 1
+    label.TextColor3 = Color3.fromRGB(255, 215, 0) -- Золотой
+    label.TextStrokeTransparency = 0
+    label.TextScaled = true
+    label.Text = tostring(obj:GetAttribute("Health") or "???")
+    label.Parent = bgui
+    
+    -- Обновление текста при изменении здоровья
+    obj:GetAttributeChangedSignal("Health"):Connect(function()
+        local currentHealth = obj:GetAttribute("Health") or 0
+        label.Text = tostring(math.ceil(currentHealth))
+    end)
 end
 
--- Функция создания текста над головой
-local function createHealthBar(model)
-	local head = model.PrimaryPart
-	if not head then return end
-	
-	local bgui = Instance.new("BillboardGui")
-	bgui.Name = "HealthGui"
-	bgui.Size = UDim2.new(4, 0, 1, 0)
-	bgui.AlwaysOnTop = true
-	bgui.ExtentsOffset = Vector3.new(0, 3, 0) -- Высота над головой
-	bgui.Parent = head
-	
-	local label = Instance.new("TextLabel")
-	label.Size = UDim2.new(1, 0, 1, 0)
-	label.BackgroundTransparency = 1
-	label.TextColor3 = Color3.new(1, 1, 1)
-	label.TextStrokeTransparency = 0
-	label.TextScaled = true
-	label.Text = tostring(model:GetAttribute("Health") or 0)
-	label.Parent = bgui
-	
-	-- Обновление текста при изменении атрибута Health
-	model:GetAttributeChangedSignal("Health"):Connect(function()
-		label.Text = tostring(math.max(0, math.floor(model:GetAttribute("Health") or 0)))
-	end)
+local function setupTower(name, health)
+    local tower = Workspace:FindFirstChild(name)
+    if tower then
+        tower.Parent = towersFolder
+        
+        -- Сначала ставим PrimaryPart, если это модель
+        if tower:IsA("Model") and not tower.PrimaryPart then
+            tower.PrimaryPart = tower:FindFirstChildWhichIsA("BasePart")
+        end
+        
+        -- Устанавливаем атрибут здоровья ДО создания UI
+        tower:SetAttribute("Health", health)
+        createTowerUI(tower)
+        print("Башня успешно настроена: " .. name)
+    else
+        warn("Внимание: Башня '" .. name .. "' не найдена в Workspace!")
+    end
 end
 
-local function findEnemies(selfModel, myOwner)
-	local out = {}
-	local spawned = Workspace:FindFirstChild("SpawnedUnits")
-	if not spawned then return out end
-	for _, m in ipairs(spawned:GetChildren()) do
-		if m ~= selfModel and m:IsA("Model") and m.PrimaryPart then
-			local o = m:FindFirstChild("Owner")
-			if o and o.Value ~= myOwner then table.insert(out, m) end
-		end
-	end
-	return out
-end
-
-local function findEnemyTowers(myOwner)
-	local out = {}
-	local towers = Workspace:FindFirstChild("Towers")
-	if not towers then return out end
-	for _, t in ipairs(towers:GetChildren()) do
-		if t:IsA("Model") and t.PrimaryPart then
-			local o = t:FindFirstChild("Owner")
-			if not o or o.Value ~= myOwner then table.insert(out, t) end
-		end
-	end
-	return out
-end
-
-local function nearest(model, list)
-	if not model.PrimaryPart then return nil, math.huge end
-	local pos = model.PrimaryPart.Position
-	local best, bestDist = nil, math.huge
-	for _, m in ipairs(list) do
-		local d = (m.PrimaryPart.Position - pos).Magnitude
-		if d < bestDist then bestDist = d; best = m end
-	end
-	return best, bestDist
-end
-
-local function movePart(part, targetPos, speed, dt)
-	local cur = part.Position
-	local dir = (targetPos - cur) * Vector3.new(1, 0, 1)
-	if dir.Magnitude < 0.2 then return end
-	local nextPos = cur + dir.Unit * speed * dt
-	part.CFrame = CFrame.new(nextPos, nextPos + dir.Unit)
-end
-
-function UnitAI.Attach(unitModel)
-	local Damage = getStat(unitModel, "Damage", 10)
-	local Speed = getStat(unitModel, "Speed", 16)
-	local Range = getStat(unitModel, "Range", 8)
-	local AttackSpeed = getStat(unitModel, "AttackSpeed", 1)
-	local myOwner = ""
-	local ownerObj = unitModel:WaitForChild("Owner", 5)
-	if ownerObj then myOwner = ownerObj.Value end
-
-	local primary = unitModel.PrimaryPart
-	if not primary then return end
-	
-	createHealthBar(unitModel) -- Создаем надпись HP
-
-	-- Настройка анимаций
-	local animator = unitModel:FindFirstChildOfClass("AnimationController") or Instance.new("AnimationController", unitModel)
-	local walkAnim = unitModel:FindFirstChild("WalkAnim")
-	local attackAnim = unitModel:FindFirstChild("AttackAnim")
-	
-	local walkTrack = walkAnim and animator:LoadAnimation(walkAnim)
-	local attackTrack = attackAnim and animator:LoadAnimation(attackAnim)
-
-	local lastAttackTime = 0
-	local active = false
-	task.delay(getStat(unitModel, "SpawnSpeed", 0.5), function() active = true end)
-
-	local conn
-	conn = RunService.Heartbeat:Connect(function(dt)
-		if not unitModel.Parent then conn:Disconnect(); return end
-		local currentHealth = unitModel:GetAttribute("Health") or 0
-		if currentHealth <= 0 then
-			conn:Disconnect()
-			unitModel:Destroy()
-			return
-		end
-
-		if not active or not primary then return end
-
-		local targets = findEnemies(unitModel, myOwner)
-		local target, dist = nearest(unitModel, targets)
-		if not target then
-			local towers = findEnemyTowers(myOwner)
-			target, dist = nearest(unitModel, towers)
-		end
-
-		if target and target.PrimaryPart then
-			if dist <= Range then
-				-- Состояние: АТАКА
-				if walkTrack and walkTrack.IsPlaying then walkTrack:Stop() end
-				
-				if tick() - lastAttackTime >= AttackSpeed then
-					lastAttackTime = tick()
-					if attackTrack then attackTrack:Play() end -- Запуск анимации атаки
-					
-					local tHealth = target:GetAttribute("Health")
-					if tHealth then
-						target:SetAttribute("Health", tHealth - Damage)
-					end
-				end
-			else
-				-- Состояние: ДВИЖЕНИЕ
-				if attackTrack and attackTrack.IsPlaying then attackTrack:Stop() end
-				if walkTrack and not walkTrack.IsPlaying then walkTrack:Play() end -- Запуск анимации ходьбы
-				
-				movePart(primary, target.PrimaryPart.Position, Speed, dt)
-			end
-		else
-			-- Если целей нет, останавливаем анимации
-			if walkTrack then walkTrack:Stop() end
-			if attackTrack then attackTrack:Stop() end
-		end
-	end)
-end
-
-return UnitAI
+-- Настройка башен
+setupTower("MainTower", 2000)
+setupTower("TowerLeft", 1000)
+setupTower("TowerRight", 1000)
