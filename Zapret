@@ -1,7 +1,6 @@
 import lupa
 from lupa import LuaRuntime
 import logging
-import time
 
 # Логгер
 logger = logging.getLogger("DeobfuscatorEngine")
@@ -15,15 +14,15 @@ class DeobfuscatorEngine:
             if status_callback: status_callback(msg)
             logger.info(f"[STATUS] {msg}")
 
-        update_status("🛠 Инициализация Lua VM с поддержкой MoonSec...")
+        update_status("🛠 Инициализация Lua VM (MoonSec Killer)...")
 
         try:
-            # encoding=None критически важен для работы с байткодом
+            # encoding=None ВАЖНО для работы с бинарными данными
             lua = LuaRuntime(unpack_returned_tuples=True, encoding=None)
         except Exception as e:
             return f"-- [FATAL]: Ошибка старта Lua: {e}".encode('utf-8')
 
-        # --- ПОЛИФИЛЛ BIT (Нужен для дешифровки) ---
+        # --- ПОЛИФИЛЛ BIT ---
         bit_polyfill = """
         local bit = {}
         function bit.tobit(x) x = x % 4294967296; if x >= 2147483648 then x = x - 4294967296 end; return x end
@@ -55,27 +54,23 @@ class DeobfuscatorEngine:
         _G.LOGS = {}
         
         local function log(msg) 
-            -- Фильтруем спам от итераторов
             if msg:find("for state") or msg:find("__index") then return end
             table.insert(_G.LOGS, msg) 
         end
         _G.log = log
 
         -- [[ ПЕРЕХВАТЧИК LOAD/LOADSTRING ]] --
-        -- MoonSec расшифровывает чанк и делает load(chunk). Мы ловим это здесь.
         local real_load = load
         local function hooked_load(chunk, name, mode, env)
-            if type(chunk) == "string" or type(chunk) == "userdata" then
+            if type(chunk) == "string" then
                 local len = #chunk
-                -- Сохраняем только подозрительно большие куски (потенциальный код)
                 if len > 100 then
-                    log("[HOOK] Пойман кусок кода размером: " .. len .. " байт")
-                    table.insert(_G.CAPTURED_CHUNKS, {data = chunk, size = len})
+                    log("[HOOK] Пойман кусок кода (load): " .. len .. " байт")
+                    -- Сохраняем как таблицу с явными полями
+                    table.insert(_G.CAPTURED_CHUNKS, {data = chunk, size = len, source = "load"})
                 end
             end
             
-            -- ВАЖНО: Мы возвращаем настоящий результат загрузки!
-            -- Если вернуть пустышку, скрипт остановится и не расшифрует следующий слой.
             local res, err = real_load(chunk, name, mode, env)
             if not res then return nil, err end
             return res
@@ -87,39 +82,30 @@ class DeobfuscatorEngine:
             local success, bytecode = pcall(real_dump, func)
             if success and #bytecode > 100 then
                  log("[HOOK] string.dump перехвачен! Размер: " .. #bytecode)
-                 table.insert(_G.CAPTURED_CHUNKS, {data = bytecode, size = #bytecode})
+                 table.insert(_G.CAPTURED_CHUNKS, {data = bytecode, size = #bytecode, source = "dump"})
             end
             return bytecode or ""
         end
 
-        -- [[ УМНЫЙ PROXY (Roblox API Mock) ]] --
+        -- [[ PROXY ]] --
         local function create_proxy(name)
             local proxy = {}
             local meta = {}
-            
-            -- Имитация структуры Roblox, чтобы скрипт не падал
             meta.__index = function(t, k) 
                 local key = tostring(k)
-                -- MoonSec проверяет эти поля, даем ему фейковые значения
                 if key == "PlaceId" then return 123456 end
                 if key == "JobId" then return "dead-beef-1337" end
                 if key == "Parent" then return create_proxy(name..".Parent") end
-                if key == "Name" then return name end
-                
                 return create_proxy(name .. "." .. key) 
             end
-            
             meta.__call = function(t, ...) return create_proxy(name .. "()") end
             meta.__tostring = function() return name end
-            meta.__metatable = "The metatable is locked" -- Имитация защиты Roblox
-            
             setmetatable(proxy, meta)
             return proxy
         end
 
-        -- [[ СБОРКА ОКРУЖЕНИЯ (ENV) ]] --
+        -- [[ ENV ]] --
         local env = {
-            -- Хуки
             loadstring = hooked_load,
             load = hooked_load,
             string = { 
@@ -139,37 +125,22 @@ class DeobfuscatorEngine:
             assert = assert, setmetatable = setmetatable, getmetatable = getmetatable,
             rawget = rawget, rawset = rawset, rawequal = rawequal,
             
-            -- Фейковые функции эксплойтов (для проверок Anti-Tamper)
             getgenv = function() return _G.sandbox_env end,
             getrenv = function() return _G.sandbox_env end,
-            getreg = function() return {} end,
-            getgc = function() return {} end,
-            checkcaller = function() return true end,
-            iscclosure = function() return false end,
-            newcclosure = function(f) return f end,
-            
-            -- Имитация Roblox
             game = create_proxy("game"),
             workspace = create_proxy("workspace"),
             script = create_proxy("script"),
-            task = { 
-                wait = function() end, 
-                spawn = function(f) f() end, 
-                delay = function(t, f) f() end,
-                defer = function(f) f() end
-            },
+            task = { wait = function() end, spawn = function(f) f() end, delay = function() end },
             Instance = { new = function(n) return create_proxy("Instance") end }
         }
         
-        -- Циклические ссылки для обмана проверок
         env._G = env
         env.shared = env
         _G.sandbox_env = env
-        
         return env
         """
 
-        update_status("🛡️ Запуск перехвата (Deep Capture Mode)...")
+        update_status("🛡️ Запуск перехвата (Safe Mode)...")
 
         try:
             env = lua.execute(sandbox_setup)
@@ -178,73 +149,78 @@ class DeobfuscatorEngine:
                 function(code, env)
                     local log = _G.log
                     local f, err = load(code, "protected_script", "bt", env)
-                    
                     if not f then return false, "Syntax Error: " .. tostring(err) end
                     
-                    log("--- НАЧАЛО ВЫПОЛНЕНИЯ ---")
-                    
-                    -- Запускаем скрипт в защищенном режиме
+                    log("--- START ---")
                     local status, res = pcall(f)
-                    
-                    log("--- КОНЕЦ ВЫПОЛНЕНИЯ ---")
-                    
-                    if not status then
-                        log("Ошибка скрипта: " .. tostring(res))
-                        -- Мы не возвращаем ошибку как фатальную, потому что скрипт 
-                        -- мог успеть расшифровать код перед падением.
-                    end
+                    log("--- END ---")
                     
                     return true, "Finished"
                 end
             """)
             
-            # Запускаем скрипт
+            # Запуск
             runner(content, env)
             
-            # === АНАЛИЗ РЕЗУЛЬТАТОВ ===
-            captured_list = list(lua.globals().CAPTURED_CHUNKS)
+            # === ИСПРАВЛЕННЫЙ БЛОК ИЗВЛЕЧЕНИЯ ===
+            # Мы берем объект таблицы Lua
+            lua_chunks_table = lua.globals().CAPTURED_CHUNKS
             logs = list(lua.globals().LOGS)
             
-            if len(captured_list) > 0:
-                update_status(f"🕵️ Поймано фрагментов: {len(captured_list)}. Ищем лучший...")
+            # В Lua индексы начинаются с 1. Используем len() таблицы.
+            captured_count = len(lua_chunks_table)
+            
+            if captured_count > 0:
+                update_status(f"🕵️ Поймано фрагментов: {captured_count}. Извлекаем...")
                 
-                # Ищем самый большой кусок кода (скорее всего это оригинал)
                 best_chunk = b""
                 max_size = 0
                 
-                for item in captured_list:
-                    # Lupa возвращает таблицы Lua как объекты, доступ к полям через dict
-                    c_data = item['data']
-                    c_size = item['size']
-                    
-                    if c_size > max_size:
-                        max_size = c_size
-                        best_chunk = c_data
+                # Итерируемся по индексам Lua (от 1 до N включительно)
+                for i in range(1, captured_count + 1):
+                    try:
+                        item = lua_chunks_table[i] # Получаем элемент по индексу
+                        
+                        # В Lupa доступ к полям таблицы через атрибуты или ключи
+                        # item - это Lua-таблица {data=..., size=...}
+                        c_data = item.data
+                        c_size = item.size
+                        
+                        if c_size > max_size:
+                            max_size = c_size
+                            best_chunk = c_data
+                    except Exception as loop_err:
+                        logger.error(f"Ошибка при чтении фрагмента {i}: {loop_err}")
+                        continue
                 
-                return self._clean_code(best_chunk, logs)
+                if best_chunk:
+                    return self._clean_code(best_chunk, logs)
+                else:
+                    return self._format_logs(logs, fail=True)
             else:
                 return self._format_logs(logs, fail=True)
 
         except Exception as e:
+            # Детальный трейс ошибки для отладки
+            import traceback
+            traceback.print_exc()
             return f"-- [ENGINE CRASH]: {str(e)}".encode('utf-8', errors='replace')
 
     def _clean_code(self, code_obj, logs):
         """Форматирует результат"""
-        header = b"-- [[ DEOBFUSCATOR V2.5 RESULT ]] --\n"
+        header = b"-- [[ DEOBFUSCATOR RESULT ]] --\n"
         header += b"-- [[ INFO: Captured " + str(len(code_obj)).encode() + b" bytes ]] --\n"
-        header += b"-- Use 'unluac' (Java) to decompile if this is bytecode.\n\n"
         
         if isinstance(code_obj, bytes):
-            # Проверка на сигнатуру Lua
             if code_obj.startswith(b'\x1bLua') or code_obj.startswith(b'\x1b\x4c'):
-                return header + b"-- [TYPE: LUA BYTECODE DETECTED]\n" + code_obj
+                header += b"-- [[ NOTE: This is Lua Bytecode. Use 'unluac' to decompile ]] --\n\n"
+                return header + code_obj
             else:
                 try:
-                    # Пытаемся декодировать как текст
                     txt = code_obj.decode('utf-8')
-                    return header + b"-- [TYPE: SOURCE CODE]\n" + txt.encode('utf-8')
+                    return header + b"-- [[ SOURCE CODE ]] --\n" + txt.encode('utf-8')
                 except:
-                    return header + b"-- [TYPE: UNKNOWN BINARY]\n" + code_obj
+                    return header + b"-- [[ BINARY DATA ]] --\n" + code_obj
         
         return b"-- ERROR: Invalid data type captured"
 
@@ -252,10 +228,9 @@ class DeobfuscatorEngine:
         out = []
         if fail:
             out.append("-- [FAIL] Код не был перехвачен.")
-            out.append("-- Возможно, скрипт использует Anti-Tamper или ждет события.")
         
         out.append("\n-- [[ EXECUTION LOGS ]] --")
-        for l in logs[-50:]: # Последние 50 логов
+        for l in logs[-30:]: 
             if isinstance(l, bytes):
                 out.append(f"-- {l.decode('utf-8', 'ignore')}")
             else:
