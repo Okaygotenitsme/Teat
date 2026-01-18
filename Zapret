@@ -23,12 +23,12 @@ class DeobfuscatorEngine:
         update_status("🛠 Подготовка 'Черной дыры' (Universal Proxy)...")
         
         try:
+            # Важно: unpack_returned_tuples=True помогает корректно получать return
             lua = LuaRuntime(unpack_returned_tuples=True)
         except Exception as e:
             return f"-- [FATAL]: Ошибка старта Lua: {e}"
 
-        # --- ЭТАП 2: Полифилл BIT (Обязателен) ---
-        # MoonSec и IronBrew жить не могут без битовых операций
+        # --- ЭТАП 2: Полифилл BIT (Для MoonSec/IronBrew) ---
         bit_polyfill = """
         local bit = {}
         function bit.tobit(x) x = x % 4294967296; if x >= 2147483648 then x = x - 4294967296 end; return x end
@@ -63,59 +63,57 @@ class DeobfuscatorEngine:
         
         local function log(msg) table.insert(_G.LOGS, msg) end
 
-        -- [[ МАГИЧЕСКИЙ ПРОКСИ ]] --
-        -- Этот код создает объекты, которые существуют, даже если их нет.
+        -- [[ ХУК STRING.DUMP ]] --
+        -- Многие скрипты не вызывают loadstring, а делают string.dump на функцию
+        local real_dump = string.dump
+        local function hooked_dump(func)
+            log("[HOOK] Попытка string.dump!")
+            local success, bytecode = pcall(real_dump, func)
+            if success and #bytecode > 50 then
+                 _G.CAPTURED = bytecode
+                 log("[!!!] ДЖЕКПОТ! string.dump перехвачен.")
+            end
+            return bytecode or ""
+        end
+
+        -- [[ ХУК LOADSTRING ]] --
+        local function hooked_loadstring(chunk, chunkname)
+            if type(chunk) == "string" and #chunk > 50 then
+                _G.CAPTURED = chunk
+                log("[!!!] ДЖЕКПОТ! loadstring перехватил код.")
+                return function() end 
+            end
+            -- Если код короткий, возможно это просто часть логики, выполняем её
+            local f = load(chunk)
+            return f or function() end
+        end
+
+        -- [[ PROXY ]] --
         local function create_proxy(name)
             local proxy = {}
             local meta = {}
-            
-            -- Если скрипт обращается к proxy.Field
-            meta.__index = function(t, k)
-                -- log("[DEBUG] Доступ к полю: " .. name .. "." .. tostring(k))
-                return create_proxy(name .. "." .. tostring(k))
-            end
-            
-            -- Если скрипт вызывает proxy(...)
-            meta.__call = function(t, ...)
-                -- log("[DEBUG] Вызов функции: " .. name .. "()")
-                return create_proxy(name .. "()")
-            end
-            
-            -- Математика и строки (чтобы не крашило на if x > 0)
+            meta.__index = function(t, k) return create_proxy(name .. "." .. tostring(k)) end
+            meta.__call = function(t, ...) return create_proxy(name .. "()") end
             meta.__tostring = function() return name end
             meta.__len = function() return 0 end
             meta.__add = function() return 0 end
             meta.__sub = function() return 0 end
             meta.__mul = function() return 0 end
-            meta.__div = function() return 0 end
-            meta.__eq = function() return true end -- Всегда равно true, чтобы проходить проверки
+            meta.__div = function() return 1 end -- Деление на 0 крашит скрипт!
+            meta.__eq = function() return true end 
             meta.__lt = function() return false end
-            
-            -- Метатаблица заблокирована
-            meta.__metatable = "LOCKED_BY_DEOBFUSCATOR"
-            
+            meta.__metatable = "LOCKED"
             setmetatable(proxy, meta)
             return proxy
         end
 
-        -- [[ ХУК ЗАГРУЗКИ ]] --
-        local function hooked_loadstring(chunk, chunkname)
-            -- Если передан код (строка) и он длинный - это оно!
-            if type(chunk) == "string" and #chunk > 50 then
-                _G.CAPTURED = chunk
-                log("[!!!] ДЖЕКПОТ! loadstring перехватил " .. #chunk .. " байт кода.")
-                return function() end -- Пустышка
-            end
-            return function() end
-        end
-
         -- [[ СБОРКА ОКРУЖЕНИЯ ]] --
         local env = {
-            -- Основные перехватчики
+            -- Хуки
             loadstring = hooked_loadstring,
             load = hooked_loadstring,
             
-            -- Реальные библиотеки (обязательно нужны рабочими)
+            -- Стандартные библиотеки
             string = string, math = math, table = table, 
             bit = _G.bit, bit32 = _G.bit,
             pairs = pairs, ipairs = ipairs, next = next,
@@ -123,27 +121,23 @@ class DeobfuscatorEngine:
             pcall = pcall, xpcall = xpcall, select = select,
             error = error, unpack = unpack or table.unpack,
             
-            -- Эмуляция окружения эксплойтов (чтобы скрипт чувствовал себя как дома)
-            getgenv = function() return _G.sandbox_env end,
-            getrenv = function() return _G.sandbox_env end,
-            getreg = function() return {} end,
-            getgc = function() return {} end,
-            checkcaller = function() return true end,
-            iscclosure = function() return false end,
+            -- !! ВАЖНО: Добавляем getfenv/setfenv (нужны для Unpacking)
+            getfenv = function(f) return _G.sandbox_env end,
+            setfenv = function(f, t) return f end,
             
-            -- Имитация Roblox
+            -- Эмуляция Roblox
             game = create_proxy("game"),
             workspace = create_proxy("workspace"),
             script = create_proxy("script"),
+            task = { wait = function() end, spawn = function(f) f() end, delay = function(t, f) f() end },
             Instance = { new = function(n) return create_proxy("Instance.new("..n..")") end }
         }
+        
+        -- Перехват string.dump
+        env.string.dump = hooked_dump
 
-        -- ЗАМЫКАНИЕ НА PROXY
-        -- Если скрипт просит переменную, которой нет в списке выше (например WhGUwnAR),
-        -- мы отдаем ему Proxy, а не nil!
         setmetatable(env, {
             __index = function(t, k)
-                -- log("[Global Access] Запрос неизвестной переменной: " .. tostring(k))
                 return create_proxy(tostring(k))
             end
         })
@@ -156,19 +150,34 @@ class DeobfuscatorEngine:
         """
 
         # --- ЭТАП 4: Исполнение ---
-        update_status("🚀 Запуск (режим подавления ошибок)...")
+        update_status("🚀 Запуск (режим Deep Capture)...")
         
         try:
             env = lua.execute(sandbox_setup)
             
-            # Оборачиваем исполнение
+            # Мы меняем runner, чтобы он возвращал результат выполнения скрипта
             runner = lua.eval("""
                 function(code, env)
                     local f, err = load(code, "obf_script", "t", env)
                     if not f then return false, "Syntax: " .. tostring(err) end
                     
-                    -- Запускаем. Если упадет - не страшно, главное проверить CAPTURED
-                    pcall(f)
+                    -- Запускаем скрипт и ловим то, что он вернет (return ...)
+                    local status, res = pcall(f)
+                    
+                    if not status then
+                        log("[ERROR] Скрипт упал: " .. tostring(res))
+                        return false, res
+                    end
+                    
+                    -- Проверяем результат выполнения
+                    if type(res) == "function" then
+                        log("[HOOK] Скрипт вернул функцию! Пытаемся дампить...")
+                        local s, dumped = pcall(string.dump, res)
+                        if s and #dumped > 50 then
+                             _G.CAPTURED = dumped
+                             log("[!!!] ДЖЕКПОТ! Пойман return function")
+                        end
+                    end
                     
                     return true, "Executed"
                 end
@@ -184,20 +193,21 @@ class DeobfuscatorEngine:
                 update_status("✅ УСПЕХ! Скрытый код найден.")
                 return self._clean_code(str(captured))
             else:
-                # Если ничего не поймали, возвращаем логи для анализа
                 log_str = "\n".join([str(l) for l in logs])
-                return f"-- [FAIL] Скрипт отработал, но loadstring не был вызван.\n-- Возможно, он использует 'vm.load' или другую технику.\n\n-- ЛОГИ ПЕСОЧНИЦЫ:\n{log_str}"
+                return f"-- [FAIL] Не удалось перехватить код.\n-- ЛОГИ ПЕСОЧНИЦЫ:\n{log_str}"
 
         except Exception as e:
             return f"-- [CRASH]: {e}"
 
     def _clean_code(self, code):
-        """Чистка кода после деобфускации"""
-        
-        # 1. Убираем лишние ; и переформатируем
+        """Чистка кода"""
+        # Если код бинарный (начинается с ESC Lua), используем unluac (в идеале),
+        # но пока просто вернем как есть с пометкой, так как Python не декомпилирует байткод.
+        if code.startswith('\x1bLua'):
+            return "-- [RESULT] Получен Lua Bytecode.\n-- Используйте 'unluac' или онлайн декомпилятор для просмотра.\n\n" + str(code)
+
+        # Базовая очистка
         code = code.replace(";", "\n")
-        
-        # 2. Пытаемся восстановить отступы (примитивно)
         lines = code.split('\n')
         indent = 0
         formatted = []
@@ -205,19 +215,16 @@ class DeobfuscatorEngine:
             line = line.strip()
             if not line: continue
             
-            # Уменьшаем отступ для end, until, else
             if re.match(r"^(end|until|else|elseif)", line):
                 indent = max(0, indent - 1)
             
             formatted.append(("\t" * indent) + line)
             
-            # Увеличиваем отступ для function, if, do, repeat, {
-            # (исключая 'end' в той же строке)
             if re.search(r"\b(function|then|do|repeat)\b", line) and not line.endswith("end"):
                 indent += 1
             if line.endswith("{"):
                 indent += 1
-            if line.endswith("}"): # Закрытие таблицы
+            if line.endswith("}"):
                 indent = max(0, indent - 1)
 
         return "-- [[ DEOBFUSCATED RESULT ]]\n\n" + "\n".join(formatted)
