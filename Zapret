@@ -1,53 +1,142 @@
-import telebot
-import os
-from obfuscator import obfuscate_script # Импортируем нашу логику из части 1
+import random
+import string
+import binascii
 
-# Вставь сюда свой токен от BotFather
-API_TOKEN = 'ВАШ_ТОКЕН_ЗДЕСЬ'
+def random_var(length=6):
+    """Генерирует переменные вида Il1l1, чтобы сломать глаза."""
+    chars = "Il1" 
+    return 'v' + ''.join(random.choice(chars) for i in range(length))
 
-bot = telebot.TeleBot(API_TOKEN)
+def chunk_string(string, length):
+    return (string[0+i:length+i] for i in range(0, len(string), length))
 
-@bot.message_handler(commands=['start', 'help'])
-def send_welcome(message):
-    bot.reply_to(message, "Привет! Отправь мне .lua или .txt файл с Lua кодом, и я зашифрую его (Hex Obfuscation).")
-
-@bot.message_handler(content_types=['document'])
-def handle_docs(message):
-    try:
-        # 1. Получаем информацию о файле
-        file_info = bot.get_file(message.document.file_id)
-        file_name = message.document.file_name
+def obfuscate_script(content_bytes):
+    """
+    Компилирует Lua скрипт в кастомный байт-код и создает VM для его исполнения.
+    """
+    # 1. Подготовка исходника
+    original_code = content_bytes.decode('utf-8', errors='ignore')
+    
+    # 2. Генерируем "Байт-код" (OpCodes)
+    # Наша VM будет иметь инструкции:
+    # 1: PUSH_STR (Положить кусок строки в стек)
+    # 2: XOR_TOP (Расшифровать верхний элемент стека)
+    # 3: CONCAT (Склеить два верхних элемента)
+    # 4: EXEC (Выполнить то, что собралось)
+    # 0: EXIT
+    
+    instructions = []
+    
+    # Разбиваем код на мелкие кусочки
+    chunks = list(chunk_string(original_code, 4)) # По 4 символа
+    xor_key = random.randint(100, 250)
+    
+    # Генерируем инструкции для сборки кода
+    for chunk in chunks:
+        # Шифруем кусок
+        encrypted_chunk = []
+        for char in chunk:
+            encrypted_chunk.append(ord(char) ^ xor_key)
         
-        # Проверка расширения (необязательно, но полезно)
-        if not (file_name.endswith('.lua') or file_name.endswith('.txt')):
-            bot.reply_to(message, "Пожалуйста, отправь файл с расширением .lua или .txt")
-            return
-
-        bot.reply_to(message, "Файл получен. Начинаю обфускацию...")
-
-        # 2. Скачиваем файл
-        downloaded_file = bot.download_file(file_info.file_path)
-
-        # 3. Обфусицируем (вызываем функцию из модуля obfuscator.py)
-        # downloaded_file уже в байтах, передаем как есть
-        protected_code = obfuscate_script(downloaded_file)
-
-        # 4. Создаем имя для нового файла
-        new_file_name = "Protected_" + file_name
+        # Инструкция: [OP_PUSH, {data}]
+        instructions.append(1) 
+        instructions.append(encrypted_chunk)
         
-        # 5. Отправляем результат обратно пользователю
-        # Отправляем как документ (файл)
-        bot.send_document(
-            message.chat.id, 
-            document=(new_file_name, protected_code), # Передаем имя и содержимое
-            caption="Вот твой защищенный скрипт!"
-        )
+        # Инструкция: [OP_XOR, key]
+        instructions.append(2)
+        instructions.append(xor_key)
+        
+    # Склеиваем всё (n-1 раз concat)
+    for _ in range(len(chunks) - 1):
+        instructions.append(3) # OP_CONCAT
+        
+    instructions.append(4) # OP_EXEC
+    instructions.append(0) # OP_EXIT
 
-    except Exception as e:
-        bot.reply_to(message, f"Произошла ошибка: {e}")
-        print(f"Error: {e}")
+    # 3. Генерация VM (Среды исполнения)
+    # Генерируем имена регистров процессора
+    vm_pc = random_var()    # Program Counter
+    vm_stack = random_var() # Stack
+    vm_top = random_var()   # Stack Pointer
+    vm_inst = random_var()  # Instructions Table
+    vm_op = random_var()    # Current Opcode
+    vm_run = random_var()   # Main Loop Function
+    
+    # Превращаем таблицу инструкций в Lua строку
+    lua_table_str = "{"
+    for item in instructions:
+        if isinstance(item, int):
+            lua_table_str += f"{item},"
+        elif isinstance(item, list):
+            # Вложенная таблица для данных
+            lua_table_str += "{" + ",".join(map(str, item)) + "},"
+    lua_table_str += "}"
 
-# Запуск бота (Polling)
-if __name__ == '__main__':
-    print("Бот запущен...")
-    bot.infinity_polling()
+    # 4. Код Виртуальной Машины
+    vm_code = f"""--[[ 
+    ADVANCED VIRTUAL MACHINE OBFUSCATOR 
+    Architecture: Stack-Based Custom VM
+    ]]
+
+local {vm_inst} = {lua_table_str}
+
+local function {vm_run}()
+    local {vm_pc} = 1
+    local {vm_stack} = {{}}
+    local {vm_top} = 0
+    
+    while true do
+        -- Fetch OpCode
+        local {vm_op} = {vm_inst}[{vm_pc}]
+        {vm_pc} = {vm_pc} + 1
+        
+        if {vm_op} == 1 then -- [OP_PUSH_DATA]
+            local data_table = {vm_inst}[{vm_pc}]
+            {vm_pc} = {vm_pc} + 1
+            {vm_top} = {vm_top} + 1
+            {vm_stack}[{vm_top}] = data_table
+            
+        elseif {vm_op} == 2 then -- [OP_DECRYPT]
+            local key = {vm_inst}[{vm_pc}]
+            {vm_pc} = {vm_pc} + 1
+            local encrypted = {vm_stack}[{vm_top}]
+            local decrypted_str = ""
+            for _, val in ipairs(encrypted) do
+                 -- Bitwise XOR implementation for Lua 5.1 compatibility
+                 local a, b = val, key
+                 local res = 0
+                 local p = 1
+                 while a > 0 or b > 0 do
+                    local ra, rb = a % 2, b % 2
+                    if ra ~= rb then res = res + p end
+                    a = (a - ra) / 2
+                    b = (b - rb) / 2
+                    p = p * 2
+                 end
+                 decrypted_str = decrypted_str .. string.char(res)
+            end
+            {vm_stack}[{vm_top}] = decrypted_str
+            
+        elseif {vm_op} == 3 then -- [OP_CONCAT]
+            -- Объединяем два элемента: Stack[Top-1] .. Stack[Top]
+            -- Но так как мы пушили последовательно, нам нужно склеивать аккуратно
+            -- В нашей логике мы собираем массив, поэтому просто склеим всё в конце или пошагово
+            local str2 = {vm_stack}[{vm_top}]
+            local str1 = {vm_stack}[{vm_top}-1]
+            {vm_stack}[{vm_top}-1] = str1 .. str2
+            {vm_top} = {vm_top} - 1
+            
+        elseif {vm_op} == 4 then -- [OP_EXEC]
+            local final_code = {vm_stack}[{vm_top}]
+            local func = loadstring(final_code)
+            if func then func() else end
+            
+        elseif {vm_op} == 0 then -- [OP_EXIT]
+            break
+        end
+    end
+end
+
+{vm_run}()
+"""
+    return vm_code
