@@ -1,151 +1,225 @@
-use std::env;
-use std::fs;
-use std::io::{self, Write};
-use rand::Rng;
+import asyncio
+import logging
+import os
+import subprocess
+import time
+import aiohttp 
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import Command, CommandObject
+from aiogram.types import BufferedInputFile, InlineKeyboardMarkup, InlineKeyboardButton
 
-// --- КОНФИГУРАЦИЯ ---
-// Имя переменной для таблицы байтов (как W в твоем файле)
-const BYTE_TABLE_NAME: &str = "GokuData"; 
+# --- КОНФИГУРАЦИЯ ---
+API_TOKEN = 'ВСТАВЬ_СЮДА_СВОЙ_ТОКЕН'
 
-fn main() {
-    // 1. Получаем аргументы (файл ввода)
-    let args: Vec<String> = env::args().collect();
-    if args.len() < 2 {
-        println!("Использование: vm_obfuscator <input.lua>");
-        return;
-    }
+# Настройка логов
+logging.basicConfig(level=logging.INFO)
+bot = Bot(token=API_TOKEN)
+dp = Dispatcher()
 
-    let input_path = &args[1];
-    let source_code = match fs::read_to_string(input_path) {
-        Ok(code) => code,
-        Err(_) => {
-            println!("❌ Ошибка: Не удалось прочитать файл {}", input_path);
-            return;
-        }
-    };
+# Хранилище временных данных
+user_data = {} 
 
-    println!("🔒 Начинаю VM-обфускацию для: {}", input_path);
+# --- МОДУЛЬ BEAUTIFIER (Оставил Python-версию для кнопки Beautify) ---
+class LuaBeautifier:
+    def __init__(self, source):
+        self.source = source
 
-    // 2. Генерация защиты
-    let protected_lua = build_vm(&source_code);
-
-    // 3. Сохранение
-    let output_name = format!("Protected_{}", input_path);
-    match fs::write(&output_name, protected_lua) {
-        Ok(_) => println!("✅ Готово! Файл сохранен как: {}", output_name),
-        Err(e) => println!("❌ Ошибка записи: {}", e),
-    }
-}
-
-fn build_vm(source: &str) -> String {
-    let mut rng = rand::thread_rng();
-
-    // Генерация ключей шифрования
-    let xor_key: u8 = rng.gen_range(100..255);
-    let offset: u8 = rng.gen_range(10..50);
-
-    // Превращаем исходный код в байты и шифруем
-    let bytes = source.as_bytes();
-    let mut encrypted_data = Vec::new();
-
-    for (i, byte) in bytes.iter().enumerate() {
-        // Сложная формула шифрования: (byte + offset) XOR key
-        let mut b = byte.wrapping_add(offset);
-        b = b ^ xor_key;
-        // Добавляем "шум" (позиционную зависимость), как в WeAreDevs
-        b = b.wrapping_add((i % 7) as u8); 
-        encrypted_data.push(b);
-    }
-
-    // Формируем таблицу данных (как local W = { ... } в твоем примере)
-    // Мы разбиваем данные на куски, чтобы Lua не подавился длинной строкой
-    let mut table_content = String::new();
-    for ch in encrypted_data {
-        table_content.push_str(&format!("{},", ch));
-    }
-
-    // Генерируем случайные имена переменных для VM
-    let var_table = BYTE_TABLE_NAME;
-    let var_idx = random_var_name(4);
-    let var_val = random_var_name(4);
-    let var_res = random_var_name(5);
-    let var_str = random_var_name(3);
-    
-    // --- LUA VM TEMPLATE ---
-    // Это тот самый шаблон, который имитирует работу VM
-    let vm_script = format!(r#"
---[[ 
-    Goku V2 Secure (Rust Generated)
-    Protected by Custom VM
-]]
-
-local {tbl} = {{{data}}}
-
-local function {vm_name}()
-    local {res} = {{}}
-    local key = {key}
-    local off = {off}
-    
-    -- Virtual Instruction Pointer Loop
-    for {idx}, {val} in ipairs({tbl}) do
-        -- Reverse Ops: (val - pos) XOR key - off
-        local step1 = ({val} - (({idx} - 1) % 7)) % 256
-        local step2 = bit32 and bit32.bxor(step1, key) or (function(a,b) 
-            local p,c=1,0 
-            while a>0 and b>0 do 
-                local ra,rb=a%2,b%2 
-                if ra~=rb then c=c+p end 
-                a,b,p=(a-ra)/2,(b-rb)/2,p*2 
-            end 
-            if a<b then a=b end 
-            while a>0 do 
-                local ra=a%2 
-                if ra>0 then c=c+p end 
-                a,p=(a-ra)/2,p*2 
-            end 
-            return c 
-        end)(step1, key)
+    def format(self):
+        code = self.source
+        lines = [line.strip() for line in code.splitlines() if line.strip()]
+        formatted = []
+        indent = 0
+        indent_str = "    "
         
-        local final = (step2 - off) % 256
-        table.insert({res}, string.char(final))
-    end
+        up_keywords = ['function', 'do', 'then', 'repeat', '{', '(', 'if']
+        down_keywords = ['end', 'until', '}', ')', 'elseif']
+        
+        for line in lines:
+            curr = line.lower()
+            if any(curr.startswith(k) for k in ['end', 'until', '}', ')', 'elseif', 'else']):
+                indent = max(0, indent - 1)
+            formatted.append((indent_str * indent) + line)
+            open_count = sum(1 for k in up_keywords if k in curr)
+            close_count = sum(1 for k in down_keywords if k in curr)
+            if not ('function' in curr and 'end' in curr):
+                if open_count > close_count: indent += 1
+                elif 'else' == curr: indent += 1
+        return "\n".join(formatted)
+
+# --- ОБРАБОТЧИКИ ---
+
+@dp.message(Command("start"))
+async def start(message: types.Message):
+    await message.answer(
+        "🛡 **Meloten Obfuscator (Rust Core)**\n\n"
+        "🔥 **Функции:**\n"
+        "1️⃣ Скинь `.lua` — Бот защитит его через Rust VM.\n"
+        "2️⃣ `/bypass <url>` — Обход ссылок.\n"
+        "3️⃣ `/loadstring <url>` — Генератор.\n\n"
+        "🚀 Используется движок: **Rust Native**",
+        parse_mode="Markdown"
+    )
+
+@dp.message(Command("help"))
+async def help_cmd(message: types.Message):
+    await message.answer(
+        "📚 **Помощь:**\n"
+        "Просто отправь мне `.lua` файл и нажми кнопку **Obfuscate**.\n"
+        "Я использую внешний компилятор на Rust для максимальной защиты.",
+        parse_mode="Markdown"
+    )
+
+@dp.message(Command("ping"))
+async def ping_handler(message: types.Message):
+    start_time = time.time()
+    msg = await message.answer("📶 **Pinging...**", parse_mode="Markdown")
+    end_time = time.time()
+    ping_ms = int((end_time - start_time) * 1000)
+    await msg.edit_text(f"📶 **Pong!**\nЗадержка: `{ping_ms}ms`", parse_mode="Markdown")
+
+@dp.message(Command("loadstring"))
+async def make_loadstring(message: types.Message, command: CommandObject):
+    if not command.args:
+        await message.answer("⚠️ Пример: `/loadstring https://...`")
+        return
+    url = command.args.strip()
+    content = f'loadstring(game:HttpGet("{url}"))()'
+    await message.answer(f"✅ **Loadstring:**\n\n`{content}`", parse_mode="Markdown")
+
+@dp.message(Command("bypass"))
+async def bypass_handler(message: types.Message, command: CommandObject):
+    if not command.args:
+        await message.answer("⚠️ Вставь ссылку! `/bypass https://...`")
+        return
+    url = command.args.strip()
+    wait_msg = await message.answer("⏳ **Bypassing...**")
     
-    return table.concat({res})
-end
+    # Используем публичный API (пример)
+    api_url = f"https://api.bypass.vip/bypass?url={url}"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(api_url) as response:
+                if response.status != 200:
+                    await wait_msg.edit_text("❌ API Error")
+                    return
+                data = await response.json()
+                result = data.get('result', '')
+                if result:
+                    await wait_msg.edit_text(f"✅ **Result:**\n`{result}`", parse_mode="Markdown")
+                else:
+                    await wait_msg.edit_text("❌ Не удалось обойти.")
+    except Exception as e:
+        await wait_msg.edit_text(f"❌ Error: {e}")
 
-local {final_str} = {vm_name}()
-local exec = loadstring or load
-exec({final_str})()
-"#, 
-        tbl = var_table,
-        data = table_content,
-        vm_name = random_var_name(6),
-        res = var_res,
-        key = xor_key,
-        off = offset,
-        idx = var_idx,
-        val = var_val,
-        final_str = var_str
-    );
+# --- ЛОГИКА ФАЙЛОВ И ЗАПУСК RUST ---
 
-    // Удаляем лишние пробелы и переносы (минификация)
-    minify_lua_script(vm_script)
-}
+@dp.message(F.document)
+async def handle_files(message: types.Message):
+    if not message.document.file_name.endswith(('.lua', '.txt')):
+        return
 
-fn random_var_name(len: usize) -> String {
-    let mut rng = rand::thread_rng();
-    let charset: &[u8] = b"Il1O0"; // Используем похожие символы как в твоем файле
-    (0..len)
-        .map(|_| {
-            let idx = rng.gen_range(0..charset.len());
-            charset[idx] as char
-        })
-        .collect()
-}
+    # Скачиваем файл
+    file_id = message.document.file_id
+    file_info = await bot.get_file(file_id)
+    downloaded = await bot.download_file(file_info.file_path)
+    source_code = downloaded.read().decode('utf-8', errors='ignore')
 
-fn minify_lua_script(code: String) -> String {
-    // Простая минификация: удаляем комментарии и лишние пробелы
-    let mut lines: Vec<&str> = code.lines().collect();
-    lines.retain(|&x| !x.trim().starts_with("--") || x.contains("--[["));
-    lines.join(" ")
-}
+    # Сохраняем в память
+    user_id = message.from_user.id
+    user_data[user_id] = {
+        'source': source_code,
+        'filename': message.document.file_name
+    }
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⚡ Obfuscate (Rust VM)", callback_data="obfuscate")],
+        [InlineKeyboardButton(text="✨ Beautify", callback_data="beautify")]
+    ])
+
+    await message.answer("🔧 **Файл получен. Выберите действие:**", reply_markup=keyboard)
+
+@dp.callback_query(F.data.in_({"obfuscate", "beautify"}))
+async def callback_handler(query: types.CallbackQuery):
+    user_id = query.from_user.id
+    if user_id not in user_data:
+        await query.answer("❌ Файл устарел. Отправьте снова.")
+        return
+
+    data = user_data[user_id]
+    source = data['source']
+    fname = data['filename']
+    
+    # Удаляем кнопки и пишем статус
+    await query.message.edit_reply_markup(reply_markup=None)
+    status_msg = await query.message.answer("⏳ **Обработка...**")
+
+    try:
+        if query.data == 'obfuscate':
+            # --- RUST INTEGRATION START ---
+            
+            # 1. Определяем имя исполняемого файла
+            exe_name = "vm_obfuscator.exe" if os.name == 'nt' else "./vm_obfuscator"
+            
+            # Проверка наличия файла Rust
+            if not os.path.exists(exe_name) and not os.path.exists("vm_obfuscator"):
+                await status_msg.edit_text("❌ Ошибка сервера: файл обфускатора (Rust) не найден.")
+                return
+
+            # 2. Создаем временный файл для входа
+            input_temp = f"temp_{user_id}.lua"
+            with open(input_temp, "w", encoding="utf-8") as f:
+                f.write(source)
+
+            # 3. Запускаем Rust процесс
+            # Rust код создает файл Protected_<input_temp>
+            process = subprocess.run([exe_name, input_temp], capture_output=True, text=True)
+            
+            expected_output = f"Protected_{input_temp}"
+
+            if process.returncode == 0 and os.path.exists(expected_output):
+                # Читаем результат
+                with open(expected_output, "rb") as f:
+                    protected_bytes = f.read()
+                
+                # Отправляем
+                out_file = BufferedInputFile(protected_bytes, filename=f"Protected_{fname}")
+                await query.message.answer_document(out_file, caption="✅ **Obfuscated by Rust VM**\n🔒 Уровень: Максимальный")
+                
+                # Чистим выходной файл
+                os.remove(expected_output)
+            else:
+                # Если ошибка Rust
+                err_log = process.stderr or "Неизвестная ошибка"
+                await status_msg.edit_text(f"❌ Ошибка Rust Core:\n`{err_log}`", parse_mode="Markdown")
+
+            # Чистим входной файл
+            if os.path.exists(input_temp):
+                os.remove(input_temp)
+            
+            # --- RUST INTEGRATION END ---
+
+        elif query.data == 'beautify':
+            beauty = LuaBeautifier(source)
+            formatted = beauty.format()
+            out_file = BufferedInputFile(formatted.encode(), filename=f"Clean_{fname}")
+            await query.message.answer_document(out_file, caption="✨ **Beautified!**")
+
+        await status_msg.delete()
+
+    except Exception as e:
+        logging.error(f"Error: {e}")
+        await status_msg.edit_text(f"❌ Системная ошибка: {e}")
+    
+    # Очистка памяти пользователя
+    if user_id in user_data:
+        del user_data[user_id]
+
+async def main():
+    print("--- RUST-POWERED BOT STARTED ---")
+    await dp.start_polling(bot)
+
+if __name__ == '__main__':
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        print("Bot stopped")
