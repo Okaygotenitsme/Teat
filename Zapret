@@ -23,7 +23,7 @@ class DeobfuscatorEngine:
         update_status("🛠 Подготовка 'Черной дыры' (Universal Proxy)...")
         
         try:
-            # Важно: unpack_returned_tuples=True помогает корректно получать return
+            # unpack_returned_tuples=True важен для получения нескольких значений из return
             lua = LuaRuntime(unpack_returned_tuples=True)
         except Exception as e:
             return f"-- [FATAL]: Ошибка старта Lua: {e}"
@@ -61,10 +61,15 @@ class DeobfuscatorEngine:
         _G.CAPTURED = nil
         _G.LOGS = {}
         
-        local function log(msg) table.insert(_G.LOGS, msg) end
+        -- [[ ИСПРАВЛЕНИЕ: Делаем log глобальным ]] --
+        _G.log = function(msg) 
+            table.insert(_G.LOGS, msg) 
+        end
+        
+        -- Локальная ссылка для использования внутри этого блока
+        local log = _G.log
 
         -- [[ ХУК STRING.DUMP ]] --
-        -- Многие скрипты не вызывают loadstring, а делают string.dump на функцию
         local real_dump = string.dump
         local function hooked_dump(func)
             log("[HOOK] Попытка string.dump!")
@@ -83,49 +88,75 @@ class DeobfuscatorEngine:
                 log("[!!!] ДЖЕКПОТ! loadstring перехватил код.")
                 return function() end 
             end
-            -- Если код короткий, возможно это просто часть логики, выполняем её
-            local f = load(chunk)
-            return f or function() end
+            
+            -- Пытаемся загрузить как есть
+            local f, err = load(chunk)
+            if not f then
+                log("[Load Error] " .. tostring(err))
+                return function() end
+            end
+            return f
         end
 
-        -- [[ PROXY ]] --
+        -- [[ PROXY OBJECTS ]] --
         local function create_proxy(name)
             local proxy = {}
             local meta = {}
+            
+            -- Рекурсивное создание прокси при обращении к полям
             meta.__index = function(t, k) return create_proxy(name .. "." .. tostring(k)) end
             meta.__call = function(t, ...) return create_proxy(name .. "()") end
             meta.__tostring = function() return name end
             meta.__len = function() return 0 end
+            
+            -- Математические заглушки (чтобы не крашило)
             meta.__add = function() return 0 end
             meta.__sub = function() return 0 end
             meta.__mul = function() return 0 end
-            meta.__div = function() return 1 end -- Деление на 0 крашит скрипт!
+            meta.__div = function() return 1 end -- Возвращаем 1 при делении, чтобы избежать div by zero
+            meta.__mod = function() return 0 end
+            meta.__pow = function() return 0 end
+            meta.__unm = function() return 0 end
+            
+            -- Логические заглушки
             meta.__eq = function() return true end 
             meta.__lt = function() return false end
+            meta.__le = function() return false end
+            
             meta.__metatable = "LOCKED"
             setmetatable(proxy, meta)
             return proxy
         end
 
-        -- [[ СБОРКА ОКРУЖЕНИЯ ]] --
+        -- [[ СБОРКА ОКРУЖЕНИЯ (ENV) ]] --
         local env = {
             -- Хуки
             loadstring = hooked_loadstring,
             load = hooked_loadstring,
             
-            -- Стандартные библиотеки
+            -- Библиотеки
             string = string, math = math, table = table, 
             bit = _G.bit, bit32 = _G.bit,
             pairs = pairs, ipairs = ipairs, next = next,
             type = type, tostring = tostring, tonumber = tonumber,
             pcall = pcall, xpcall = xpcall, select = select,
             error = error, unpack = unpack or table.unpack,
+            assert = assert,
             
-            -- !! ВАЖНО: Добавляем getfenv/setfenv (нужны для Unpacking)
+            -- Эксплойт-функции
+            getgenv = function() return _G.sandbox_env end,
+            getrenv = function() return _G.sandbox_env end,
+            getreg = function() return {} end,
+            getgc = function() return {} end,
+            checkcaller = function() return true end,
+            iscclosure = function() return false end,
+            islclosure = function() return true end,
+            
+            -- getfenv / setfenv (КРИТИЧНО для IronBrew/MoonSec)
             getfenv = function(f) return _G.sandbox_env end,
             setfenv = function(f, t) return f end,
             
-            -- Эмуляция Roblox
+            -- Roblox API
             game = create_proxy("game"),
             workspace = create_proxy("workspace"),
             script = create_proxy("script"),
@@ -133,11 +164,13 @@ class DeobfuscatorEngine:
             Instance = { new = function(n) return create_proxy("Instance.new("..n..")") end }
         }
         
-        -- Перехват string.dump
+        -- Перехват string.dump внутри окружения
         env.string.dump = hooked_dump
 
+        -- Метатаблица для глобального окружения скрипта
         setmetatable(env, {
             __index = function(t, k)
+                -- Если скрипт просит переменную, которой нет, даем Proxy
                 return create_proxy(tostring(k))
             end
         })
@@ -155,13 +188,18 @@ class DeobfuscatorEngine:
         try:
             env = lua.execute(sandbox_setup)
             
-            # Мы меняем runner, чтобы он возвращал результат выполнения скрипта
+            # Runner исполняется в глобальном контексте, но использует _G.log
             runner = lua.eval("""
                 function(code, env)
-                    local f, err = load(code, "obf_script", "t", env)
-                    if not f then return false, "Syntax: " .. tostring(err) end
+                    -- Проверяем наличие логгера
+                    local log = _G.log or function() end
                     
-                    -- Запускаем скрипт и ловим то, что он вернет (return ...)
+                    local f, err = load(code, "obf_script", "t", env)
+                    if not f then return false, "Syntax Error: " .. tostring(err) end
+                    
+                    log("Запуск обфусцированного кода...")
+                    
+                    -- Запускаем скрипт и ловим return
                     local status, res = pcall(f)
                     
                     if not status then
@@ -169,7 +207,9 @@ class DeobfuscatorEngine:
                         return false, res
                     end
                     
-                    -- Проверяем результат выполнения
+                    log("Скрипт завершился успешно.")
+                    
+                    -- Проверяем, вернул ли скрипт функцию (частая техника)
                     if type(res) == "function" then
                         log("[HOOK] Скрипт вернул функцию! Пытаемся дампить...")
                         local s, dumped = pcall(string.dump, res)
@@ -200,13 +240,24 @@ class DeobfuscatorEngine:
             return f"-- [CRASH]: {e}"
 
     def _clean_code(self, code):
-        """Чистка кода"""
-        # Если код бинарный (начинается с ESC Lua), используем unluac (в идеале),
-        # но пока просто вернем как есть с пометкой, так как Python не декомпилирует байткод.
-        if code.startswith('\x1bLua'):
-            return "-- [RESULT] Получен Lua Bytecode.\n-- Используйте 'unluac' или онлайн декомпилятор для просмотра.\n\n" + str(code)
+        """Чистка кода или вывод информации о байткоде"""
+        
+        # Проверка на Lua Bytecode (начинается с ESC Lua)
+        if code.startswith('\x1bLua') or code.startswith('\x1b\x4c'):
+            hex_preview = " ".join("{:02x}".format(ord(c)) for c in code[:16])
+            return (
+                f"-- [[ SUCCESS: BYTECODE CAPTURED ]]\n"
+                f"-- Этот код является скомпилированным Lua (Bytecode).\n"
+                f"-- Python не умеет декомпилировать байткод в текст.\n"
+                f"-- \n"
+                f"-- Сохраните этот файл и используйте 'unluac.jar' для декомпиляции:\n"
+                f"-- java -jar unluac.jar output.lua > source.lua\n"
+                f"-- \n"
+                f"-- Header Preview: {hex_preview}...\n\n"
+                f"{code}"
+            )
 
-        # Базовая очистка
+        # Обычная очистка текста
         code = code.replace(";", "\n")
         lines = code.split('\n')
         indent = 0
