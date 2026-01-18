@@ -4,46 +4,82 @@ import re
 
 class DeobfuscatorEngine:
     def __init__(self):
-        # Создаем чистый Lua-движок
+        # Инициализируем Lua с поддержкой основных библиотек
         self.lua = LuaRuntime(unpack_returned_tuples=True)
 
     def process_text(self, content):
-        if "MoonSec" in content:
-            return self.run_in_sandbox(content)
-        return "-- [!] Пожалуйста, отправь файл MoonSec V3."
+        return self.run_advanced_sandbox(content)
 
-    def run_in_sandbox(self, obfuscated_code):
-        """Запуск кода в эмуляторе с перехватом данных"""
-        logs = ["-- [[ Dynamic Analysis Result ]] --\n"]
+    def run_advanced_sandbox(self, code):
+        logs = ["-- [[ MoonSec V3 Maximum Deobfuscation Report ]] --\n"]
+        captured_payloads = []
+
+        # --- КОРНЕВАЯ ЛОГИКА ПЕСОЧНИЦЫ ---
+        setup_script = """
+        local logs = {}
         
-        # 1. Создаем хуки (перехватчики)
-        def hooked_loadstring(code, *args):
-            logs.append("-- [CAPTURED CODE]:\n" + str(code))
-            return lambda: None # Возвращаем пустую функцию, чтобы код не шел дальше
+        -- Функция для создания "шпионов" (чтобы не было nil-ошибок)
+        local function create_spy(name)
+            return setmetatable({}, {
+                __call = function() return create_spy(name .. "()") end,
+                __index = function(_, k) return create_spy(name .. "." .. tostring(k)) end
+            })
+        end
 
-        def hooked_print(*args):
-            logs.append(f"-- [PRINT]: {' '.join(map(str, args))}")
+        -- Эмуляция глобальной среды Roblox
+        local sandbox_env = {
+            print = function(...) table.insert(logs, "[PRINT]: " .. table.concat({...}, " ")) end,
+            warn = function(...) table.insert(logs, "[WARN]: " .. table.concat({...}, " ")) end,
+            loadstring = function(code) 
+                table.insert(logs, "[SUCCESS] CAPTURED PAYLOAD!")
+                _G.LAST_PAYLOAD = code -- Сохраняем код для Python
+                return function() end 
+            end,
+            game = create_spy("game"),
+            getgenv = function() return _G end,
+            script = create_spy("script"),
+            bit32 = bit32, -- Используем стандартный bit32
+            string = string,
+            math = math,
+            table = table,
+        }
 
-        # 2. Настраиваем окружение Roblox
-        g = self.lua.globals()
-        g['loadstring'] = hooked_loadstring
-        g['print'] = hooked_print
+        -- Магия: делаем так, чтобы любая неизвестная переменная (как WhGUwnAR) 
+        -- автоматически становилась "шпионом" вместо nil
+        setmetatable(sandbox_env, {
+            __index = function(t, k) 
+                return create_spy(tostring(k)) 
+            end
+        })
+
+        _G.sandbox_env = sandbox_env
+        return logs
+        """
         
-        # Имитируем объект game
-        g['game'] = self.lua.table(
-            GetService = lambda s, name: self.lua.table(name=name, SetCore=lambda *a: None)
-        )
-        
-        # Добавляем стандартные функции, которые часто ищет MoonSec
-        g['setclipboard'] = lambda val: logs.append(f"-- [CLIPBOARD]: {val}")
-        g['getgenv'] = lambda: g
-
         try:
-            # 3. Пытаемся запустить обфускатор
-            # Мы ограничиваем время выполнения (псевдо-защита от вечных циклов)
-            self.lua.execute(obfuscated_code)
+            # 1. Загружаем среду
+            self.lua.execute(setup_script)
+            env = self.lua.globals().sandbox_env
+
+            # 2. Выполняем обфусцированный код в нашей среде
+            # Мы используем pcall (protected call), чтобы Lua не вылетела
+            safe_run = self.lua.eval("function(code, env) return pcall(setfenv(loadstring(code), env)) end")
+            success, error_msg = safe_run(code, env)
+
+            # 3. Собираем результаты
+            lua_logs = self.lua.eval("sandbox_env.logs")
+            for i in range(len(lua_logs)):
+                logs.append(lua_logs[i+1])
+
+            # Проверяем, удалось ли перехватить финальный код
+            last_payload = self.lua.globals().LAST_PAYLOAD
+            if last_payload:
+                logs.append("\n" + "="*30 + " DEOBFUSCATED CODE " + "="*30)
+                logs.append(str(last_payload))
+            elif not success:
+                logs.append(f"\n[!] Ошибка выполнения: {error_msg}")
+
         except Exception as e:
-            logs.append(f"\n-- [!] Анализ прерван: {e}")
-            logs.append("-- (Это нормально, если мы перехватили loadstring до завершения)")
+            logs.append(f"\n[CRITICAL ERROR]: {e}")
 
         return "\n".join(logs)
