@@ -150,12 +150,14 @@ class DeobfuscatorEngine:
         try:
             env = lua.execute(sandbox_setup)
             
-            # Изменения здесь: добавлен режим "bt" (binary/text) вместо "t"
+            # --- ИЗМЕНЕНИЕ 1: Режим "bt" (binary/text) вместо "t" ---
             runner = lua.eval("""
                 function(code, env)
                     local log = _G.log or function() end
-                    -- Используем "bt" чтобы разрешить и текст, и байткод
+                    
+                    -- "bt" разрешает и текст, и скомпилированный байт-код
                     local f, err = load(code, "obf_script", "bt", env)
+                    
                     if not f then return false, "Syntax Error: " .. tostring(err) end
                     
                     log("Запуск...")
@@ -176,15 +178,13 @@ class DeobfuscatorEngine:
                 end
             """)
             
-            # === ИСПРАВЛЕНИЕ ===
-            # Преобразуем байты в latin1 строку.
-            # Lupa корректно передаст это в Lua как строку байтов (8-bit clean),
-            # избегая попыток декодировать это как UTF-8.
+            # --- ИЗМЕНЕНИЕ 2: Декодируем байты в latin1 ---
+            # Это позволяет передать "сырые" байты в Lua как строку, не ломая UTF-8
             safe_content = content.decode('latin1')
             
             runner(safe_content, env)
             
-            # ВАЖНО: Не используем str(), берем как есть
+            # Получаем результаты
             captured = lua.globals().CAPTURED
             logs = list(lua.globals().LOGS)
             
@@ -193,11 +193,11 @@ class DeobfuscatorEngine:
                 return self._clean_code(captured)
             else:
                 log_str = "\n".join([str(l) for l in logs])
-                # Если ничего не перехватили, возвращаем логи, но аккуратно кодируем
+                # Используем errors='replace', чтобы не крашилось на логах
                 return f"-- [FAIL] Не удалось перехватить код.\n-- ЛОГИ:\n{log_str}".encode('utf-8', errors='replace')
 
         except Exception as e:
-            # Ловим ошибки самого Python (например, Lupa error)
+            # Ловим ошибки самого Python/Lupa
             return f"-- [CRASH]: {e}".encode('utf-8', errors='replace')
 
     def _clean_code(self, code_obj):
@@ -209,7 +209,7 @@ class DeobfuscatorEngine:
         if isinstance(code_obj, (bytes, bytearray)):
             final_bytes = code_obj
         elif isinstance(code_obj, str):
-            # Если вернулась строка, пробуем latin1 (т.к. мы отправляли latin1)
+            # Если Lua вернула строку, пробуем вернуть её в байты через latin1
             try:
                 final_bytes = code_obj.encode('latin1')
             except:
@@ -230,5 +230,5 @@ class DeobfuscatorEngine:
             formatted = text_code.replace(";", "\n")
             return f"-- [[ DEOBFUSCATED SOURCE ]] --\n\n{formatted}".encode('utf-8')
         except:
-            # Если не вышло, значит это какой-то бинарный мусор или шифрованная строка
+            # Если не вышло, значит это какой-то бинарный мусор
             return b"-- [[ UNKNOWN BINARY DATA ]] --\n" + final_bytes
