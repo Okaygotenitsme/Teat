@@ -1,69 +1,53 @@
-import random
-import string
-import binascii
+import telebot
+import os
+from obfuscator import obfuscate_script # Импортируем нашу логику из части 1
 
-def random_string(length=8):
-    """Генерирует случайное имя переменной."""
-    letters = string.ascii_lowercase + string.digits
-    return ''.join(random.choice(letters) for i in range(length))
+# Вставь сюда свой токен от BotFather
+API_TOKEN = 'ВАШ_ТОКЕН_ЗДЕСЬ'
 
-def get_lua_template(hex_content):
-    """
-    Создает Lua-скрипт, имитирующий структуру из твоего файла.
-    """
-    # Генерируем случайные имена для переменных, чтобы усложнить чтение
-    var_hex_table = random_string(7)  # Таблица mk67oje
-    var_hex_string = random_string(7) # Строка bz3w8eq
-    var_decoded = "_O"                # Буфер _O
-    func_name = random_string(8)      # Имя главной функции
+bot = telebot.TeleBot(API_TOKEN)
 
-    # Шаблон Lua (практически копия логики твоего файла)
-    lua_code = f"""-- Protected by Custom Python Obfuscator
--- Generated automatically
+@bot.message_handler(commands=['start', 'help'])
+def send_welcome(message):
+    bot.reply_to(message, "Привет! Отправь мне .lua или .txt файл с Lua кодом, и я зашифрую его (Hex Obfuscation).")
 
-local function anti_tamper()
-    local _h = {{print, load, tostring, pcall}}
-    for _, f in pairs(_h) do
-        if debug.getinfo(f).what ~= "C" then while true do end end
-    end
-end
-anti_tamper()
+@bot.message_handler(content_types=['document'])
+def handle_docs(message):
+    try:
+        # 1. Получаем информацию о файле
+        file_info = bot.get_file(message.document.file_id)
+        file_name = message.document.file_name
+        
+        # Проверка расширения (необязательно, но полезно)
+        if not (file_name.endswith('.lua') or file_name.endswith('.txt')):
+            bot.reply_to(message, "Пожалуйста, отправь файл с расширением .lua или .txt")
+            return
 
-local {var_hex_table} = {{["0"]=0,["1"]=1,["2"]=2,["3"]=3,["4"]=4,["5"]=5,["6"]=6,["7"]=7,["8"]=8,["9"]=9,["a"]=10,["b"]=11,["c"]=12,["d"]=13,["e"]=14,["f"]=15}}
-local {var_hex_string} = "{hex_content}"
-local {var_decoded} = ""
+        bot.reply_to(message, "Файл получен. Начинаю обфускацию...")
 
-local function {func_name}()
-    for i = 1, #{var_hex_string}, 2 do
-        local h = {var_hex_table}[{var_hex_string}:sub(i, i)]
-        local l = {var_hex_table}[{var_hex_string}:sub(i+1, i+1)]
-        if h and l then 
-            {var_decoded} = {var_decoded} .. string.char(h * 16 + l) 
-        end
-    end
-    local _S, _E = pcall(function()
-        local _L = load({var_decoded})
-        if _L then 
-            {var_decoded} = nil;
-            _L() 
-        else 
-            while true do end 
-        end
-    end)
-    if not _S then while true do end end
-end
-{func_name}()
-"""
-    return lua_code
+        # 2. Скачиваем файл
+        downloaded_file = bot.download_file(file_info.file_path)
 
-def obfuscate_script(content_bytes):
-    """
-    Принимает байты исходного файла, кодирует в hex и возвращает готовый Lua код.
-    """
-    # 1. Переводим байты в hex-строку (например: '6c6f63616c...')
-    hex_data = binascii.hexlify(content_bytes).decode('utf-8')
-    
-    # 2. Вставляем в шаблон
-    final_script = get_lua_template(hex_data)
-    
-    return final_script
+        # 3. Обфусицируем (вызываем функцию из модуля obfuscator.py)
+        # downloaded_file уже в байтах, передаем как есть
+        protected_code = obfuscate_script(downloaded_file)
+
+        # 4. Создаем имя для нового файла
+        new_file_name = "Protected_" + file_name
+        
+        # 5. Отправляем результат обратно пользователю
+        # Отправляем как документ (файл)
+        bot.send_document(
+            message.chat.id, 
+            document=(new_file_name, protected_code), # Передаем имя и содержимое
+            caption="Вот твой защищенный скрипт!"
+        )
+
+    except Exception as e:
+        bot.reply_to(message, f"Произошла ошибка: {e}")
+        print(f"Error: {e}")
+
+# Запуск бота (Polling)
+if __name__ == '__main__':
+    print("Бот запущен...")
+    bot.infinity_polling()
