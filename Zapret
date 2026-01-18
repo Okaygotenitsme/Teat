@@ -4,165 +4,117 @@ import re
 
 class DeobfuscatorEngine:
     def __init__(self):
-        self.lua = LuaRuntime(unpack_returned_tuples=True)
+        # Создаем runtime. Мы будем пересоздавать его или чистить для каждого запуска, 
+        # чтобы избежать накопления мусора.
+        pass
 
     def process_text(self, content):
+        # Создаем новый инстанс Lua для каждого файла для изоляции
+        self.lua = LuaRuntime(unpack_returned_tuples=True)
+        # Ограничиваем количество инструкций (например, 10 миллионов), 
+        # чтобы избежать бесконечных циклов.
+        self.lua.set_instruction_count_limit(10_000_000)
         return self.run_nuclear_sandbox(content)
 
     def run_nuclear_sandbox(self, code):
         logs = ["-- [[ MoonSec V3: NUCLEAR DEOBFUSCATION ]] --\n"]
         
-        # 1. Точечный поиск имени переменной
+        # 1. Поиск переменной байт-кода
         var_match = re.search(r"\(function\(a\) (\w+) = a; end\)\)", code)
         bytecode_var = var_match.group(1) if var_match else None
         
-        if bytecode_var:
-            logs.append(f"-- [SYSTEM]: Целевая переменная: {bytecode_var}")
-        else:
-            logs.append("-- [WARN]: Не удалось определить имя переменной, пробую общий метод.")
-
-        # 2. Извлечение самого зашифрованного контента (строки)
-        # Ищем то, что передается в gsub. Обычно это '( [[ ... ]] )' или '("...")'
+        # 2. Поиск payload (строки с данными)
         payload = None
-        # Попытка 1: Двойные скобки (часто в MoonSec)
         payload_match = re.search(r"\(\[\[(.*?)\]\]\)", code, re.DOTALL)
         if payload_match:
             payload = payload_match.group(1)
         else:
-            # Попытка 2: Обычные кавычки
             payload_match = re.search(r"gsub\(\s*['\"](.*?)['\"]\s*,\s*\(", code, re.DOTALL)
             if payload_match:
                 payload = payload_match.group(1)
 
         if payload:
-            logs.append(f"-- [SYSTEM]: Данные извлечены (размер: {len(payload)} байт)")
-        else:
-            logs.append("-- [CRITICAL]: Не удалось найти зашифрованную строку в коде!")
-
-        # 3. Скрипт инициализации среды
+            logs.append(f"-- [SYSTEM]: Данные извлечены ({len(payload)} байт)")
+        
+        # Скрипт подготовки среды (улучшенный)
         setup_script = """
         _G.LOGS = {}
         _G.CAPTURED_RESULT = nil
 
-        -- 1. Полифилл setfenv (обязателен для MoonSec)
-        if not setfenv then
-            local function find_env(f)
-                local i = 1
-                while true do
-                    local name, val = debug.getupvalue(f, i)
-                    if name == "_ENV" or name == nil then return i, val end
-                    i = i + 1
-                end
+        -- Полифилл для окружения
+        local function find_env(f)
+            local i = 1
+            while true do
+                local name, val = debug.getupvalue(f, i)
+                if name == "_ENV" or name == nil then return i, val end
+                i = i + 1
             end
-            setfenv = function(f, t)
-                local i = find_env(f)
-                if i then debug.setupvalue(f, i, t) end
-                return f
-            end
-            getfenv = function(f) return _G.sandbox_env end
         end
 
-        -- 2. Создание "Неубиваемого" Прокси
+        _G.setfenv = function(f, t)
+            local i = find_env(f)
+            if i then debug.setupvalue(f, i, t) end
+            return f
+        end
+
         local function create_proxy(name)
             local proxy = {}
             setmetatable(proxy, {
                 __index = function(t, k) return create_proxy(name .. "." .. tostring(k)) end,
                 __call = function(t, ...) return create_proxy(name .. "()") end,
                 __tostring = function() return name end,
-                __len = function() return 0 end, -- Чтобы #workspace не крашил
+                __len = function() return 0 end,
                 __metatable = "Locked"
             })
             return proxy
         end
 
-        -- 3. Подмена string.byte (Защита от краша)
-        local raw_byte = string.byte
-        string.byte = function(s, ...)
-            if type(s) == "table" then
-                table.insert(_G.LOGS, "[DEBUG]: MoonSec попытался прочитать таблицу как строку! Переменная не загрузилась.")
-                return 0 -- Возвращаем 0, чтобы скрипт пошел дальше (хоть и неправильно)
-            end
-            return raw_byte(s, ...)
-        end
-
-        -- 4. Сборка Среды Roblox
         local sandbox = {
-            -- Ловушка результата
             loadstring = function(c)
                 _G.CAPTURED_RESULT = c
-                table.insert(_G.LOGS, "[!!!] ДЖЕКПОТ: loadstring вызван!")
                 return function() end 
             end,
-            
-            -- Логирование
             print = function(...) table.insert(_G.LOGS, "[PRINT]: " .. table.concat({...}, " ")) end,
             warn = function(...) table.insert(_G.LOGS, "[WARN]: " .. table.concat({...}, " ")) end,
-            error = function(...) table.insert(_G.LOGS, "[ERROR]: " .. table.concat({...}, " ")) end,
-
-            -- Библиотеки
             bit32 = bit32, string = string, math = math, table = table, debug = debug,
-            pairs = pairs, ipairs = ipairs, next = next, type = type, tostring = tostring, tonumber = tonumber,
-            pcall = pcall, xpcall = xpcall, select = select, unpack = unpack or table.unpack,
-            
-            -- Фейковый Roblox API
+            pairs = pairs, ipairs = ipairs, next = next, type = type, 
+            tostring = tostring, tonumber = tonumber, pcall = pcall, 
+            xpcall = xpcall, select = select, unpack = unpack or table.unpack,
             game = create_proxy("game"),
             workspace = create_proxy("workspace"),
             script = create_proxy("script"),
-            getgenv = function() return _G.sandbox_env end,
-            
             _G = {},
-            shared = {},
         }
-
-        -- Замыкаем среду на саму себя
-        setmetatable(sandbox, {
-            __index = function(t, k)
-                return create_proxy(tostring(k))
-            end
-        })
-
         _G.sandbox_env = sandbox
         return sandbox
         """
 
         try:
-            # Создаем песочницу
             sandbox_env = self.lua.execute(setup_script)
 
-            # 4. ПРЯМАЯ ИНЪЕКЦИЯ ДАННЫХ (Самое важное!)
-            # Мы записываем данные прямо в таблицу песочницы, минуя все метатаблицы
             if bytecode_var and payload:
                 sandbox_env[bytecode_var] = payload
-                logs.append(f"-- [SYSTEM]: Переменная '{bytecode_var}' успешно внедрена в песочницу.")
+                logs.append(f"-- [SYSTEM]: Переменная '{bytecode_var}' внедрена.")
 
-            # 5. Запуск
-            runner = self.lua.eval("""
-                function(code, env)
-                    -- Пытаемся скомпилировать как Lua 5.1
-                    local f, err = load(code, "MoonSec_Deobf", "t", env)
-                    if not f then return false, "Syntax Error: " .. tostring(err) end
-                    
-                    -- Запускаем
-                    return pcall(f)
-                end
-            """)
-
+            # Запуск с защитой
+            runner = self.lua.eval("function(code, env) local f = load(code, 'src', 't', env) if f then return pcall(f) end return false, 'Load Error' end")
+            
             success, error_msg = runner(code, sandbox_env)
 
-            # Сбор логов
+            # Собираем логи Lua
             lua_logs = self.lua.globals().LOGS
             if lua_logs:
                 for i in range(len(lua_logs)):
-                    logs.append(lua_logs[i+1])
+                    logs.append(str(lua_logs[i+1]))
 
-            # Результат
             captured = self.lua.globals().CAPTURED_RESULT
             if captured:
-                logs.append("\n" + "="*35 + "\n" + str(captured) + "\n" + "="*35)
+                logs.append("\n" + "="*20 + " RESULT " + "="*20)
+                logs.append(str(captured))
             elif not success:
-                logs.append(f"\n[CRITICAL EXECUTION ERROR]: {error_msg}")
+                logs.append(f"\n[LUA ERROR]: {error_msg}")
 
         except Exception as e:
-            logs.append(f"\n[PYTHON EXCEPTION]: {e}")
+            logs.append(f"\n[ENGINE CRASH]: {e}")
 
         return "\n".join(logs)
