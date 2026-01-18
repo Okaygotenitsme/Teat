@@ -1,61 +1,35 @@
-import asyncio
-import os
-import logging
-from aiogram import Bot, Dispatcher, F, types
-from aiogram.types import FSInputFile
-from aiogram.filters import Command
-from aiogram.exceptions import TelegramBadRequest
-
-# Импортируем наш движок
-from engine import DeobfuscatorEngine
-
-# --- НАСТРОЙКИ ---
-API_TOKEN = 'ТВОЙ_ТОКЕН_ЗДЕСЬ'  # <--- ВСТАВЬ ТОКЕН
-
-# Настройка логирования
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(message)s")
-logger = logging.getLogger("DeobfBot")
-
-# Инициализация бота и движка
-bot = Bot(token=API_TOKEN)
-dp = Dispatcher()
-engine = DeobfuscatorEngine()
-
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message):
-    # Приветствие
-    await message.answer(
-        "🤖 **Roblox Lua Deobfuscator**\n\n"
-        "Отправь мне файл `.lua` или `.txt`.\n"
-        "Я запущу его в безопасной среде, перехвачу байткод и попробую декомпилировать через `unluac`.\n\n"
-        "⚠️ Поддерживается: IronBrew, MoonSec, PSX Obfuscator и другие VM.",
-        parse_mode="Markdown"
-    )
-
 @dp.message(F.document)
 async def handle_document(message: types.Message):
     user_id = message.from_user.id
     file_name = message.document.file_name
     
-    # Пути для сохранения (используем временные файлы)
+    # Пути для сохранения
     input_path = f"temp_in_{user_id}_{file_name}"
     output_path = f"Deobfuscated_{file_name}"
 
     status_msg = await message.answer("⏳ **Скачиваю файл...**", parse_mode="Markdown")
     
-    # Хак для обновления статуса из синхронного кода engine.py
+    # ### ИСПРАВЛЕНИЕ 1: Получаем loop здесь, в главном потоке ###
+    loop = asyncio.get_running_loop()
+
+    # Хак для обновления статуса
     last_status = [""]
+    
     def sync_status_updater(text):
         if text == last_status[0]: return
         last_status[0] = text
-        # Создаем задачу в главном цикле событий
+        
         async def edit_coro():
             try:
-                await status_msg.edit_text(f"⚙️ **Статус:** {text}", parse_mode="Markdown")
-            except TelegramBadRequest: pass # Игнорируем ошибки, если текст не изменился
+                # Добавил проверку, чтобы текст не был пустым
+                if text:
+                    await status_msg.edit_text(f"⚙️ **Статус:** {text}", parse_mode="Markdown")
+            except TelegramBadRequest: 
+                pass 
         
-        loop = asyncio.get_running_loop()
-        if loop.is_running():
+        # ### ИСПРАВЛЕНИЕ 2: Используем переменную loop, захваченную выше ###
+        # Мы НЕ вызываем get_running_loop() здесь, так как этот код выполняется в другом потоке
+        if not loop.is_closed():
             asyncio.run_coroutine_threadsafe(edit_coro(), loop)
 
     try:
@@ -65,8 +39,7 @@ async def handle_document(message: types.Message):
 
         with open(input_path, "rb") as f: content = f.read()
 
-        # 2. Запускаем движок в отдельном потоке, чтобы не блокировать бота
-        # Таймаут 180 секунд (3 минуты) на обработку
+        # 2. Запускаем движок в отдельном потоке
         try:
             result_data = await asyncio.wait_for(
                 asyncio.to_thread(engine.process, content, sync_status_updater),
@@ -83,6 +56,7 @@ async def handle_document(message: types.Message):
         out_file = FSInputFile(output_path)
         caption = "✅ **Готово!**"
         
+        # Проверяем байты, так как result_data - это bytes
         if b"Decompiled with unluac" in result_data:
             caption += "\n📜 Байткод успешно декомпилирован в исходник."
         elif b"WARNING: Decompilation failed" in result_data:
@@ -94,21 +68,15 @@ async def handle_document(message: types.Message):
 
     except Exception as e:
         logger.error(f"Global Error: {e}")
-        await status_msg.edit_text(f"❌ Критическая ошибка бота: {e}")
+        # Используем try-except на случай, если сообщение уже удалено или недоступно
+        try:
+            await status_msg.edit_text(f"❌ Критическая ошибка бота: {e}")
+        except:
+            await message.answer(f"❌ Критическая ошибка бота: {e}")
+            
     finally:
         # Удаляем временные файлы
         for p in [input_path, output_path]:
             if os.path.exists(p): 
                 try: os.remove(p)
                 except: pass
-
-async def main():
-    logger.info("Бот запущен!")
-    await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("Бот остановлен.")
