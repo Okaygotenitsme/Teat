@@ -1,68 +1,92 @@
+import lupa
+from lupa import LuaRuntime
+import re
 import asyncio
-import os
-import logging
-from aiogram import Bot, Dispatcher, F, types
-from aiogram.types import FSInputFile
-from aiogram.filters import Command
-from engine import DeobfuscatorEngine
+import math
+from collections import Counter
+from typing import Tuple, Dict, Any, List
 
-API_TOKEN = 'ТВОЙ_ТОКЕН'
+# --- Твои утилиты из фреймворка ---
+def entropy(s: str) -> float:
+    if not s: return 0.0
+    c = Counter(s)
+    length = len(s)
+    return -sum((freq / length) * math.log2(freq / length) for freq in c.values())
 
-logging.basicConfig(level=logging.INFO)
-bot = Bot(token=API_TOKEN)
-dp = Dispatcher()
-engine = DeobfuscatorEngine()
-
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message):
-    await message.answer("Привет! Я деобфускатор. Пришли файл, и я попробую вытащить из него исходный код.")
-
-@dp.message(F.document)
-async def handle_document(message: types.Message):
-    file_id = message.document.file_id
-    file_name = message.document.file_name
-    input_path = f"in_{message.from_user.id}_{file_name}"
-    output_path = f"out_{message.from_user.id}_{file_name}"
-
-    try:
-        sent_msg = await message.answer("📥 Файл получен. Начинаю анализ (лимит 30 сек)...")
-        
-        # Скачиваем файл
-        file = await bot.get_file(file_id)
-        await bot.download_file(file.file_path, input_path)
-
-        with open(input_path, "r", encoding="utf-8", errors="ignore") as f:
-            content = f.read()
-
-        # ЗАПУСК В ОТДЕЛЬНОМ ПОТОКЕ С ТАЙМАУТОМ
+class DeobfuscatorEngine:
+    def __init__(self):
+        # Используем Lua 5.1 (чаще всего нужна для обфускаторов Roblox)
+        # Если не работает, оставь просто LuaRuntime()
         try:
-            # asyncio.to_thread запускает функцию в другом потоке (Python 3.9+)
-            # asyncio.wait_for ограничивает время выполнения
-            result_code = await asyncio.wait_for(
-                asyncio.to_thread(engine.process_text, content), 
-                timeout=30.0
-            )
-        except asyncio.TimeoutError:
-            result_code = "❌ Ошибка: Время ожидания истекло (Timeout). Скрипт слишком сложный или зациклен."
+            self.lua = LuaRuntime(unpack_returned_tuples=True)
+        except:
+            self.lua = LuaRuntime()
 
-        # Сохраняем результат
-        with open(output_path, "w", encoding="utf-8") as f:
-            f.write(result_code)
+    def clean_code(self, text):
+        """Твоя логика очистки из фреймворка"""
+        # 1. Простейшее переименование длинных имен
+        ident_re = re.compile(r"\b[_A-Za-z]\w*\b")
+        ids = ident_re.findall(text)
+        mapping = {}
+        counter = 0
+        
+        for ident in set(ids):
+            if len(ident) > 12 and entropy(ident) > 3.0:
+                counter += 1
+                mapping[ident] = f"var_renamed_{counter}"
+        
+        def repl(match):
+            return mapping.get(match.group(0), match.group(0))
+        
+        text = ident_re.sub(repl, text)
+        
+        # 2. Удаление мертвого кода (if false then)
+        text = re.sub(r"if\s+false\s+then[\s\S]*?end", "-- [Removed Dead Code]", text)
+        return text
 
-        await message.answer_document(FSInputFile(output_path), caption="✅ Готово!")
+    def run_nuclear_sandbox(self, code):
+        logs = ["-- [[ MoonSec Hybrid Deobfuscator ]] --\n"]
+        
+        # Поиск данных MoonSec
+        var_match = re.search(r"\(function\(a\) (\w+) = a; end\)\)", code)
+        bytecode_var = var_match.group(1) if var_match else None
+        
+        payload = None
+        payload_match = re.search(r"\(\[\[(.*?)\]\]\)", code, re.DOTALL)
+        if payload_match:
+            payload = payload_match.group(1)
 
-    except Exception as e:
-        logging.error(f"Ошибка: {e}")
-        await message.answer(f"❌ Произошла ошибка: {e}")
-    
-    finally:
-        # Чистка временных файлов
-        for path in [input_path, output_path]:
-            if os.path.exists(path):
-                os.remove(path)
+        # Скрипт песочницы
+        setup_script = """
+        _G.CAPTURED_RESULT = nil
+        local sandbox = {
+            loadstring = function(c) _G.CAPTURED_RESULT = c return function() end end,
+            print = function() end, warn = function() end,
+            bit32 = bit32, string = string, math = math, table = table, 
+            pairs = pairs, ipairs = ipairs, type = type, tostring = tostring,
+            game = {}, workspace = {}, script = {}
+        }
+        return sandbox
+        """
 
-async def main():
-    await dp.start_polling(bot)
+        try:
+            sandbox_env = self.lua.execute(setup_script)
+            if bytecode_var and payload:
+                sandbox_env[bytecode_var] = payload
 
-if __name__ == "__main__":
-    asyncio.run(main())
+            # Запуск
+            runner = self.lua.eval("function(code, env) local f = load(code, 'src', 't', env) if f then return pcall(f) end return false, 'Load Error' end")
+            success, error_msg = runner(code, sandbox_env)
+
+            captured = self.lua.globals().CAPTURED_RESULT
+            if captured:
+                logs.append("-- [SUCCESS]: Код извлечен. Начинаю очистку...\n")
+                cleaned = self.clean_code(str(captured))
+                logs.append(cleaned)
+            else:
+                logs.append(f"-- [FAILED]: Не удалось захватить loadstring. Ошибка: {error_msg}")
+
+        except Exception as e:
+            logs.append(f"-- [ERROR]: {str(e)}")
+
+        return "\n".join(logs)
