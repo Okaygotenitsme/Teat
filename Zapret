@@ -1,13 +1,17 @@
 import lupa
 from lupa import LuaRuntime
 import logging
+import subprocess
+import os
+import tempfile
 
 # Логгер
 logger = logging.getLogger("DeobfuscatorEngine")
 
 class DeobfuscatorEngine:
     def __init__(self):
-        pass
+        # Путь к unluac.jar. Должен лежать рядом со скриптом.
+        self.unluac_path = "unluac.jar"
 
     def process(self, content, status_callback=None):
         def update_status(msg):
@@ -64,9 +68,9 @@ class DeobfuscatorEngine:
         local function hooked_load(chunk, name, mode, env)
             if type(chunk) == "string" then
                 local len = #chunk
-                if len > 100 then
+                -- Ловим даже мелкие куски, если они похожи на байткод (начинаются с ESC Lua)
+                if len > 50 or (len > 4 and string.sub(chunk, 1, 4) == "\27Lua") then
                     log("[HOOK] Пойман кусок кода (load): " .. len .. " байт")
-                    -- Сохраняем как таблицу с явными полями
                     table.insert(_G.CAPTURED_CHUNKS, {data = chunk, size = len, source = "load"})
                 end
             end
@@ -80,7 +84,7 @@ class DeobfuscatorEngine:
         local real_dump = string.dump
         local function hooked_dump(func)
             local success, bytecode = pcall(real_dump, func)
-            if success and #bytecode > 100 then
+            if success and #bytecode > 50 then
                  log("[HOOK] string.dump перехвачен! Размер: " .. #bytecode)
                  table.insert(_G.CAPTURED_CHUNKS, {data = bytecode, size = #bytecode, source = "dump"})
             end
@@ -159,70 +163,104 @@ class DeobfuscatorEngine:
                 end
             """)
             
-            # Запуск
             runner(content, env)
             
-            # === ИСПРАВЛЕННЫЙ БЛОК ИЗВЛЕЧЕНИЯ ===
-            # Мы берем объект таблицы Lua
             lua_chunks_table = lua.globals().CAPTURED_CHUNKS
             logs = list(lua.globals().LOGS)
-            
-            # В Lua индексы начинаются с 1. Используем len() таблицы.
             captured_count = len(lua_chunks_table)
             
             if captured_count > 0:
-                update_status(f"🕵️ Поймано фрагментов: {captured_count}. Извлекаем...")
+                update_status(f"🕵️ Поймано фрагментов: {captured_count}. Анализ...")
                 
                 best_chunk = b""
                 max_size = 0
                 
-                # Итерируемся по индексам Lua (от 1 до N включительно)
                 for i in range(1, captured_count + 1):
                     try:
-                        item = lua_chunks_table[i] # Получаем элемент по индексу
-                        
-                        # В Lupa доступ к полям таблицы через атрибуты или ключи
-                        # item - это Lua-таблица {data=..., size=...}
+                        item = lua_chunks_table[i]
                         c_data = item.data
                         c_size = item.size
                         
-                        if c_size > max_size:
-                            max_size = c_size
-                            best_chunk = c_data
+                        # Приоритет отдаем байткоду (начинается с ESC Lua)
+                        if c_data.startswith(b'\x1bLua') and c_size > max_size:
+                             max_size = c_size
+                             best_chunk = c_data
+                        elif c_size > max_size and not best_chunk.startswith(b'\x1bLua'):
+                             max_size = c_size
+                             best_chunk = c_data
+                             
                     except Exception as loop_err:
-                        logger.error(f"Ошибка при чтении фрагмента {i}: {loop_err}")
+                        logger.error(f"Ошибка чтения фрагмента {i}: {loop_err}")
                         continue
                 
                 if best_chunk:
-                    return self._clean_code(best_chunk, logs)
+                    return self._clean_code(best_chunk, logs, update_status)
                 else:
                     return self._format_logs(logs, fail=True)
             else:
                 return self._format_logs(logs, fail=True)
 
         except Exception as e:
-            # Детальный трейс ошибки для отладки
             import traceback
             traceback.print_exc()
             return f"-- [ENGINE CRASH]: {str(e)}".encode('utf-8', errors='replace')
 
-    def _clean_code(self, code_obj, logs):
-        """Форматирует результат"""
+    def _clean_code(self, code_obj, logs, status_callback=None):
+        """Форматирует результат и запускает декомпилятор если нужно"""
         header = b"-- [[ DEOBFUSCATOR RESULT ]] --\n"
-        header += b"-- [[ INFO: Captured " + str(len(code_obj)).encode() + b" bytes ]] --\n"
         
-        if isinstance(code_obj, bytes):
-            if code_obj.startswith(b'\x1bLua') or code_obj.startswith(b'\x1b\x4c'):
-                header += b"-- [[ NOTE: This is Lua Bytecode. Use 'unluac' to decompile ]] --\n\n"
-                return header + code_obj
+        # Проверяем сигнатуру Lua байткода (Hex: 1B 4C 75 61)
+        if isinstance(code_obj, bytes) and (code_obj.startswith(b'\x1bLua') or code_obj.startswith(b'\x1b\x4c')):
+            if status_callback: status_callback("🧬 Обнаружен байткод! Запускаю Decompiler...")
+            
+            decompiled_source = self._try_decompile(code_obj)
+            
+            if decompiled_source:
+                header += b"-- [[ SUCCESS: Decompiled with unluac ]] --\n\n"
+                return header + decompiled_source
             else:
-                try:
-                    txt = code_obj.decode('utf-8')
-                    return header + b"-- [[ SOURCE CODE ]] --\n" + txt.encode('utf-8')
-                except:
-                    return header + b"-- [[ BINARY DATA ]] --\n" + code_obj
+                header += b"-- [[ WARNING: Decompilation failed. Returning Bytecode ]] --\n"
+                header += b"-- [[ TIP: Install java and unluac.jar to decompile ]] --\n\n"
+                return header + code_obj
         
-        return b"-- ERROR: Invalid data type captured"
+        # Если это просто текст
+        try:
+            txt = code_obj.decode('utf-8')
+            return header + b"-- [[ SOURCE CODE ]] --\n" + txt.encode('utf-8')
+        except:
+            return header + b"-- [[ BINARY DATA (Unknown) ]] --\n" + code_obj
+
+    def _try_decompile(self, bytecode):
+        """Пытается декомпилировать байткод через unluac.jar"""
+        if not os.path.exists(self.unluac_path):
+            logger.warning(f"unluac.jar не найден по пути: {self.unluac_path}")
+            return None
+
+        # Создаем временный файл для байткода
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".lua", mode='wb') as tmp_in:
+                tmp_in.write(bytecode)
+                tmp_in_path = tmp_in.name
+            
+            # Запускаем Java процесс
+            # java -jar unluac.jar temp_file.lua
+            process = subprocess.run(
+                ["java", "-jar", self.unluac_path, tmp_in_path],
+                capture_output=True,
+                text=False # Получаем байты на выходе
+            )
+            
+            os.remove(tmp_in_path) # Удаляем временный файл
+            
+            if process.returncode == 0 and len(process.stdout) > 0:
+                return process.stdout
+            else:
+                logger.error(f"Unluac error: {process.stderr.decode('utf-8', 'ignore')}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Ошибка декомпиляции: {e}")
+            return None
 
     def _format_logs(self, logs, fail=False):
         out = []
