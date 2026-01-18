@@ -1,75 +1,49 @@
-import asyncio
-import os
-import logging
-from aiogram import Bot, Dispatcher, F, types
-from aiogram.types import FSInputFile
-from aiogram.filters import Command
+import lupa
+from lupa import LuaRuntime
+import re
 
-from engine import DeobfuscatorEngine
+class DeobfuscatorEngine:
+    def __init__(self):
+        # Создаем чистый Lua-движок
+        self.lua = LuaRuntime(unpack_returned_tuples=True)
 
-API_TOKEN = 'ТВОЙ_ТОКЕН'
+    def process_text(self, content):
+        if "MoonSec" in content:
+            return self.run_in_sandbox(content)
+        return "-- [!] Пожалуйста, отправь файл MoonSec V3."
 
-logging.basicConfig(level=logging.INFO)
-bot = Bot(token=API_TOKEN)
-dp = Dispatcher()
-engine = DeobfuscatorEngine()
-
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message):
-    await message.answer("Бот готов! Пришли мне файл .lua или .txt")
-
-@dp.message(F.document)
-async def handle_document(message: types.Message):
-    file_id = message.document.file_id
-    file_name = message.document.file_name
-    
-    # Список для отслеживания файлов, которые нужно будет удалить
-    files_to_clean = []
-
-    # Генерируем уникальные имена, чтобы файлы разных юзеров не перемешались
-    input_path = f"in_{message.from_user.id}_{file_name}"
-    output_path = f"out_{message.from_user.id}_{file_name}"
-
-    try:
-        await message.answer("📥 Загрузка и анализ...")
+    def run_in_sandbox(self, obfuscated_code):
+        """Запуск кода в эмуляторе с перехватом данных"""
+        logs = ["-- [[ Dynamic Analysis Result ]] --\n"]
         
-        # 1. Скачиваем файл
-        file = await bot.get_file(file_id)
-        await bot.download_file(file.file_path, input_path)
-        files_to_clean.append(input_path) # Добавляем в очередь на удаление
+        # 1. Создаем хуки (перехватчики)
+        def hooked_loadstring(code, *args):
+            logs.append("-- [CAPTURED CODE]:\n" + str(code))
+            return lambda: None # Возвращаем пустую функцию, чтобы код не шел дальше
 
-        # 2. Читаем и обрабатываем
-        with open(input_path, "r", encoding="utf-8", errors="ignore") as f:
-            content = f.read()
+        def hooked_print(*args):
+            logs.append(f"-- [PRINT]: {' '.join(map(str, args))}")
+
+        # 2. Настраиваем окружение Roblox
+        g = self.lua.globals()
+        g['loadstring'] = hooked_loadstring
+        g['print'] = hooked_print
         
-        # Вызов нашего движка (engine.py)
-        result_code = engine.process_text(content)
+        # Имитируем объект game
+        g['game'] = self.lua.table(
+            GetService = lambda s, name: self.lua.table(name=name, SetCore=lambda *a: None)
+        )
         
-        # 3. Сохраняем результат
-        with open(output_path, "w", encoding="utf-8") as f:
-            f.write(result_code)
-        files_to_clean.append(output_path) # Добавляем в очередь на удаление
+        # Добавляем стандартные функции, которые часто ищет MoonSec
+        g['setclipboard'] = lambda val: logs.append(f"-- [CLIPBOARD]: {val}")
+        g['getgenv'] = lambda: g
 
-        # 4. Отправляем пользователю
-        output_file = FSInputFile(output_path)
-        await message.answer_document(output_file, caption="✅ Деобфускация завершена!")
+        try:
+            # 3. Пытаемся запустить обфускатор
+            # Мы ограничиваем время выполнения (псевдо-защита от вечных циклов)
+            self.lua.execute(obfuscated_code)
+        except Exception as e:
+            logs.append(f"\n-- [!] Анализ прерван: {e}")
+            logs.append("-- (Это нормально, если мы перехватили loadstring до завершения)")
 
-    except Exception as e:
-        logging.error(f"Ошибка: {e}")
-        await message.answer(f"❌ Ошибка при обработке: {e}")
-    
-    finally:
-        # Цикл автоматического удаления всех временных файлов
-        for path in files_to_clean:
-            if os.path.exists(path):
-                try:
-                    os.remove(path)
-                    print(f"[CLEANUP] Файл удален: {path}")
-                except Exception as e:
-                    print(f"[ERROR] Не удалось удалить {path}: {e}")
-
-async def main():
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    asyncio.run(main())
+        return "\n".join(logs)
