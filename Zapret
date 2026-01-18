@@ -5,10 +5,10 @@ import subprocess
 import os
 import tempfile
 import re
+import binascii
 
 # Логгер
 logger = logging.getLogger("DeobfuscatorEngine")
-logging.basicConfig(level=logging.INFO)
 
 class DeobfuscatorEngine:
     def __init__(self):
@@ -22,19 +22,19 @@ class DeobfuscatorEngine:
             logger.info(f"[STATUS] {msg}")
 
         if not self._check_java():
-            return b"-- [FATAL] Java is missing. Install Java to decompile."
+            return b"-- [FATAL] Java is missing. Install Java to use unluac."
 
-        update_status("🧠 Инициализация среды эмуляции Roblox...")
+        update_status("🧠 Запуск эвристического анализатора (MoonSec/IronBrew)...")
 
         # --- НАСТРОЙКА LUA VM ---
         try:
+            # Отключаем ограничение памяти (или ставим большое), чтобы VM не падала
             lua = LuaRuntime(unpack_returned_tuples=True, encoding=None)
         except Exception as e:
             return f"-- [FATAL] Lua start error: {e}".encode('utf-8')
 
-        # 1. Полифиллы (Bitwise operations + Roblox Math)
-        # Добавляем фейковые типы данных, чтобы скрипт не падал
-        polyfill = """
+        # 1. Полифиллы (Bitwise operations) - Критично для MoonSec
+        bit_polyfill = """
         local bit = {}
         function bit.tobit(x) x = x % 4294967296; if x >= 2147483648 then x = x - 4294967296 end; return x end
         function bit.bnot(x) return 4294967295 - x % 4294967296 end
@@ -48,41 +48,29 @@ class DeobfuscatorEngine:
         function bit.bxor(a, b) return bit_oper(a, b, 3) end
         function bit.lshift(a, b) return (a * 2^b) % 4294967296 end
         function bit.rshift(a, b) return math.floor(a / 2^b) % 4294967296 end
-        package.loaded.bit = bit; _G.bit = bit; _G.bit32 = bit 
-        
-        -- ROBLOX TYPES MOCK --
-        -- Это позволяет скрипту "жить" дольше и расшифровать больше строк
-        local function mock_type(name) 
-            return {
-                new = function(...) return _G.create_proxy(name..".new") end,
-                fromCharCode = function(...) return _G.create_proxy(name..".fromCharCode") end,
-                fromHSV = function(...) return _G.create_proxy(name..".fromHSV") end,
-                -- Добавляем заглушки констант
-                zero = _G.create_proxy(name..".zero"),
-            } 
+        function bit.arshift(a, b) 
+            local z = math.floor(a / 2^b) % 4294967296
+            if a >= 2147483648 then z = z + 4294967296 - 2^(32-b) end
+            return z
         end
-        Vector3 = mock_type("Vector3")
-        CFrame = mock_type("CFrame")
-        UDim2 = mock_type("UDim2")
-        Color3 = mock_type("Color3")
-        Instance = mock_type("Instance")
+        package.loaded.bit = bit; _G.bit = bit; _G.bit32 = bit 
         """
 
-        # 2. Среда-шпион
-        sandbox_setup = polyfill + """
+        # 2. Среда-шпион (Spyware Environment V2)
+        sandbox_setup = bit_polyfill + """
         _G.CAPTURED_CHUNKS = {}
         _G.DETECTED_STRINGS = {}
         _G.ACTION_LOG = {}
+        _G.FINAL_GLOBALS = {}
         
         local function log_action(msg) 
-            -- Ограничиваем размер лога, чтобы не зависло
-            if #_G.ACTION_LOG < 2000 then
+            if #_G.ACTION_LOG < 200 then -- Ограничим лог, чтобы не забить память
                 table.insert(_G.ACTION_LOG, msg) 
             end
         end
 
         local function capture_str(s) 
-            if type(s) == "string" and #s > 3 then 
+            if type(s) == "string" and #s > 4 then 
                 if not s:find("stack begin") and not s:find("upvalue") then
                     _G.DETECTED_STRINGS[s] = true 
                 end
@@ -90,55 +78,64 @@ class DeobfuscatorEngine:
             return s
         end
 
-        -- Хуки на строки
+        -- Хук на string.char (дешифровка строк)
         local real_char = string.char
-        string.char = function(...) local res = real_char(...); capture_str(res); return res end
+        string.char = function(...)
+            local res = real_char(...)
+            capture_str(res)
+            return res
+        end
+        
+        -- Хук на table.concat (сборка скрипта)
         local real_concat = table.concat
-        table.concat = function(t, s, i, j) local res = real_concat(t, s, i, j); capture_str(res); return res end
-
-        -- Хук на LOAD (VM Capture)
-        local real_load = load
-        local function hooked_load(chunk, name, mode, env)
-            if type(chunk) == "string" and (#chunk > 100 or chunk:sub(1,4) == "\27Lua") then
-                table.insert(_G.CAPTURED_CHUNKS, {data = chunk, size = #chunk})
-            end
-            -- Подсовываем наше окружение во вложенные скрипты!
-            return real_load(chunk, name, mode, _G.sandbox_env)
+        table.concat = function(t, sep, i, j)
+            local res = real_concat(t, sep, i, j)
+            capture_str(res)
+            return res
         end
 
-        -- SMART PROXY (Главная часть деобфускации)
-        function _G.create_proxy(name)
+        -- Хук на load/loadstring (перехват VM)
+        local real_load = load
+        local function hooked_load(chunk, name, mode, env)
+            if type(chunk) == "string" then
+                -- MoonSec часто передает скрипт как строку
+                if (#chunk > 50) then
+                    table.insert(_G.CAPTURED_CHUNKS, {data = chunk, size = #chunk, type = "string"})
+                end
+            end
+            return real_load(chunk, name, mode, env)
+        end
+
+        -- Функция для дампа переменных в конце (Environment Dump)
+        function _G.dump_globals()
+            local ignore = {string=1, math=1, table=1, bit=1, bit32=1, pairs=1, ipairs=1, next=1, _G=1, sandbox_env=1, package=1}
+            for k, v in pairs(getfenv()) do
+                if not ignore[k] then
+                    if type(v) == "string" or type(v) == "number" or type(v) == "boolean" then
+                        table.insert(_G.FINAL_GLOBALS, tostring(k) .. " = " .. tostring(v))
+                    end
+                end
+            end
+        end
+
+        -- PROXY (Roblox API Emulation)
+        local function create_proxy(name)
             local proxy = {}
             local meta = {}
-            
             meta.__index = function(t, k)
                 local key = tostring(k)
-                
-                -- Стандартные ответы, чтобы скрипт верил, что он в игре
+                -- Не логируем каждое обращение, слишком много шума
                 if key == "PlaceId" then return 123456 end
                 if key == "UserId" then return 1001 end
-                if key == "Name" then return "Player1" end
-                if key == "Parent" then return _G.create_proxy(name..".Parent") end
-                
-                -- Логируем чтение важных свойств
-                -- log_action("READ: " .. name .. "." .. key) 
-                
-                return _G.create_proxy(name .. "." .. key)
+                if key == "HttpGet" or key == "HttpGetAsync" then
+                     return function(u) log_action("HTTP GET: "..tostring(u)); return "ProxyResponse" end
+                end
+                return create_proxy(name .. "." .. key)
             end
-            
             meta.__newindex = function(t, k, v)
-                -- ЭТО САМОЕ ВАЖНОЕ: Ловим, когда скрипт что-то меняет
-                -- Например: game.Players.LocalPlayer.WalkSpeed = 100
-                local val = tostring(v)
-                if type(v) == "string" then val = '"'..val..'"' end
-                log_action("SET: " .. name .. "." .. tostring(k) .. " = " .. val)
+                log_action("Write: " .. name .. "." .. tostring(k) .. " = " .. tostring(v))
             end
-            
-            meta.__call = function(t, ...) 
-                log_action("CALL: " .. name .. "(...)")
-                return _G.create_proxy(name) 
-            end
-            
+            meta.__call = function(t, ...) return create_proxy(name) end
             meta.__tostring = function() return name end
             setmetatable(proxy, meta)
             return proxy
@@ -146,28 +143,19 @@ class DeobfuscatorEngine:
 
         local env = {
             loadstring = hooked_load, load = hooked_load,
-            print = function(...) local args={...}; log_action("PRINT: "..tostring(args[1])); end,
-            warn = function(...) local args={...}; log_action("WARN: "..tostring(args[1])); end,
-            error = function(...) log_action("ERROR: "..tostring((...))); end,
-            
+            print = function(...) local a={...}; log_action("Print: "..tostring(a[1])); end,
+            warn = function(...) local a={...}; log_action("Warn: "..tostring(a[1])); end,
+            error = function(...) end, -- Подавляем ошибки скрипта
             string = string, math = math, table = table, 
             bit = bit, bit32 = bit, pairs = pairs, ipairs = ipairs, next = next,
             type = type, tostring = tostring, tonumber = tonumber, pcall = pcall, xpcall = xpcall,
             select = select, unpack = unpack or table.unpack,
             setmetatable = setmetatable, getmetatable = getmetatable,
             
-            -- Глобали
-            game = _G.create_proxy("game"),
-            workspace = _G.create_proxy("workspace"),
-            script = _G.create_proxy("script"),
-            
-            -- Эксплойт-окружение
+            game = create_proxy("game"),
+            workspace = create_proxy("workspace"),
+            script = create_proxy("script"),
             getgenv = function() return {} end,
-            syn = { request = function() return {Body="OK"} end },
-            request = function() return {Body="OK"} end,
-            
-            -- Подключаем наши фейковые типы
-            Vector3 = Vector3, CFrame = CFrame, UDim2 = UDim2, Color3 = Color3, Instance = Instance
         }
         env._G = env
         _G.sandbox_env = env
@@ -175,24 +163,36 @@ class DeobfuscatorEngine:
         """
 
         try:
-            update_status("🌪️ Трейсинг (Исполнение)...")
+            update_status("🌪️ Исполнение скрипта (Tracing)...")
             env = lua.execute(sandbox_setup)
             
-            # Запускаем через pcall
+            # Запускаем скрипт
             runner = lua.eval("""
                 function(code, env)
                     local f, err = load(code, "chunk", "bt", env)
-                    if not f then return "LoadErr: "..tostring(err) end
+                    if not f then return false end
+                    -- Запускаем через pcall
                     pcall(f) 
-                    return "Done"
+                    -- Пытаемся сдампить глобалки после исполнения
+                    pcall(_G.dump_globals)
+                    return true
                 end
             """)
             runner(content, env)
 
             # --- СБОР РЕЗУЛЬТАТОВ ---
+            
+            # 1. Строки
             strings_tbl = lua.globals().DETECTED_STRINGS
             detected_strings = list(strings_tbl)
+            
+            # 2. Глобалки (Variables Dump)
+            global_dump = list(lua.globals().FINAL_GLOBALS)
+            
+            # 3. Логи
             action_log = list(lua.globals().ACTION_LOG)
+            
+            # 4. Чанки
             chunks = lua.globals().CAPTURED_CHUNKS
             
             best_chunk = None
@@ -204,8 +204,10 @@ class DeobfuscatorEngine:
                         max_size = c.size
                         best_chunk = c.data
             
+            # Если не поймали новый чанк, работаем с исходным
             target_code = best_chunk if best_chunk else content
-            return self._finalize_output(target_code, detected_strings, action_log, update_status)
+            
+            return self._finalize_output(target_code, detected_strings, global_dump, action_log, update_status)
 
         except Exception as e:
             return f"-- [CRASH ERROR]: {str(e)}".encode('utf-8')
@@ -216,63 +218,76 @@ class DeobfuscatorEngine:
             return True
         except: return False
 
-    def _finalize_output(self, code_bytes, strings, logs, callback):
+    def _clean_string(self, s):
+        """Очищает байтовые строки для красивого вывода"""
+        if isinstance(s, bytes):
+            try: return s.decode('utf-8')
+            except: return str(s)
+        return str(s)
+
+    def _finalize_output(self, code_bytes, strings, globals_dump, logs, callback):
         """Собирает финальный файл"""
+        
+        # 1. Попытка декомпиляции
+        if callback: callback("🧬 Попытка декомпиляции (unluac)...")
+        decompiled = self._try_decompile(code_bytes)
         
         final_text = ""
         
-        # 1. Сортируем строки для удобства
-        assets = []
-        urls = []
-        others = []
+        # --- HEADER 1: STRINGS ---
+        final_text += "-- [[ DUMPED STRINGS (DECRYPTED) ]] --\n"
+        final_text += "-- Assets, Keys, and Messages found during execution:\n\n"
         
-        for s in strings:
-            s_str = str(s).replace('\n', ' ').replace('\r', '')
-            if "rbxassetid" in s_str or s_str.isdigit() and len(s_str) > 8:
-                assets.append(s_str)
-            elif "http" in s_str:
-                urls.append(s_str)
-            else:
-                others.append(s_str)
+        # Сортируем: сначала длинные (обычно интереснее), потом короткие
+        sorted_strings = sorted(strings, key=lambda x: len(str(x)), reverse=True)
+        
+        seen = set()
+        for s in sorted_strings:
+            clean = self._clean_string(s).replace('\n', ' ').replace('\r', '')
+            if clean not in seen and len(clean) > 3:
+                final_text += f'-- "{clean}"\n'
+                seen.add(clean)
 
-        # --- HEADER ---
-        final_text += "-- [[ 🕵️ DEOBFUSCATOR REPORT ]] --\n\n"
-        
-        if urls:
-            final_text += "-- [🌐 FOUND URLS/WEBHOOKS] --\n"
-            for u in urls: final_text += f"-- {u}\n"
-            final_text += "\n"
-            
-        if assets:
-            final_text += "-- [📦 FOUND ASSETS] --\n"
-            for a in assets: final_text += f"-- {a}\n"
-            final_text += "\n"
-            
-        final_text += "-- [📝 OTHER STRINGS] --\n"
-        for o in others: final_text += f"-- {o}\n"
-        
-        # --- ACTION LOG (Fake Source) ---
-        final_text += "\n" + "="*50 + "\n"
-        final_text += "-- [[ EXECUTION LOG (PSEUDO-CODE) ]] --\n"
-        final_text += "-- This shows what the script actually DID:\n\n"
-        
-        # Берем последние 300 действий, так как они самые интересные
-        for l in logs[-300:]: 
-            final_text += f"{l}\n"
-            
+        # --- HEADER 2: GLOBALS ---
+        if globals_dump:
+            final_text += "\n" + "="*50 + "\n"
+            final_text += "-- [[ GLOBAL VARIABLES DUMP ]] --\n"
+            final_text += "-- Variables left in environment after run:\n\n"
+            for g in globals_dump:
+                final_text += f"-- {self._clean_string(g)}\n"
+
         final_text += "\n" + "="*50 + "\n\n"
-
-        # --- DECOMPILATION ---
-        if callback: callback("🧬 Декомпиляция ядра VM...")
-        decompiled = self._try_decompile(code_bytes)
         
+        # --- BODY: CODE ---
         if decompiled:
-            src = decompiled.decode('utf-8', 'ignore') if isinstance(decompiled, bytes) else decompiled
+            if callback: callback("💅 Форматирование кода...")
+            try:
+                src = decompiled.decode('utf-8', 'ignore')
+            except:
+                src = decompiled.decode('latin-1', 'ignore')
+            
             src = self._beautify_lua(src)
+            final_text += "-- [[ DECOMPILED SOURCE ]] --\n\n"
             final_text += src
         else:
-            final_text += "-- [WARNING] Decompilation failed. Raw Bytecode:\n"
-            final_text += str(code_bytes)
+            final_text += "-- [WARNING] Unluac failed (Virtualization Detected).\n"
+            final_text += "-- Below is the raw bytecode/script captured from memory.\n\n"
+            
+            # Пробуем вывести как текст, если это просто упакованный скрипт
+            try:
+                text_view = code_bytes.decode('utf-8')
+                final_text += text_view
+            except:
+                final_text += f"-- Binary Blob Size: {len(code_bytes)} bytes\n"
+                final_text += f"-- MD5: {hash(code_bytes)}\n"
+                # Выводим hex view, если это бинарник
+                final_text += str(binascii.hexlify(code_bytes[:200])) + "... (truncated)"
+
+        # --- FOOTER: LOGS ---
+        final_text += "\n\n" + "="*50 + "\n"
+        final_text += "-- [[ ACTION LOG ]] --\n\n"
+        for l in logs[-50:]: 
+            final_text += f"-- {self._clean_string(l)}\n"
 
         return final_text.encode('utf-8')
 
@@ -283,18 +298,29 @@ class DeobfuscatorEngine:
                 tmp.write(bytecode)
                 path = tmp.name
             
-            # Увеличил память Java и добавил -Xss для глубоких стеков
-            res = subprocess.run(["java", "-Xss5m", "-Xmx1G", "-jar", self.unluac_path, path], capture_output=True)
+            # Java process
+            res = subprocess.run(
+                ["java", "-Xmx1G", "-jar", self.unluac_path, path], 
+                capture_output=True,
+                timeout=10 # Тайм-аут 10 сек на декомпиляцию
+            )
             os.remove(path)
             
-            if res.returncode == 0: return res.stdout
+            if res.returncode == 0 and len(res.stdout) > 0: 
+                return res.stdout
             return None
         except: return None
 
     def _beautify_lua(self, source_code):
+        # Базовый форматтер
         source_code = re.sub(r'(\s)(local|return|if|for|while|repeat|function)(\s)', r'\n\2 ', source_code)
-        replacements = { " then ": " then\n", " do ": " do\n", " end ": "\nend\n", " repeat ": "\nrepeat\n", " until ": "\nuntil ", ";": ";\n" }
-        for k, v in replacements.items(): source_code = source_code.replace(k, v)
+        
+        replacements = {
+            " then ": " then\n", " do ": " do\n", " end ": "\nend\n",
+            " repeat ": "\nrepeat\n", " until ": "\nuntil ", ";": ";\n"
+        }
+        for k, v in replacements.items():
+            source_code = source_code.replace(k, v)
 
         lines = source_code.splitlines()
         formatted = []
@@ -303,14 +329,17 @@ class DeobfuscatorEngine:
         for line in lines:
             line = line.strip()
             if not line: continue
-            if line.startswith("--"): formatted.append(line); continue
+            if line.startswith("--"): 
+                formatted.append(line)
+                continue
 
-            if line.startswith(("end", "until", "}", ")", "else", "elseif")):
+            if line.startswith(("end", "until", "}", "]", ")", "else", "elseif")):
                 indent = max(0, indent - 1)
             
             formatted.append("\t" * indent + line)
             
-            if line.endswith(("then", "do", "repeat", "{", "(")) or ("function" in line and not line.endswith("end")):
+            if line.endswith(("then", "do", "repeat", "{", "(")) or \
+               ("function" in line and not line.endswith("end")):
                 indent += 1
             if line.startswith(("else", "elseif")):
                 indent += 1
