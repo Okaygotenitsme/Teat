@@ -4,84 +4,47 @@ import logging
 import subprocess
 import os
 import tempfile
+import sys
 import re
 
-# Настройка логгера
+# Логгер
 logger = logging.getLogger("DeobfuscatorEngine")
 logging.basicConfig(level=logging.INFO)
 
 class DeobfuscatorEngine:
     def __init__(self):
-        # Определяем пути
+        # --- ОПРЕДЕЛЯЕМ ТОЧНЫЙ ПУТЬ К ПАПКЕ ---
         base_dir = os.path.dirname(os.path.abspath(__file__))
+        
+        # Собираем полный путь к unluac.jar
         self.unluac_path = os.path.join(base_dir, "unluac.jar")
         
         logger.info(f"📁 Рабочая папка: {base_dir}")
         logger.info(f"☕ Путь к Unluac: {self.unluac_path}")
-
-    def _beautify_lua(self, source_code):
-        """
-        Улучшенный Lua-форматтер. 
-        MoonSec V3 после unluac часто выглядит как каша из-за Control Flow Flattening.
-        """
-        indent = 0
-        formatted = []
-        
-        # Предварительная очистка: разбиваем длинные цепочки ключевых слов
-        # (часто бывает в декомпилированных VM)
-        source_code = source_code.replace("; ", ";\n")
-        source_code = re.sub(r'(\b(then|do|repeat)\b)', r'\1\n', source_code)
-        source_code = re.sub(r'(\b(else|elseif)\b)', r'\n\1\n', source_code)
-        source_code = source_code.replace(" end ", "\nend\n")
-        
-        lines = source_code.splitlines()
-
-        for line in lines:
-            line = line.strip()
-            if not line: continue
-            
-            # Уменьшаем отступ перед проверкой текущей строки
-            if line.startswith("end") or line.startswith("until") or line.startswith("}"):
-                indent = max(0, indent - 1)
-            elif line == "else" or line.startswith("elseif"):
-                indent = max(0, indent - 1)
-            
-            formatted.append("    " * indent + line)
-            
-            # Увеличиваем отступ для следующей строки
-            if (line.endswith("then") or line.endswith("do") or 
-                line.endswith("repeat") or line.endswith("{") or 
-                "function(" in line or line.startswith("function ")):
-                
-                # Если функция не однострочная
-                if not (line.endswith("end") or line.endswith("end;")):
-                    indent += 1
-            
-            if line == "else" or line.startswith("elseif"):
-                indent += 1
-                
-        return "\n".join(formatted)
 
     def process(self, content, status_callback=None):
         def update_status(msg):
             if status_callback: status_callback(msg)
             logger.info(f"[STATUS] {msg}")
 
-        if not self._check_java():
-            return b"-- [FATAL] Java not found! Please install JRE."
+        update_status("🛠 Инициализация Lua VM (MoonSec Killer V2)...")
 
-        update_status("🛠 Инициализация Lua VM (MoonSec Edition)...")
+        # Проверка Java
+        if not self._check_java():
+            return b"-- [FATAL] Java not found! Please install Java Runtime Environment."
 
         try:
+            # encoding=None ВАЖНО для работы с бинарными данными
             lua = LuaRuntime(unpack_returned_tuples=True, encoding=None)
         except Exception as e:
             return f"-- [FATAL]: Ошибка старта Lua: {e}".encode('utf-8')
 
-        # Полифилл bit-операций (MoonSec их обожает)
+        # --- ПОЛИФИЛЛ BIT (Критично для MoonSec) ---
         bit_polyfill = """
         local bit = {}
         function bit.tobit(x) x = x % 4294967296; if x >= 2147483648 then x = x - 4294967296 end; return x end
         function bit.bnot(x) return 4294967295 - x % 4294967296 end
+        
         local function bit_oper(a, b, oper)
             local r, m, s = 0, 2^31, nil
             repeat
@@ -90,128 +53,315 @@ class DeobfuscatorEngine:
             until m < 1
             return r
         end
+        
         function bit.band(a, b) return bit_oper(a, b, 4) end
         function bit.bor(a, b)  return bit_oper(a, b, 1) end
         function bit.bxor(a, b) return bit_oper(a, b, 3) end
         function bit.lshift(a, b) return (a * 2^b) % 4294967296 end
         function bit.rshift(a, b) return math.floor(a / 2^b) % 4294967296 end
+        
         package.loaded.bit = bit
         _G.bit = bit
         _G.bit32 = bit 
         """
 
-        # Среда-ловушка для перехвата MoonSec
+        # --- СРЕДА-ЛОВУШКА ---
         sandbox_setup = bit_polyfill + """
         _G.CAPTURED_CHUNKS = {}
         _G.LOGS = {}
         
-        local function log(msg) table.insert(_G.LOGS, tostring(msg)) end
+        local function log(msg) 
+            if type(msg) == "string" and (msg:find("for state") or msg:find("__index")) then return end
+            table.insert(_G.LOGS, tostring(msg)) 
+        end
         _G.log = log
 
+        -- [[ ПЕРЕХВАТЧИК LOAD/LOADSTRING ]] --
         local real_load = load
         local function hooked_load(chunk, name, mode, env)
             if type(chunk) == "string" then
                 local len = #chunk
-                -- MoonSec часто грузит байткод через load
-                if len > 20 then
-                    log("[HOOK] Перехвачен блок: " .. len .. " байт")
-                    table.insert(_G.CAPTURED_CHUNKS, {data = chunk, size = len})
+                -- Ловим все, что похоже на байткод (MoonSec) или скрипт
+                if len > 100 or (len > 4 and string.sub(chunk, 1, 4) == "\27Lua") then
+                    log("[HOOK] Пойман кусок кода (load): " .. len .. " байт")
+                    table.insert(_G.CAPTURED_CHUNKS, {data = chunk, size = len, source = "load"})
                 end
             end
-            return real_load(chunk, name, mode, env)
+            
+            -- Пытаемся выполнить, чтобы скрипт продолжил распаковку
+            local res, err = real_load(chunk, name, mode, env)
+            if not res then return nil, err end
+            return res
         end
 
+        -- [[ ПЕРЕХВАТЧИК STRING.DUMP ]] --
+        local real_dump = string.dump
+        local function hooked_dump(func)
+            local success, bytecode = pcall(real_dump, func)
+            if success and #bytecode > 50 then
+                 log("[HOOK] string.dump перехвачен! Размер: " .. #bytecode)
+                 table.insert(_G.CAPTURED_CHUNKS, {data = bytecode, size = #bytecode, source = "dump"})
+            end
+            return bytecode or ""
+        end
+
+        -- [[ PROXY (ЧЕРНАЯ ДЫРА) ]] --
+        -- Этот прокси позволяет обращаться к game.Players.LocalPlayer и не падать
         local function create_proxy(name)
             local proxy = {}
-            setmetatable(proxy, {
-                __index = function(t, k) 
-                    if tostring(k) == "ClassName" then return name end
-                    return create_proxy(name .. "." .. tostring(k)) 
-                end,
-                __call = function() return create_proxy(name .. ":Method") end,
-                __tostring = function() return name end
-            })
+            local meta = {}
+            meta.__index = function(t, k) 
+                local key = tostring(k)
+                -- Фейковые значения для популярных проверок
+                if key == "PlaceId" then return 123456 end
+                if key == "JobId" then return "dead-beef-1337" end
+                if key == "Name" then return "Player1" end
+                if key == "UserId" then return 1 end
+                if key == "Parent" then return proxy end -- Parent loop fix
+                
+                return create_proxy(name .. "." .. key) 
+            end
+            meta.__newindex = function(t, k, v) end -- Разрешаем запись в никуда
+            meta.__call = function(t, ...) return create_proxy(name .. "()") end
+            meta.__tostring = function() return name end
+            meta.__len = function() return 0 end
+            setmetatable(proxy, meta)
             return proxy
         end
 
+        -- [[ ENV ]] --
         local env = {
-            loadstring = hooked_load, load = hooked_load,
-            print = log, warn = log,
-            string = string, math = math, table = table, coroutine = coroutine,
-            bit = bit, bit32 = bit,
-            pairs = pairs, ipairs = ipairs, next = next, type = type,
-            pcall = pcall, xpcall = xpcall, setmetatable = setmetatable,
-            getmetatable = getmetatable, os = {time = os.time, clock = os.clock},
-            game = create_proxy("game"), workspace = create_proxy("workspace"),
-            script = create_proxy("script"), Instance = {new = function() return create_proxy("Instance") end}
+            loadstring = hooked_load,
+            load = hooked_load,
+            string = { 
+                dump = hooked_dump, 
+                char = string.char, byte = string.byte, sub = string.sub, 
+                len = string.len, rep = string.rep, format = string.format,
+                find = string.find, gmatch = string.gmatch, gsub = string.gsub,
+                lower = string.lower, upper = string.upper, match = string.match,
+                reverse = string.reverse
+            },
+            math = math, table = table, coroutine = coroutine,
+            bit = _G.bit, bit32 = _G.bit,
+            pairs = pairs, ipairs = ipairs, next = next,
+            type = type, tostring = tostring, tonumber = tonumber,
+            pcall = pcall, xpcall = xpcall, select = select,
+            error = error, unpack = unpack or table.unpack,
+            assert = assert, setmetatable = setmetatable, getmetatable = getmetatable,
+            rawget = rawget, rawset = rawset, rawequal = rawequal,
+            
+            getgenv = function() return _G.sandbox_env end,
+            getrenv = function() return _G.sandbox_env end,
+            game = create_proxy("game"),
+            workspace = create_proxy("workspace"),
+            script = create_proxy("script"),
+            task = { wait = function() end, spawn = function(f) f() end, delay = function() end },
+            Instance = { new = function(n) return create_proxy("Instance") end }
         }
+        
         env._G = env
+        env.shared = env
+        _G.sandbox_env = env
         return env
         """
 
+        update_status("🛡️ Запуск перехвата (Safe Mode)...")
+
         try:
             env = lua.execute(sandbox_setup)
-            runner = lua.eval("function(code, env) return pcall(load(code, 'src', 'bt', env)) end")
             
-            update_status("🚀 Выполнение (эмуляция MoonSec)...")
-            success, err = runner(content, env)
+            # Запускаем защищенно
+            runner = lua.eval("""
+                function(code, env)
+                    local log = _G.log
+                    local f, err = load(code, "protected_script", "bt", env)
+                    if not f then return false, "Syntax Error: " .. tostring(err) end
+                    
+                    log("--- START EXECUTION ---")
+                    local status, res = pcall(f)
+                    log("--- END EXECUTION ---")
+                    
+                    return true, "Finished"
+                end
+            """)
             
-            chunks = lua.globals().CAPTURED_CHUNKS
+            runner(content, env)
+            
+            lua_chunks_table = lua.globals().CAPTURED_CHUNKS
             logs = list(lua.globals().LOGS)
-
-            if len(chunks) > 0:
-                update_status(f"💎 Найдено фрагментов: {len(chunks)}. Декомпиляция...")
+            captured_count = len(lua_chunks_table)
+            
+            if captured_count > 0:
+                update_status(f"🕵️ Поймано фрагментов: {captured_count}. Анализ...")
                 
-                # Ищем самый крупный фрагмент (обычно это само ядро скрипта)
-                best_chunk = None
+                best_chunk = b""
                 max_size = 0
-                for i in range(1, len(chunks) + 1):
-                    c = chunks[i]
-                    if c.size > max_size:
-                        max_size = c.size
-                        best_chunk = c.data
                 
-                return self._clean_code(best_chunk, logs, update_status)
+                # Логика выбора лучшего куска (самый большой байткод)
+                for i in range(1, captured_count + 1):
+                    try:
+                        item = lua_chunks_table[i]
+                        c_data = item.data
+                        c_size = item.size
+                        
+                        # Приоритет отдаем тем, что начинаются с Lua Bytecode Signature
+                        if c_data.startswith(b'\x1bLua') or c_data.startswith(b'\x1b\x4c'):
+                             if c_size > max_size:
+                                 max_size = c_size
+                                 best_chunk = c_data
+                        elif c_size > max_size and not best_chunk.startswith(b'\x1b'):
+                             max_size = c_size
+                             best_chunk = c_data
+                             
+                    except Exception as loop_err:
+                        logger.error(f"Ошибка чтения фрагмента {i}: {loop_err}")
+                        continue
+                
+                if best_chunk:
+                    return self._clean_code(best_chunk, logs, update_status)
+                else:
+                    return self._format_logs(logs, fail=True)
             else:
                 return self._format_logs(logs, fail=True)
 
         except Exception as e:
-            return f"-- [CRASH]: {str(e)}".encode('utf-8')
+            import traceback
+            traceback.print_exc()
+            return f"-- [ENGINE CRASH]: {str(e)}".encode('utf-8', errors='replace')
 
     def _check_java(self):
+        """Проверяет, установлена ли Java в системе"""
         try:
             subprocess.run(["java", "-version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             return True
-        except: return False
+        except FileNotFoundError:
+            logger.error("Java не найдена в системных путях (PATH)!")
+            return False
 
-    def _try_decompile(self, bytecode):
-        if not os.path.exists(self.unluac_path): return None
-        try:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".lua") as tmp:
-                tmp.write(bytecode)
-                path = tmp.name
+    def _beautify_lua(self, source_code):
+        """
+        Внутренний форматтер (Beautifier) для Lua.
+        Делает код читаемым после unluac.
+        """
+        # 1. Разделяем склеенные строки
+        # unluac любит делать так: local a=1 local b=2 return a
+        source_code = re.sub(r'(\s)(local|return|if|for|while|repeat|function)(\s)', r'\n\2 ', source_code)
+        source_code = source_code.replace(" then ", " then\n")
+        source_code = source_code.replace(" do ", " do\n")
+        source_code = source_code.replace(" end ", "\nend\n")
+        source_code = source_code.replace(" repeat ", "\nrepeat\n")
+        source_code = source_code.replace(" until ", "\nuntil ")
+        source_code = source_code.replace(";", ";\n")
+        
+        indent = 0
+        formatted = []
+        lines = source_code.splitlines()
+        
+        for line in lines:
+            line = line.strip()
+            if not line: continue
             
-            res = subprocess.run(["java", "-jar", self.unluac_path, path], capture_output=True)
-            os.remove(path)
+            # Уменьшаем отступ для закрывающих конструкций
+            if line.startswith("end") or line.startswith("until") or line.startswith("}") or line.startswith("]"):
+                indent = max(0, indent - 1)
+            elif line.startswith("else") or line.startswith("elseif"):
+                indent = max(0, indent - 1)
             
-            if res.returncode == 0: return res.stdout
-            return None
-        except: return None
+            formatted.append("    " * indent + line)
+            
+            # Увеличиваем отступ для открывающих
+            # (Простая эвристика, покрывает 90% случаев)
+            if (line.endswith("then") or line.endswith("do") or line.endswith("repeat") or 
+                line.endswith("{") or line.endswith("(") or 
+                "function" in line and not line.endswith("end")):
+                indent += 1
+            
+            if line.startswith("else") or line.startswith("elseif"):
+                indent += 1
+                
+        return "\n".join(formatted)
 
     def _clean_code(self, code_obj, logs, status_callback=None):
-        res = self._try_decompile(code_obj)
-        if res:
-            try:
-                text = res.decode('utf-8', 'ignore')
-                if status_callback: status_callback("💅 Форматирование кода...")
-                text = self._beautify_lua(text)
-                return f"-- [[ MoonSec V3 Unpacked & Beautified ]] --\n\n{text}".encode('utf-8')
-            except:
-                return b"-- [[ Decompiled but encoding error ]] --\n" + res
+        header = b"-- [[ DEOBFUSCATOR RESULT ]] --\n"
         
-        return b"-- [[ Could not decompile, returning raw captured data ]] --\n" + code_obj
+        # Проверяем сигнатуру Lua 5.1 байткода
+        if isinstance(code_obj, bytes) and (code_obj.startswith(b'\x1bLua') or code_obj.startswith(b'\x1b\x4c')):
+            if status_callback: status_callback("🧬 Обнаружен байткод! Запускаю Decompiler...")
+            
+            decompiled_source = self._try_decompile(code_obj)
+            
+            if decompiled_source:
+                try:
+                    # Пробуем декодировать в текст
+                    src_text = decompiled_source.decode('utf-8')
+                except UnicodeDecodeError:
+                    src_text = decompiled_source.decode('latin-1')
+
+                # ЗАПУСКАЕМ BEAUTIFIER
+                if status_callback: status_callback("💅 Улучшаю читаемость (Beautify)...")
+                try:
+                    beautiful_src = self._beautify_lua(src_text)
+                    header += b"-- [[ SUCCESS: Decompiled & Beautified ]] --\n"
+                    return header + beautiful_src.encode('utf-8')
+                except Exception as e:
+                    logger.error(f"Beautifier error: {e}")
+                    header += b"-- [[ WARNING: Decompiled, but Beautifier failed ]] --\n"
+                    return header + decompiled_source
+            else:
+                header += b"-- [[ WARNING: Decompilation failed. Returning Bytecode ]] --\n"
+                header += b"-- [[ TIP: Install Java and check unluac.jar ]] --\n\n"
+                return header + code_obj
+        
+        try:
+            txt = code_obj.decode('utf-8')
+            # Если это текст, тоже прогоним через форматтер, вдруг там минифицированный код
+            formatted_txt = self._beautify_lua(txt)
+            return header + b"-- [[ SOURCE CODE (Beautified) ]] --\n" + formatted_txt.encode('utf-8')
+        except:
+            return header + b"-- [[ BINARY DATA (Unknown) ]] --\n" + code_obj
+
+    def _try_decompile(self, bytecode):
+        """Пытается декомпилировать байткод через unluac.jar"""
+        if not os.path.exists(self.unluac_path):
+            logger.warning(f"❌ Файл unluac.jar не найден! Искал здесь: {self.unluac_path}")
+            return None
+
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".lua", mode='wb') as tmp_in:
+                tmp_in.write(bytecode)
+                tmp_in_path = tmp_in.name
+            
+            # Запускаем Java процесс
+            process = subprocess.run(
+                ["java", "-jar", self.unluac_path, tmp_in_path],
+                capture_output=True,
+                text=False
+            )
+            
+            os.remove(tmp_in_path)
+            
+            if process.returncode == 0 and len(process.stdout) > 0:
+                logger.info("✅ Успешная декомпиляция!")
+                return process.stdout
+            else:
+                err_msg = process.stderr.decode('utf-8', 'ignore')
+                logger.error(f"Unluac error: {err_msg}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Ошибка декомпиляции: {e}")
+            return None
 
     def _format_logs(self, logs, fail=False):
-        header = "-- [FAIL] Не удалось перехватить чистый код.\n" if fail else ""
-        log_str = "\n".join([f"-- {l}" for l in logs[-50:]])
-        return (header + "-- [[ LOGS ]] --\n" + log_str).encode('utf-8')
+        out = []
+        if fail:
+            out.append("-- [FAIL] Код не был перехвачен.")
+        
+        out.append("\n-- [[ EXECUTION LOGS ]] --")
+        for l in logs[-30:]: 
+            if isinstance(l, bytes):
+                out.append(f"-- {l.decode('utf-8', 'ignore')}")
+            else:
+                out.append(f"-- {str(l)}")
+        
+        return "\n".join(out).encode('utf-8', errors='replace')
