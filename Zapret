@@ -4,82 +4,102 @@ import re
 
 class DeobfuscatorEngine:
     def __init__(self):
-        # Инициализируем Lua с поддержкой основных библиотек
+        # Разрешаем loadstring и другие важные функции
         self.lua = LuaRuntime(unpack_returned_tuples=True)
 
     def process_text(self, content):
-        return self.run_advanced_sandbox(content)
+        return self.run_ultimate_sandbox(content)
 
-    def run_advanced_sandbox(self, code):
-        logs = ["-- [[ MoonSec V3 Maximum Deobfuscation Report ]] --\n"]
-        captured_payloads = []
-
-        # --- КОРНЕВАЯ ЛОГИКА ПЕСОЧНИЦЫ ---
-        setup_script = """
-        local logs = {}
+    def run_ultimate_sandbox(self, code):
+        logs = ["-- [[ MoonSec V3 Ultimate Deobfuscator ]] --\n"]
         
-        -- Функция для создания "шпионов" (чтобы не было nil-ошибок)
-        local function create_spy(name)
-            return setmetatable({}, {
-                __call = function() return create_spy(name .. "()") end,
-                __index = function(_, k) return create_spy(name .. "." .. tostring(k)) end
-            })
+        # Этот скрипт подготавливает "идеальную" среду внутри Lua
+        setup_script = """
+        -- 1. Возвращаем loadstring, если его нет
+        if not loadstring then
+            loadstring = function(c) 
+                return function() 
+                    -- Захватываем код, который MoonSec пытается исполнить
+                    _G.CAPTURED_RESULT = c
+                end 
+            end
         end
 
-        -- Эмуляция глобальной среды Roblox
-        local sandbox_env = {
-            print = function(...) table.insert(logs, "[PRINT]: " .. table.concat({...}, " ")) end,
-            warn = function(...) table.insert(logs, "[WARN]: " .. table.concat({...}, " ")) end,
-            loadstring = function(code) 
-                table.insert(logs, "[SUCCESS] CAPTURED PAYLOAD!")
-                _G.LAST_PAYLOAD = code -- Сохраняем код для Python
-                return function() end 
+        -- 2. Функция-шпион (Proxy), которая никогда не возвращает nil
+        local function create_proxy(name)
+            local proxy = {}
+            setmetatable(proxy, {
+                __index = function(t, k)
+                    return create_proxy(name .. "." .. tostring(k))
+                end,
+                __call = function(t, ...)
+                    return create_proxy(name .. "()")
+                end,
+                __tostring = function() return name end
+            })
+            return proxy
+        end
+
+        -- 3. Глобальная среда-ловушка
+        local sandbox = {
+            print = function(...) table.insert(_G.LOGS, "[PRINT]: " .. table.concat({...}, " ")) end,
+            warn = function(...) table.insert(_G.LOGS, "[WARN]: " .. table.concat({...}, " ")) end,
+            loadstring = function(c)
+                _G.CAPTURED_RESULT = c
+                table.insert(_G.LOGS, "[!] ВЗЛОМ: Попытка выполнить расшифрованный код.")
+                return function() end
             end,
-            game = create_spy("game"),
-            getgenv = function() return _G end,
-            script = create_spy("script"),
-            bit32 = bit32, -- Используем стандартный bit32
+            game = create_proxy("game"),
+            script = create_proxy("script"),
+            getgenv = function() return _G.sandbox_env end,
+            bit32 = bit32 or create_proxy("bit32"),
             string = string,
             math = math,
             table = table,
+            _G = {}
         }
 
-        -- Магия: делаем так, чтобы любая неизвестная переменная (как WhGUwnAR) 
-        -- автоматически становилась "шпионом" вместо nil
-        setmetatable(sandbox_env, {
-            __index = function(t, k) 
-                return create_spy(tostring(k)) 
-            end
+        -- Делаем так, чтобы любая неизвестная переменная возвращала прокси вместо nil
+        setmetatable(sandbox, {
+            __index = function(t, k) return create_proxy(tostring(k)) end
         })
 
-        _G.sandbox_env = sandbox_env
-        return logs
+        _G.LOGS = {}
+        _G.sandbox_env = sandbox
+        return sandbox
         """
-        
+
         try:
-            # 1. Загружаем среду
-            self.lua.execute(setup_script)
-            env = self.lua.globals().sandbox_env
+            # Инициализация среды
+            sandbox_env = self.lua.execute(setup_script)
+            
+            # В Lupa мы можем передать среду напрямую в функцию
+            # Используем pcall, чтобы если MoonSec упадет, мы все равно достали логи
+            execute_code = self.lua.eval("""
+                function(code, env)
+                    local f, err = loadstring(code)
+                    if not f then return false, err end
+                    setfenv(f, env)
+                    return pcall(f)
+                end
+            """)
 
-            # 2. Выполняем обфусцированный код в нашей среде
-            # Мы используем pcall (protected call), чтобы Lua не вылетела
-            safe_run = self.lua.eval("function(code, env) return pcall(setfenv(loadstring(code), env)) end")
-            success, error_msg = safe_run(code, env)
+            success, error_msg = execute_code(code, sandbox_env)
 
-            # 3. Собираем результаты
-            lua_logs = self.lua.eval("sandbox_env.logs")
+            # Собираем то, что успели записать
+            lua_logs = self.lua.globals().LOGS
             for i in range(len(lua_logs)):
                 logs.append(lua_logs[i+1])
 
-            # Проверяем, удалось ли перехватить финальный код
-            last_payload = self.lua.globals().LAST_PAYLOAD
-            if last_payload:
-                logs.append("\n" + "="*30 + " DEOBFUSCATED CODE " + "="*30)
-                logs.append(str(last_payload))
+            # ПРОВЕРКА ЗАХВАЧЕННОГО КОДА
+            captured = self.lua.globals().CAPTURED_RESULT
+            if captured:
+                logs.append("\n" + "="*20 + " РАСШИФРОВАННЫЙ ИСХОДНИК " + "="*20)
+                logs.append(str(captured))
             elif not success:
-                logs.append(f"\n[!] Ошибка выполнения: {error_msg}")
+                logs.append(f"\n[!] Ошибка в процессе деобфускации: {error_msg}")
 
         except Exception as e:
-            logs.append(f"\n[CRITICAL ERROR]: {e}")
+            logs.append(f"\n[CRITICAL PYTHON ERROR]: {e}")
 
         return "\n".join(logs)
