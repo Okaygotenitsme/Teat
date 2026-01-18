@@ -1,145 +1,53 @@
-local RunService = game:GetService("RunService")
-local Workspace = game:GetService("Workspace")
-local UnitAI = {}
+local DataStoreService = game:GetService("DataStoreService")
+local Players = game:GetService("Players")
 
-local function getStat(model, name, default)
-    local attr = model:GetAttribute(name)
-    return (attr ~= nil) and attr or default
+-- Создаем "хранилище" с названием GameData
+local gameDataStore = DataStoreService:GetDataStore("PlayerSave_v1")
+
+local function onPlayerAdded(player)
+	local ls = Instance.new("Folder")
+	ls.Name = "leaderstats"
+	ls.Parent = player
+
+	local wins = Instance.new("IntValue")
+	wins.Name = "Wins"
+	wins.Parent = ls
+
+	local cups = Instance.new("IntValue")
+	cups.Name = "Cups"
+	cups.Parent = ls
+
+	-- Пытаемся загрузить данные
+	local success, data = pcall(function()
+		return gameDataStore:GetAsync(player.UserId)
+	end)
+
+	if success and data then
+		wins.Value = data.Wins or 0
+		cups.Value = data.Cups or 0
+		print("Данные игрока " .. player.Name .. " загружены!")
+	else
+		print("Новый игрок или ошибка загрузки.")
+	end
 end
 
--- Улучшенная функция полоски здоровья
-local function createHealthBar(model, isTower)
-    local adornee = (model:IsA("Model") and model.PrimaryPart) or (model:IsA("BasePart") and model)
-    if not adornee then return end
-    
-    local bgui = Instance.new("BillboardGui", adornee)
-    bgui.Name = "HealthGui"
-    bgui.Size = UDim2.new(4, 0, 1, 0)
-    bgui.AlwaysOnTop = true
-    bgui.ExtentsOffset = Vector3.new(0, isTower and 5 or 3, 0)
-    
-    local label = Instance.new("TextLabel", bgui)
-    label.Size = UDim2.new(1, 0, 1, 0)
-    label.BackgroundTransparency = 1
-    label.TextColor3 = isTower and Color3.new(1, 0.8, 0) or Color3.new(1, 1, 1)
-    label.TextStrokeTransparency = 0
-    label.TextScaled = true
-    label.Text = tostring(model:GetAttribute("Health") or 0)
-    
-    model:GetAttributeChangedSignal("Health"):Connect(function()
-        local val = math.max(0, math.floor(model:GetAttribute("Health") or 0))
-        label.Text = tostring(val)
-    end)
+local function onPlayerRemoving(player)
+	-- Сохраняем данные при выходе
+	local dataToSave = {
+		Wins = player.leaderstats.Wins.Value,
+		Cups = player.leaderstats.Cups.Value
+	}
+	
+	local success, err = pcall(function()
+		gameDataStore:SetAsync(player.UserId, dataToSave)
+	end)
+	
+	if success then
+		print("Данные " .. player.Name .. " сохранены.")
+	else
+		warn("Ошибка сохранения: " .. err)
+	end
 end
 
--- Функции поиска целей (остаются прежними)
-local function findEnemies(selfModel, myOwner)
-    local out = {}
-    local spawned = Workspace:FindFirstChild("SpawnedUnits")
-    if not spawned then return out end
-    for _, m in ipairs(spawned:GetChildren()) do
-        if m ~= selfModel then
-            local o = m:FindFirstChild("Owner")
-            if o and o.Value ~= myOwner then table.insert(out, m) end
-        end
-    end
-    return out
-end
-
-local function findEnemyTowers(myOwner)
-    local out = {}
-    local towers = Workspace:FindFirstChild("Towers")
-    if not towers then return out end
-    for _, t in ipairs(towers:GetChildren()) do
-        local o = t:FindFirstChild("Owner")
-        if not o or o.Value ~= myOwner then table.insert(out, t) end
-    end
-    return out
-end
-
-local function nearest(model, list)
-    local myPart = (model:IsA("Model") and model.PrimaryPart) or model
-    if not myPart then return nil, math.huge end
-    local best, bestDist = nil, math.huge
-    for _, target in ipairs(list) do
-        local tPart = (target:IsA("Model") and target.PrimaryPart) or (target:IsA("BasePart") and target)
-        if tPart then
-            local d = (tPart.Position - myPart.Position).Magnitude
-            if d < bestDist then bestDist = d; best = target end
-        end
-    end
-    return best, bestDist
-end
-
-function UnitAI.Attach(unitModel)
-    local Damage = getStat(unitModel, "Damage", 10)
-    local Speed = getStat(unitModel, "Speed", 16)
-    local Range = getStat(unitModel, "Range", 8)
-    local AttackSpeed = getStat(unitModel, "AttackSpeed", 1)
-    
-    local oObj = unitModel:WaitForChild("Owner", 5)
-    local myOwner = oObj and oObj.Value or ""
-
-    createHealthBar(unitModel, false)
-    
-    -- КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: Создание Animator
-    local controller = unitModel:FindFirstChildOfClass("AnimationController") or Instance.new("AnimationController", unitModel)
-    local animator = controller:FindFirstChildOfClass("Animator") or Instance.new("Animator", controller)
-    
-    local wAnim = unitModel:FindFirstChild("WalkAnim")
-    local aAnim = unitModel:FindFirstChild("AttackAnim")
-    
-    local wTrack = (wAnim and animator) and animator:LoadAnimation(wAnim)
-    local aTrack = (aAnim and animator) and animator:LoadAnimation(aAnim)
-
-    local lastAttack = 0
-    local active = false
-    task.delay(getStat(unitModel, "SpawnSpeed", 0.5), function() active = true end)
-
-    local conn
-    conn = RunService.Heartbeat:Connect(function(dt)
-        if not unitModel.Parent or (unitModel:GetAttribute("Health") or 0) <= 0 then
-            conn:Disconnect()
-            unitModel:Destroy()
-            return
-        end
-        
-        local myPart = (unitModel:IsA("Model") and unitModel.PrimaryPart) or unitModel
-        if not active or not myPart then return end
-
-        local target, dist = nearest(unitModel, findEnemies(unitModel, myOwner))
-        if not target then target, dist = nearest(unitModel, findEnemyTowers(myOwner)) end
-
-        if target then
-            if dist <= Range then
-                -- Состояние: Атака
-                if wTrack and wTrack.IsPlaying then wTrack:Stop() end
-                
-                if tick() - lastAttack >= AttackSpeed then
-                    lastAttack = tick()
-                    if aTrack then aTrack:Play() end
-                    local th = target:GetAttribute("Health")
-                    if th then target:SetAttribute("Health", th - Damage) end
-                end
-            else
-                -- Состояние: Движение
-                if aTrack and aTrack.IsPlaying then aTrack:Stop() end
-                if wTrack and not wTrack.IsPlaying then wTrack:Play() end
-                
-                local tPart = (target:IsA("Model") and target.PrimaryPart) or target
-                local dir = (tPart.Position - myPart.Position) * Vector3.new(1,0,1)
-                
-                if dir.Magnitude > 0.1 then
-                    local moveDir = dir.Unit
-                    myPart.CFrame = CFrame.new(myPart.Position + moveDir * Speed * dt, myPart.Position + moveDir)
-                end
-            end
-        else
-            -- Состояние: Покой
-            if wTrack then wTrack:Stop() end
-            if aTrack then aTrack:Stop() end
-        end
-    end)
-end
-
-return UnitAI
+Players.PlayerAdded:Connect(onPlayerAdded)
+Players.PlayerRemoving:Connect(onPlayerRemoving)
