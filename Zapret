@@ -1,87 +1,91 @@
-# bot.py
-import asyncio
-import os
-import logging
-from aiogram import Bot, Dispatcher, F, types
-from aiogram.types import FSInputFile
-from aiogram.filters import Command
+import re
+import base64
 
-# Импортируем наш "Мозг" из соседнего файла
-from engine import DeobfuscatorEngine
+class DeobfuscatorEngine:
+    def process_text(self, content):
+        """Основной метод обработки"""
+        # Проверяем, какой перед нами обфускатор
+        if "MoonSec V3" in content:
+            return self.analyze_moonsec(content)
+        elif "Luraph Obfuscator" in content:
+            return self.analyze_luraph(content)
+        else:
+            return self.generic_analyze(content)
 
-# 1. НАСТРОЙКИ
-API_TOKEN = 'ТВОЙ_ТОКЕН_ОТ_BOTFATHER'
-
-# Включаем логирование, чтобы видеть ошибки в консоли
-logging.basicConfig(level=logging.INFO)
-
-# Инициализация бота
-bot = Bot(token=API_TOKEN)
-dp = Dispatcher()
-engine = DeobfuscatorEngine()
-
-# 2. ОБРАБОТЧИКИ (HANDLERS)
-
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message):
-    await message.answer(
-        "Привет! Я — Lua Deobfuscator Bot. 🤖\n\n"
-        "Отправь мне файл `.txt` или `.lua` с обфусцированным кодом (Luraph/MoonSec),\n"
-        "и я попробую его расшифровать."
-    )
-
-@dp.message(F.document)
-async def handle_document(message: types.Message):
-    file_id = message.document.file_id
-    file_name = message.document.file_name
-    
-    # Проверка расширения (по желанию)
-    if not (file_name.endswith('.txt') or file_name.endswith('.lua')):
-        await message.answer("⚠️ Пожалуйста, отправь файл с расширением .txt или .lua")
-        return
-
-    await message.answer("📥 Файл получен. Начинаю анализ...")
-
-    # Скачиваем файл
-    file = await bot.get_file(file_id)
-    file_path = file.file_path
-    
-    local_filename = f"temp_{file_name}"
-    await bot.download_file(file_path, local_filename)
-
-    try:
-        # --- ЗАПУСК ДЕОБФУСКАЦИИ ---
-        # Читаем скачанный файл
-        with open(local_filename, "r", encoding="utf-8", errors="ignore") as f:
-            content = f.read()
+    def analyze_moonsec(self, content):
+        """Специфичный разбор для MoonSec"""
+        report = ["-- [[ MoonSec V3 Analysis Report ]] --\n"]
         
-        # Обрабатываем через наш движок
-        deobfuscated_code = engine.process_text(content)
+        # 1. Извлечение зашифрованного байт-кода из gsub
+        # В MoonSec байт-код обычно в первой строке: (([[...]])):gsub(...)
+        bytecode_match = re.search(r"\(\[\[(.*?)\]\]\)", content, re.DOTALL)
+        if bytecode_match:
+            bytecode = bytecode_match.group(1)
+            report.append(f"-- [!] Обнаружен байт-код (Длина: {len(bytecode)})")
         
-        # Сохраняем результат в новый файл
-        result_filename = f"deobf_{file_name}"
-        with open(result_filename, "w", encoding="utf-8") as f:
-            f.write(deobfuscated_code)
-            
-        # Отправляем результат пользователю
-        output_file = FSInputFile(result_filename)
-        await message.answer_document(output_file, caption="✅ Готово! Вот твой код.")
+        # 2. Поиск констант
+        report.append("\n-- [[ Extracted Constants ]]")
+        report.append(self.extract_strings(content))
         
-        # Уборка мусора (удаляем временные файлы)
-        os.remove(result_filename)
+        # 3. Генерируем Hook-скрипт для Roblox
+        report.append("\n" + self.generate_roblox_hook())
+        
+        return "\n".join(report)
 
-    except Exception as e:
-        await message.answer(f"❌ Произошла ошибка при обработке: {e}")
-    
-    finally:
-        # Всегда удаляем исходный скачанный файл
-        if os.path.exists(local_filename):
-            os.remove(local_filename)
+    def analyze_luraph(self, content):
+        """Специфичный разбор для Luraph (как в sunjingwoo.txt)"""
+        report = ["-- [[ Luraph v14.3 Analysis Report ]] --\n"]
+        
+        # В Luraph данные часто лежат в переменных типа xp = ({...})
+        # Ищем большие таблицы с числами
+        tables = re.findall(r"\{(\d+(?:,\s*\d+){20,})\}", content)
+        if tables:
+            report.append(f"-- [!] Найдено таблиц с данными: {len(tables)}")
+        
+        report.append("\n-- [[ Extracted Constants ]]")
+        report.append(self.extract_strings(content))
+        report.append("\n" + self.generate_roblox_hook())
+        
+        return "\n".join(report)
 
-# 3. ЗАПУСК
-async def main():
-    print("Бот запущен...")
-    await dp.start_polling(bot)
+    def extract_strings(self, content):
+        """Поиск всех строковых литералов"""
+        # Ищем строки в кавычках и Lua-эскейп последовательности (\123)
+        strings = re.findall(r'"(.*?)"|\'(.*?)\'', content)
+        found = []
+        for s in strings:
+            val = s[0] or s[1]
+            if len(val) > 3 and not val.startswith("http"):
+                found.append(f"const = \"{val}\"")
+        return "\n".join(set(found[:50])) # Топ 50 уникальных строк
 
-if __name__ == "__main__":
-    asyncio.run(main())
+    def generate_roblox_hook(self):
+        """Создает код, который нужно запустить в Roblox Executor"""
+        return """
+-- [[ ROBLOX DYNAMIC HOOK ]] --
+-- Запусти этот код ПЕРЕД обфусцированным скриптом в своем исполнителе.
+
+local function hookLog(name, ...)
+    print("[HOOKED] " .. name .. " called with:", ...)
+end
+
+local old_getgenv = getgenv or function() return _G end
+local env = old_getgenv()
+
+-- Перехватываем стандартные функции, которые используют обфускаторы
+local targets = {"loadstring", "print", "warn", "setclipboard", "http_request"}
+
+for _, name in pairs(targets) do
+    if env[name] then
+        local old = env[name]
+        env[name] = function(...)
+            hookLog(name, ...)
+            return old(...)
+        end
+    end
+end
+print("--- [!] Hooking Active. Now run the obfuscated script! ---")
+"""
+
+    def generic_analyze(self, content):
+        return "-- [?] Тип не определен\n" + self.extract_strings(content)
