@@ -1,225 +1,31 @@
-import asyncio
-import logging
-import os
-import subprocess
-import time
-import aiohttp 
-from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import Command, CommandObject
-from aiogram.types import BufferedInputFile, InlineKeyboardMarkup, InlineKeyboardButton
+# engine.py
+import re
 
-# --- КОНФИГУРАЦИЯ ---
-API_TOKEN = 'ВСТАВЬ_СЮДА_СВОЙ_ТОКЕН'
+class DeobfuscatorEngine:
+    def __init__(self):
+        pass
 
-# Настройка логов
-logging.basicConfig(level=logging.INFO)
-bot = Bot(token=API_TOKEN)
-dp = Dispatcher()
-
-# Хранилище временных данных
-user_data = {} 
-
-# --- МОДУЛЬ BEAUTIFIER (Оставил Python-версию для кнопки Beautify) ---
-class LuaBeautifier:
-    def __init__(self, source):
-        self.source = source
-
-    def format(self):
-        code = self.source
-        lines = [line.strip() for line in code.splitlines() if line.strip()]
-        formatted = []
-        indent = 0
-        indent_str = "    "
+    def process_text(self, content):
+        """
+        Главная функция: принимает зашифрованный код, возвращает чистый.
+        """
+        # --- ЗДЕСЬ БУДЕТ НАСТОЯЩАЯ МАГИЯ ПОЗЖЕ ---
         
-        up_keywords = ['function', 'do', 'then', 'repeat', '{', '(', 'if']
-        down_keywords = ['end', 'until', '}', ')', 'elseif']
-        
+        # 1. Поиск сигнатур (MoonSec / Luraph)
+        if "MoonSec" in content:
+            result = "-- [Detected: MoonSec]\n" + self._dummy_deobfuscate(content)
+        elif "Luraph" in content:
+            result = "-- [Detected: Luraph]\n" + self._dummy_deobfuscate(content)
+        else:
+            result = "-- [Unknown Obfuscator]\n" + self._dummy_deobfuscate(content)
+            
+        return result
+
+    def _dummy_deobfuscate(self, content):
+        # Временная логика: просто добавляет комментарий, что файл обработан
+        # В будущем сюда вставим наш Deserializer
+        lines = content.split('\n')
+        new_lines = []
         for line in lines:
-            curr = line.lower()
-            if any(curr.startswith(k) for k in ['end', 'until', '}', ')', 'elseif', 'else']):
-                indent = max(0, indent - 1)
-            formatted.append((indent_str * indent) + line)
-            open_count = sum(1 for k in up_keywords if k in curr)
-            close_count = sum(1 for k in down_keywords if k in curr)
-            if not ('function' in curr and 'end' in curr):
-                if open_count > close_count: indent += 1
-                elif 'else' == curr: indent += 1
-        return "\n".join(formatted)
-
-# --- ОБРАБОТЧИКИ ---
-
-@dp.message(Command("start"))
-async def start(message: types.Message):
-    await message.answer(
-        "🛡 **Meloten Obfuscator (Rust Core)**\n\n"
-        "🔥 **Функции:**\n"
-        "1️⃣ Скинь `.lua` — Бот защитит его через Rust VM.\n"
-        "2️⃣ `/bypass <url>` — Обход ссылок.\n"
-        "3️⃣ `/loadstring <url>` — Генератор.\n\n"
-        "🚀 Используется движок: **Rust Native**",
-        parse_mode="Markdown"
-    )
-
-@dp.message(Command("help"))
-async def help_cmd(message: types.Message):
-    await message.answer(
-        "📚 **Помощь:**\n"
-        "Просто отправь мне `.lua` файл и нажми кнопку **Obfuscate**.\n"
-        "Я использую внешний компилятор на Rust для максимальной защиты.",
-        parse_mode="Markdown"
-    )
-
-@dp.message(Command("ping"))
-async def ping_handler(message: types.Message):
-    start_time = time.time()
-    msg = await message.answer("📶 **Pinging...**", parse_mode="Markdown")
-    end_time = time.time()
-    ping_ms = int((end_time - start_time) * 1000)
-    await msg.edit_text(f"📶 **Pong!**\nЗадержка: `{ping_ms}ms`", parse_mode="Markdown")
-
-@dp.message(Command("loadstring"))
-async def make_loadstring(message: types.Message, command: CommandObject):
-    if not command.args:
-        await message.answer("⚠️ Пример: `/loadstring https://...`")
-        return
-    url = command.args.strip()
-    content = f'loadstring(game:HttpGet("{url}"))()'
-    await message.answer(f"✅ **Loadstring:**\n\n`{content}`", parse_mode="Markdown")
-
-@dp.message(Command("bypass"))
-async def bypass_handler(message: types.Message, command: CommandObject):
-    if not command.args:
-        await message.answer("⚠️ Вставь ссылку! `/bypass https://...`")
-        return
-    url = command.args.strip()
-    wait_msg = await message.answer("⏳ **Bypassing...**")
-    
-    # Используем публичный API (пример)
-    api_url = f"https://api.bypass.vip/bypass?url={url}"
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(api_url) as response:
-                if response.status != 200:
-                    await wait_msg.edit_text("❌ API Error")
-                    return
-                data = await response.json()
-                result = data.get('result', '')
-                if result:
-                    await wait_msg.edit_text(f"✅ **Result:**\n`{result}`", parse_mode="Markdown")
-                else:
-                    await wait_msg.edit_text("❌ Не удалось обойти.")
-    except Exception as e:
-        await wait_msg.edit_text(f"❌ Error: {e}")
-
-# --- ЛОГИКА ФАЙЛОВ И ЗАПУСК RUST ---
-
-@dp.message(F.document)
-async def handle_files(message: types.Message):
-    if not message.document.file_name.endswith(('.lua', '.txt')):
-        return
-
-    # Скачиваем файл
-    file_id = message.document.file_id
-    file_info = await bot.get_file(file_id)
-    downloaded = await bot.download_file(file_info.file_path)
-    source_code = downloaded.read().decode('utf-8', errors='ignore')
-
-    # Сохраняем в память
-    user_id = message.from_user.id
-    user_data[user_id] = {
-        'source': source_code,
-        'filename': message.document.file_name
-    }
-
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⚡ Obfuscate (Rust VM)", callback_data="obfuscate")],
-        [InlineKeyboardButton(text="✨ Beautify", callback_data="beautify")]
-    ])
-
-    await message.answer("🔧 **Файл получен. Выберите действие:**", reply_markup=keyboard)
-
-@dp.callback_query(F.data.in_({"obfuscate", "beautify"}))
-async def callback_handler(query: types.CallbackQuery):
-    user_id = query.from_user.id
-    if user_id not in user_data:
-        await query.answer("❌ Файл устарел. Отправьте снова.")
-        return
-
-    data = user_data[user_id]
-    source = data['source']
-    fname = data['filename']
-    
-    # Удаляем кнопки и пишем статус
-    await query.message.edit_reply_markup(reply_markup=None)
-    status_msg = await query.message.answer("⏳ **Обработка...**")
-
-    try:
-        if query.data == 'obfuscate':
-            # --- RUST INTEGRATION START ---
-            
-            # 1. Определяем имя исполняемого файла
-            exe_name = "vm_obfuscator.exe" if os.name == 'nt' else "./vm_obfuscator"
-            
-            # Проверка наличия файла Rust
-            if not os.path.exists(exe_name) and not os.path.exists("vm_obfuscator"):
-                await status_msg.edit_text("❌ Ошибка сервера: файл обфускатора (Rust) не найден.")
-                return
-
-            # 2. Создаем временный файл для входа
-            input_temp = f"temp_{user_id}.lua"
-            with open(input_temp, "w", encoding="utf-8") as f:
-                f.write(source)
-
-            # 3. Запускаем Rust процесс
-            # Rust код создает файл Protected_<input_temp>
-            process = subprocess.run([exe_name, input_temp], capture_output=True, text=True)
-            
-            expected_output = f"Protected_{input_temp}"
-
-            if process.returncode == 0 and os.path.exists(expected_output):
-                # Читаем результат
-                with open(expected_output, "rb") as f:
-                    protected_bytes = f.read()
-                
-                # Отправляем
-                out_file = BufferedInputFile(protected_bytes, filename=f"Protected_{fname}")
-                await query.message.answer_document(out_file, caption="✅ **Obfuscated by Rust VM**\n🔒 Уровень: Максимальный")
-                
-                # Чистим выходной файл
-                os.remove(expected_output)
-            else:
-                # Если ошибка Rust
-                err_log = process.stderr or "Неизвестная ошибка"
-                await status_msg.edit_text(f"❌ Ошибка Rust Core:\n`{err_log}`", parse_mode="Markdown")
-
-            # Чистим входной файл
-            if os.path.exists(input_temp):
-                os.remove(input_temp)
-            
-            # --- RUST INTEGRATION END ---
-
-        elif query.data == 'beautify':
-            beauty = LuaBeautifier(source)
-            formatted = beauty.format()
-            out_file = BufferedInputFile(formatted.encode(), filename=f"Clean_{fname}")
-            await query.message.answer_document(out_file, caption="✨ **Beautified!**")
-
-        await status_msg.delete()
-
-    except Exception as e:
-        logging.error(f"Error: {e}")
-        await status_msg.edit_text(f"❌ Системная ошибка: {e}")
-    
-    # Очистка памяти пользователя
-    if user_id in user_data:
-        del user_data[user_id]
-
-async def main():
-    print("--- RUST-POWERED BOT STARTED ---")
-    await dp.start_polling(bot)
-
-if __name__ == '__main__':
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        print("Bot stopped")
+            new_lines.append(f"-- DEOBF: {line}") # Пример изменения
+        return "\n".join(new_lines)
