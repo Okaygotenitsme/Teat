@@ -4,28 +4,41 @@ import re
 
 class DeobfuscatorEngine:
     def __init__(self):
-        # Разрешаем loadstring и другие важные функции
+        # Инициализация Lua
         self.lua = LuaRuntime(unpack_returned_tuples=True)
 
     def process_text(self, content):
-        return self.run_ultimate_sandbox(content)
+        return self.run_maximum_deobfuscation(content)
 
-    def run_ultimate_sandbox(self, code):
-        logs = ["-- [[ MoonSec V3 Ultimate Deobfuscator ]] --\n"]
+    def run_maximum_deobfuscation(self, code):
+        logs = ["-- [[ MoonSec V3 Maximum Deobfuscation ]] --\n"]
         
-        # Этот скрипт подготавливает "идеальную" среду внутри Lua
+        # Скрипт подготовки среды (Полифил для setfenv + Прокси)
         setup_script = """
-        -- 1. Возвращаем loadstring, если его нет
-        if not loadstring then
-            loadstring = function(c) 
-                return function() 
-                    -- Захватываем код, который MoonSec пытается исполнить
-                    _G.CAPTURED_RESULT = c
-                end 
+        -- 1. Эмуляция setfenv/getfenv для Lua 5.2+ (через debug)
+        if not setfenv then
+            local function find_env(f)
+                local i = 1
+                while true do
+                    local name, val = debug.getupvalue(f, i)
+                    if name == "_ENV" or name == nil then return i, val end
+                    i = i + 1
+                end
+            end
+            
+            setfenv = function(f, t)
+                local i = find_env(f)
+                if i then debug.setupvalue(f, i, t) end
+                return f
+            end
+            
+            getfenv = function(f)
+                local _, val = find_env(f)
+                return val
             end
         end
 
-        -- 2. Функция-шпион (Proxy), которая никогда не возвращает nil
+        -- 2. Функция-шпион (Proxy) для обхода проверок
         local function create_proxy(name)
             local proxy = {}
             setmetatable(proxy, {
@@ -40,64 +53,72 @@ class DeobfuscatorEngine:
             return proxy
         end
 
-        -- 3. Глобальная среда-ловушка
+        -- 3. Настройка перехватов
+        _G.LOGS = {}
+        _G.CAPTURED_RESULT = nil
+
         local sandbox = {
             print = function(...) table.insert(_G.LOGS, "[PRINT]: " .. table.concat({...}, " ")) end,
-            warn = function(...) table.insert(_G.LOGS, "[WARN]: " .. table.concat({...}, " ")) end,
             loadstring = function(c)
                 _G.CAPTURED_RESULT = c
-                table.insert(_G.LOGS, "[!] ВЗЛОМ: Попытка выполнить расшифрованный код.")
-                return function() end
+                table.insert(_G.LOGS, "[!] ВЗЛОМ: Код захвачен через loadstring!")
+                return function() end -- Останавливаем выполнение после захвата
             end,
-            game = create_proxy("game"),
-            script = create_proxy("script"),
-            getgenv = function() return _G.sandbox_env end,
-            bit32 = bit32 or create_proxy("bit32"),
+            -- Базовые библиотеки
+            bit32 = bit32,
             string = string,
             math = math,
             table = table,
-            _G = {}
+            debug = debug,
+            pairs = pairs,
+            ipairs = ipairs,
+            next = next,
+            type = type,
+            unpack = unpack or table.unpack,
+            -- Roblox эмуляция
+            game = create_proxy("game"),
+            workspace = create_proxy("workspace"),
+            script = create_proxy("script"),
+            getgenv = function() return _G.sandbox_env end,
         }
 
-        -- Делаем так, чтобы любая неизвестная переменная возвращала прокси вместо nil
+        -- Делаем sandbox "всеядным"
         setmetatable(sandbox, {
             __index = function(t, k) return create_proxy(tostring(k)) end
         })
 
-        _G.LOGS = {}
         _G.sandbox_env = sandbox
         return sandbox
         """
 
         try:
-            # Инициализация среды
+            # Подготовка среды
             sandbox_env = self.lua.execute(setup_script)
             
-            # В Lupa мы можем передать среду напрямую в функцию
-            # Используем pcall, чтобы если MoonSec упадет, мы все равно достали логи
-            execute_code = self.lua.eval("""
+            # Функция запуска
+            # Мы используем loadstring на самом коде MoonSec
+            lua_code_runner = self.lua.eval("""
                 function(code, env)
-                    local f, err = loadstring(code)
-                    if not f then return false, err end
-                    setfenv(f, env)
+                    local f, err = load(code, "obfuscated_script", "t", env)
+                    if not f then return false, "Ошибка загрузки: " .. tostring(err) end
                     return pcall(f)
                 end
             """)
 
-            success, error_msg = execute_code(code, sandbox_env)
+            success, error_msg = lua_code_runner(code, sandbox_env)
 
-            # Собираем то, что успели записать
+            # Извлечение логов
             lua_logs = self.lua.globals().LOGS
             for i in range(len(lua_logs)):
                 logs.append(lua_logs[i+1])
 
-            # ПРОВЕРКА ЗАХВАЧЕННОГО КОДА
+            # Извлечение захваченного кода
             captured = self.lua.globals().CAPTURED_RESULT
             if captured:
-                logs.append("\n" + "="*20 + " РАСШИФРОВАННЫЙ ИСХОДНИК " + "="*20)
+                logs.append("\n" + "="*20 + " ДЕОБФУСЦИРОВАННЫЙ КОД " + "="*20)
                 logs.append(str(captured))
             elif not success:
-                logs.append(f"\n[!] Ошибка в процессе деобфускации: {error_msg}")
+                logs.append(f"\n[ОШИБКА ВЫПОЛНЕНИЯ]: {error_msg}")
 
         except Exception as e:
             logs.append(f"\n[CRITICAL PYTHON ERROR]: {e}")
