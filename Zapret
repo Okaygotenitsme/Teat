@@ -24,8 +24,10 @@ class DeobfuscatorEngine:
         update_status("🛠 Подготовка 'Черной дыры' (Universal Proxy)...")
         
         try:
-            # unpack_returned_tuples=True удобнее для возврата нескольких значений
-            lua = LuaRuntime(unpack_returned_tuples=True)
+            # === ГЛАВНОЕ ИСПРАВЛЕНИЕ ===
+            # encoding=None заставляет Lupa возвращать строки Lua как байты (bytes),
+            # а не пытаться декодировать их в UTF-8 (что вызывает краш).
+            lua = LuaRuntime(unpack_returned_tuples=True, encoding=None)
         except Exception as e:
             return f"-- [FATAL]: Ошибка старта Lua: {e}".encode('utf-8')
 
@@ -145,26 +147,30 @@ class DeobfuscatorEngine:
         """
 
         # --- ЭТАП 4: Исполнение ---
-        update_status("🚀 Запуск (режим Binary Safe)...")
+        update_status("🚀 Запуск (режим Raw Bytes)...")
         
         try:
+            # Загружаем среду
             env = lua.execute(sandbox_setup)
             
-            # --- ИЗМЕНЕНИЕ 1: Режим "bt" (binary/text) вместо "t" ---
+            # Функция запуска скрипта
             runner = lua.eval("""
                 function(code, env)
                     local log = _G.log or function() end
                     
-                    -- "bt" разрешает и текст, и скомпилированный байт-код
+                    -- Режим "bt" разрешает и текст, и скомпилированный байт-код
                     local f, err = load(code, "obf_script", "bt", env)
                     
-                    if not f then return false, "Syntax Error: " .. tostring(err) end
+                    if not f then 
+                        -- Возвращаем ошибку. Lua вернет это как байты благодаря encoding=None
+                        return false, "Syntax Error: " .. tostring(err) 
+                    end
                     
                     log("Запуск...")
                     local status, res = pcall(f)
                     
                     if not status then
-                        log("[ERROR] " .. tostring(res))
+                        log("[ERROR] Ошибка выполнения: " .. tostring(res))
                         return false, res
                     end
                     
@@ -178,13 +184,11 @@ class DeobfuscatorEngine:
                 end
             """)
             
-            # --- ИЗМЕНЕНИЕ 2: Декодируем байты в latin1 ---
-            # Это позволяет передать "сырые" байты в Lua как строку, не ломая UTF-8
-            safe_content = content.decode('latin1')
+            # ТЕПЕРЬ МЫ ПЕРЕДАЕМ БАЙТЫ НАПРЯМУЮ! 
+            # Не делаем .decode(), так как Lupa с encoding=None принимает байты как Lua-строку.
+            runner(content, env)
             
-            runner(safe_content, env)
-            
-            # Получаем результаты
+            # Забираем глобальные переменные
             captured = lua.globals().CAPTURED
             logs = list(lua.globals().LOGS)
             
@@ -192,43 +196,41 @@ class DeobfuscatorEngine:
                 update_status("✅ УСПЕХ! Данные перехвачены.")
                 return self._clean_code(captured)
             else:
-                log_str = "\n".join([str(l) for l in logs])
-                # Используем errors='replace', чтобы не крашилось на логах
+                # Безопасное форматирование логов, так как они теперь bytes
+                log_lines = []
+                for l in logs:
+                    if isinstance(l, bytes):
+                        # Пытаемся декодировать, если нет - ставим ???
+                        log_lines.append(l.decode('utf-8', errors='replace'))
+                    else:
+                        log_lines.append(str(l))
+                
+                log_str = "\n".join(log_lines)
                 return f"-- [FAIL] Не удалось перехватить код.\n-- ЛОГИ:\n{log_str}".encode('utf-8', errors='replace')
 
         except Exception as e:
-            # Ловим ошибки самого Python/Lupa
-            return f"-- [CRASH]: {e}".encode('utf-8', errors='replace')
+            return f"-- [CRASH]: {str(e)}".encode('utf-8', errors='replace')
 
     def _clean_code(self, code_obj):
-        """Обработка результата (байты или текст)"""
-        
+        """Обработка результата"""
         final_bytes = b""
         
-        # 1. Нормализация входных данных в bytes
-        if isinstance(code_obj, (bytes, bytearray)):
+        # Так как encoding=None, code_obj ВСЕГДА будет bytes или None
+        if isinstance(code_obj, bytes):
             final_bytes = code_obj
-        elif isinstance(code_obj, str):
-            # Если Lua вернула строку, пробуем вернуть её в байты через latin1
-            try:
-                final_bytes = code_obj.encode('latin1')
-            except:
-                final_bytes = code_obj.encode('utf-8', errors='replace')
         else:
-            final_bytes = str(code_obj).encode('utf-8')
+            # На случай странного поведения
+            final_bytes = str(code_obj).encode('utf-8', errors='replace')
 
-        # 2. Проверка сигнатуры Lua Bytecode (\x1bLua)
-        # Lua 5.1 signature: 1B 4C 75 61
+        # 1. Проверка сигнатуры Lua Bytecode (\x1bLua)
         if final_bytes.startswith(b'\x1bLua') or final_bytes.startswith(b'\x1b\x4c'):
             header = b"-- [[ BYTECODE CAPTURED ]] --\n-- Use 'unluac' to decompile.\n\n"
             return header + final_bytes
 
-        # 3. Если это текст (исходник)
+        # 2. Если это текст
         try:
-            # Пробуем декодировать как utf-8 текст
             text_code = final_bytes.decode('utf-8')
             formatted = text_code.replace(";", "\n")
             return f"-- [[ DEOBFUSCATED SOURCE ]] --\n\n{formatted}".encode('utf-8')
         except:
-            # Если не вышло, значит это какой-то бинарный мусор
             return b"-- [[ UNKNOWN BINARY DATA ]] --\n" + final_bytes
