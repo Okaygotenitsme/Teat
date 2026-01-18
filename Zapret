@@ -1,127 +1,351 @@
-import asyncio
-import os
+import lupa
+from lupa import LuaRuntime
 import logging
-import uuid
-from aiogram import Bot, Dispatcher, F, types
-from aiogram.types import FSInputFile
-from aiogram.filters import Command
+import subprocess
+import os
+import tempfile
+import re
+import binascii
 
-# Импортируем движок
-from engine import DeobfuscatorEngine
+# Логгер
+logger = logging.getLogger("DeobfuscatorEngine")
 
-# --- НАСТРОЙКИ ---
-API_TOKEN = 'ТВОЙ_ТОКЕН_СЮДА'
+class DeobfuscatorEngine:
+    def __init__(self):
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        self.unluac_path = os.path.join(base_dir, "unluac.jar")
+        logger.info(f"📁 Working Dir: {base_dir}")
 
-# Настройка логгера
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(message)s")
-logger = logging.getLogger("DeobfBot")
+    def identify_obfuscator(self, content):
+        """Определяет тип обфускатора по сигнатурам"""
+        if isinstance(content, bytes):
+            try: text = content.decode('utf-8', errors='ignore')
+            except: text = ""
+        else: text = content
 
-# Инициализация бота и диспетчера
-bot = Bot(token=API_TOKEN)
-dp = Dispatcher()
-engine = DeobfuscatorEngine()
+        signatures = {
+            "Meloten Secure Layer": "Meloten",
+            "MoonSec V3": "MoonSec",
+            "IronBrew": "IronBrew",
+            "Luraph": "Luraph",
+            "Prometheus": "Prometheus",
+            "PSU Obfuscator": "PSU",
+            "Boron": "Boron",
+            "Babel": "Babel",
+            "Roblox Bytecode": "\x1bLua",
+        }
 
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message):
-    await message.answer(
-        "🤖 **Roblox Deobfuscator V2**\n\n"
-        "Скинь `.lua` или `.txt` файл.\n"
-        "Я запущу его в безопасной среде и вытащу:\n"
-        "🔹 RemoteSpy (сетевые запросы)\n"
-        "🔹 Спрятанные строки\n"
-        "🔹 Глобальные переменные\n"
-        "🔹 Исходный код (если повезет)\n\n"
-        "🚀 Поддерживает MoonSec, IronBrew, Luraph.",
-        parse_mode="Markdown"
-    )
-
-@dp.message(F.document)
-async def handle_document(message: types.Message):
-    user_id = message.from_user.id
-    # Генерируем уникальное имя, чтобы файлы разных юзеров не путались
-    unique_id = uuid.uuid4().hex[:8]
-    file_name = message.document.file_name or "script.lua"
-    
-    input_path = f"temp_{user_id}_{unique_id}.lua"
-    output_path = f"Deobf_{unique_id}_{file_name}.txt"
-
-    status_msg = await message.answer("⏳ **Загрузка и анализ...**", parse_mode="Markdown")
-    
-    # Получаем текущий цикл событий (event loop)
-    loop = asyncio.get_running_loop()
-    
-    # Хак для обновления статуса из синхронного кода (движка) в асинхронный (бот)
-    last_status = [""]
-    
-    def sync_status_updater(text):
-        """Эта функция вызывается из engine.py"""
-        if text == last_status[0]: return
-        last_status[0] = text
+        detected = []
+        for name, sig in signatures.items():
+            if sig in text or (sig.encode() in content if isinstance(content, bytes) else False):
+                detected.append(name)
         
-        async def edit_coro():
+        if not detected:
+            if content.startswith(b'\x1bLua'): return "Generic Bytecode"
+            return "Unknown (Custom/Weak)"
+        
+        return ", ".join(detected)
+
+    def process(self, content, status_callback=None):
+        def update_status(msg):
+            if status_callback: status_callback(msg)
+            logger.info(f"[STATUS] {msg}")
+
+        # 1. Анализ типа
+        obfuscator_name = self.identify_obfuscator(content)
+        update_status(f"🔍 Обнаружено: {obfuscator_name}")
+
+        is_bytecode = content.startswith(b'\x1bLua')
+
+        # Если это чистый байт-код (не обертка), сразу кидаем в unluac
+        if is_bytecode and "MoonSec" not in obfuscator_name: # MoonSec нельзя сразу в unluac
+            update_status("⚡ Обнаружен чистый байт-код, декомпилируем...")
+            src = self._try_decompile(content)
+            if src:
+                return self._finalize_output(src, [], [], ["Direct Decompilation Success"], update_status)
+
+        if not self._check_java():
+            return b"-- [FATAL] Java is missing. Install Java to use unluac."
+
+        update_status("🧠 Запуск эмулятора (Spyware V3)...")
+
+        # --- НАСТРОЙКА LUA VM ---
+        try:
+            lua = LuaRuntime(unpack_returned_tuples=True, encoding=None)
+        except Exception as e:
+            return f"-- [FATAL] Lua start error: {e}".encode('utf-8')
+
+        # ПОЛИФИЛЛЫ (Bitwise + Compatibility)
+        # Meloten и другие часто используют bit32 или bit
+        bit_polyfill = """
+        local bit = {}
+        function bit.tobit(x) x = x % 4294967296; if x >= 2147483648 then x = x - 4294967296 end; return x end
+        function bit.bnot(x) return 4294967295 - x % 4294967296 end
+        local function bit_oper(a, b, oper)
+            local r, m, s = 0, 2^31, nil
+            repeat s,a,b = a+b+m, a%m, b%m; r,m = r + m*oper%(s-a-b), m/2 until m < 1
+            return r
+        end
+        function bit.band(a, b) return bit_oper(a, b, 4) end
+        function bit.bor(a, b)  return bit_oper(a, b, 1) end
+        function bit.bxor(a, b) return bit_oper(a, b, 3) end
+        function bit.lshift(a, b) return (a * 2^b) % 4294967296 end
+        function bit.rshift(a, b) return math.floor(a / 2^b) % 4294967296 end
+        package.loaded.bit = bit; _G.bit = bit; _G.bit32 = bit 
+        """
+
+        # СРЕДА-ШПИОН V3
+        sandbox_setup = bit_polyfill + """
+        _G.CAPTURED_CHUNKS = {}
+        _G.DETECTED_STRINGS = {}
+        _G.ACTION_LOG = {}
+        _G.FINAL_GLOBALS = {}
+        
+        local function log_action(msg) 
+            if #_G.ACTION_LOG < 300 then table.insert(_G.ACTION_LOG, msg) end
+        end
+
+        local function capture_str(s) 
+            if type(s) == "string" and #s > 3 then 
+                -- Игнорируем технический мусор
+                if not s:find("stack") and not s:find("upvalue") and not s:find("\27Lua") then
+                    _G.DETECTED_STRINGS[s] = true 
+                end
+            end 
+            return s
+        end
+
+        -- Хук на string.char (Часто используется для дешифровки)
+        local real_char = string.char
+        string.char = function(...)
+            local res = real_char(...)
+            capture_str(res)
+            return res
+        end
+        
+        -- Хук на load / loadstring (ГЛАВНАЯ ЦЕЛЬ)
+        -- Если скрипт распакует себя, он вызовет эту функцию
+        local real_load = load
+        local function hooked_load(chunk, name, mode, env)
+            if type(chunk) == "string" then
+                if (#chunk > 100) then
+                    log_action("HOOK: Перехвачен запуск кода (size: "..#chunk..")")
+                    table.insert(_G.CAPTURED_CHUNKS, {data = chunk, size = #chunk, type = "source"})
+                end
+            end
+            return real_load(chunk, name, mode, env)
+        end
+        
+        -- Lua 5.1/LuaJIT compatibility
+        _G.loadstring = hooked_load
+        _G.load = hooked_load
+
+        -- Хук на assert (Meloten использует его для проверки целостности)
+        local real_assert = assert
+        _G.assert = function(v, m) return v end 
+
+        -- Dumper
+        function _G.dump_globals()
+            local ignore = {string=1, math=1, table=1, bit=1, bit32=1, pairs=1, ipairs=1, next=1, _G=1, sandbox_env=1, package=1, os=1, io=1}
+            for k, v in pairs(getfenv()) do
+                if not ignore[k] then
+                    if type(v) == "string" or type(v) == "number" or type(v) == "boolean" then
+                        table.insert(_G.FINAL_GLOBALS, tostring(k) .. " = " .. tostring(v))
+                    end
+                end
+            end
+        end
+
+        -- ROBLOX MOCKS (Чтобы скрипт не падал сразу)
+        local env = {
+            loadstring = hooked_load, load = hooked_load,
+            print = function(...) local a={...}; log_action("Print: "..tostring(a[1])); end,
+            warn = function(...) local a={...}; log_action("Warn: "..tostring(a[1])); end,
+            wait = function() end,
+            string = string, math = math, table = table, 
+            bit = bit, bit32 = bit, pairs = pairs, ipairs = ipairs, next = next,
+            type = type, tostring = tostring, tonumber = tonumber, pcall = pcall, xpcall = xpcall,
+            select = select, unpack = unpack or table.unpack,
+            getfenv = getfenv, setfenv = setfenv,
+            
+            -- Фейковые игровые сервисы
+            game = { PlaceId = 123456, GetService = function(s, n) return { Name = n } end },
+            workspace = {},
+            script = { Name = "DeobfBot" },
+        }
+        env._G = env
+        _G.sandbox_env = env
+        return env
+        """
+
+        try:
+            update_status("🌪️ Исполнение скрипта (Tracing)...")
+            env = lua.execute(sandbox_setup)
+            
+            # Запускаем скрипт внутри pcall
+            runner = lua.eval("""
+                function(code, env)
+                    -- Устанавливаем среду для исполняемого кода
+                    local func
+                    if string.byte(code) == 27 then
+                        func = load(code) -- Байткод нельзя грузить с кастомной средой сразу в LuaJIT
+                    else
+                        func = load(code, "chunk", "t", env)
+                    end
+                    
+                    if not func then return false, "Load Error" end
+                    
+                    -- Пробуем подменить среду, если это возможно
+                    pcall(setfenv, func, env)
+                    
+                    -- Запуск
+                    local status, err = pcall(func)
+                    
+                    pcall(_G.dump_globals)
+                    return status, err
+                end
+            """)
+            
+            status, err = runner(content, env)
+            if not status:
+                update_status(f"⚠️ Скрипт завершился с ошибкой (это нормально): {err}")
+                action_log = list(lua.globals().ACTION_LOG)
+                action_log.append(f"Script Error: {err}")
+
+            # --- СБОР РЕЗУЛЬТАТОВ ---
+            strings_tbl = lua.globals().DETECTED_STRINGS
+            detected_strings = list(strings_tbl)
+            global_dump = list(lua.globals().FINAL_GLOBALS)
+            action_log = list(lua.globals().ACTION_LOG)
+            chunks = lua.globals().CAPTURED_CHUNKS
+            
+            # Поиск лучшего куска кода
+            target_code = content # По умолчанию исходник
+            decomp_msg = "No runtime chunks captured."
+            
+            if len(chunks) > 0:
+                # Если скрипт распаковал себя (IronBrew/MoonSec)
+                best_chunk = chunks[len(chunks)] # Берем последний (обычно это финал)
+                target_code = best_chunk.data
+                decomp_msg = "Captured runtime chunk (Self-Decryption detected)"
+                update_status("🎣 Перехвачен распакованный скрипт!")
+            
+            return self._finalize_output(target_code, detected_strings, global_dump, action_log, update_status)
+
+        except Exception as e:
+            logger.error(f"Crash: {e}")
+            return f"-- [CRASH ERROR]: {str(e)}".encode('utf-8')
+
+    def _check_java(self):
+        try:
+            subprocess.run(["java", "-version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return True
+        except: return False
+
+    def _clean_string(self, s):
+        if isinstance(s, bytes):
+            try: return s.decode('utf-8')
+            except: return str(s)
+        return str(s)
+
+    def _finalize_output(self, code_bytes, strings, globals_dump, logs, callback):
+        
+        is_binary = False
+        if isinstance(code_bytes, str): code_bytes = code_bytes.encode('utf-8')
+        if code_bytes.startswith(b'\x1bLua'): is_binary = True
+
+        decompiled_code = None
+
+        # Пытаемся декомпилировать только если это бинарник
+        if is_binary:
+            if callback: callback("🧬 Попытка декомпиляции (unluac)...")
+            decompiled_code = self._try_decompile(code_bytes)
+        else:
+            # Если это текст, просто красим его
             try:
-                if text:
-                    await status_msg.edit_text(f"⚙️ **Статус:** {text}", parse_mode="Markdown")
-            except: pass 
+                src = code_bytes.decode('utf-8')
+                decompiled_code = self._beautify_lua(src).encode('utf-8')
+            except: pass
+
+        final_text = ""
         
-        # Безопасно планируем обновление сообщения в главном потоке
-        if not loop.is_closed():
-            asyncio.run_coroutine_threadsafe(edit_coro(), loop)
+        # 1. СТРОКИ
+        final_text += "-- [[ DUMPED STRINGS ]] --\n\n"
+        sorted_strings = sorted(strings, key=lambda x: len(str(x)), reverse=True)
+        seen = set()
+        for s in sorted_strings:
+            clean = self._clean_string(s).replace('\n', ' ').replace('\r', '')
+            if clean not in seen and len(clean) > 3:
+                final_text += f'-- "{clean}"\n'
+                seen.add(clean)
 
-    try:
-        # 1. Скачиваем файл
-        file = await bot.get_file(message.document.file_id)
-        await bot.download_file(file.file_path, input_path)
+        # 2. ПЕРЕМЕННЫЕ
+        if globals_dump:
+            final_text += "\n" + "="*50 + "\n-- [[ GLOBALS ]] --\n"
+            for g in globals_dump:
+                final_text += f"-- {self._clean_string(g)}\n"
 
-        with open(input_path, "rb") as f: content = f.read()
-
-        # 2. ЗАПУСК ДВИЖКА (ИСПРАВЛЕНО)
-        # Используем run_in_executor - это "классический" и самый надежный способ
-        # запустить синхронную функцию в фоне без блокировки бота.
-        result_data = await asyncio.wait_for(
-            loop.run_in_executor(None, engine.process, content, sync_status_updater),
-            timeout=120.0 # Тайм-аут 2 минуты, чтобы бот не висел вечно
-        )
-
-        # 3. Сохраняем результат
-        with open(output_path, "wb") as f: f.write(result_data)
-        out_file = FSInputFile(output_path)
+        final_text += "\n" + "="*50 + "\n\n"
         
-        # Определяем описание (caption) для файла
-        caption = "✅ **Анализ завершен!**"
-        if b"DECOMPILED SOURCE" in result_data:
-            caption += "\n📜 Код частично декомпилирован."
-        elif b"REMOTE SPY" in result_data:
-            caption += "\n📡 Перехвачены сетевые пакеты (RemoteSpy)."
-        elif b"DUMPED STRINGS" in result_data:
-            caption += "\n🔎 Строки и данные извлечены."
+        # 3. КОД
+        if decompiled_code:
+            final_text += "-- [[ SOURCE CODE ]] --\n\n"
+            final_text += decompiled_code.decode('utf-8', errors='ignore')
+        else:
+            final_text += "-- [INFO] Could not decompile or script is already source.\n"
+            final_text += "-- Dumping raw content:\n\n"
+            try: final_text += code_bytes.decode('utf-8')
+            except: final_text += str(binascii.hexlify(code_bytes[:200]))
+
+        # 4. ЛОГИ
+        final_text += "\n\n" + "="*50 + "\n-- [[ LOGS ]] --\n"
+        for l in logs[-50:]: 
+            final_text += f"-- {self._clean_string(l)}\n"
+
+        return final_text.encode('utf-8')
+
+    def _try_decompile(self, bytecode):
+        if not os.path.exists(self.unluac_path): return None
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".lua", mode='wb') as tmp:
+                tmp.write(bytecode)
+                path = tmp.name
+            
+            res = subprocess.run(
+                ["java", "-jar", self.unluac_path, path], 
+                capture_output=True,
+                timeout=15
+            )
+            os.remove(path)
+            
+            if res.returncode == 0 and len(res.stdout) > 0: 
+                return res.stdout
+            return None
+        except: return None
+
+    def _beautify_lua(self, source_code):
+        # Простой бьютифайер для текстовых скриптов
+        source_code = re.sub(r'(\s)(local|return|if|for|while|repeat|function)(\s)', r'\n\2 ', source_code)
+        replacements = {
+            " then ": " then\n", " do ": " do\n", " end ": "\nend\n",
+            " repeat ": "\nrepeat\n", " until ": "\nuntil ", ";": ";\n"
+        }
+        for k, v in replacements.items():
+            source_code = source_code.replace(k, v)
         
-        await message.answer_document(out_file, caption=caption)
-
-    except asyncio.TimeoutError:
-        await status_msg.edit_text("❌ **Ошибка:** Скрипт выполнялся слишком долго (более 2 минут).")
-    except Exception as e:
-        logger.error(f"Error processing file: {e}")
-        try: await status_msg.edit_text("❌ Произошла внутренняя ошибка при обработке.")
-        except: pass
-    finally:
-        # Чистка мусора (удаляем временные файлы)
-        for p in [input_path, output_path]:
-            if os.path.exists(p):
-                try: os.remove(p)
-                except: pass
-
-async def main():
-    logger.info("Бот запускается...")
-    # Удаляем старые обновления, чтобы бот не отвечал на сообщения, пришедшие пока он спал
-    await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    try:
-        # Исправление для Windows (SelectorEventLoop), чтобы не было ошибок при закрытии
-        if os.name == 'nt':
-            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("Бот остановлен пользователем.")
+        lines = source_code.splitlines()
+        formatted = []
+        indent = 0
+        for line in lines:
+            line = line.strip()
+            if not line: continue
+            if line.startswith(("end", "until", "}", ")", "elseif", "else")):
+                indent = max(0, indent - 1)
+            formatted.append("\t" * indent + line)
+            if line.endswith(("then", "do", "repeat", "{", "(")) or \
+               ("function" in line and not line.endswith("end")):
+                indent += 1
+            if line.startswith(("if", "elseif", "else")):
+               pass # already handled indent logic above mostly, simple logic here
+            
+        return "\n".join(formatted)
