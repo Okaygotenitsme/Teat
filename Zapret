@@ -1,130 +1,234 @@
-import asyncio
-import os
+import lupa
+from lupa import LuaRuntime
+import re
 import logging
-from aiogram import Bot, Dispatcher, F, types
-from aiogram.types import FSInputFile
-from aiogram.filters import Command
-from aiogram.exceptions import TelegramBadRequest
+import asyncio
 
-# Импортируем наш обновленный движок
-from engine import DeobfuscatorEngine
+# Логгер
+logger = logging.getLogger("DeobfuscatorEngine")
 
-# --- НАСТРОЙКИ ---
-API_TOKEN = 'ВАШ_ТОКЕН_ОТ_BOTFATHER' 
+class DeobfuscatorEngine:
+    def __init__(self):
+        pass
 
-# Настройка логирования для отслеживания работы
-logging.basicConfig(
-    level=logging.INFO, 
-    format="%(asctime)s - [%(levelname)s] - %(message)s"
-)
-logger = logging.getLogger("DeobfBot")
+    def process(self, content, status_callback=None):
+        """
+        Главный метод обработки.
+        content: bytes (содержимое файла)
+        """
+        def update_status(msg):
+            if status_callback: status_callback(msg)
+            logger.info(f"[STATUS] {msg}")
 
-bot = Bot(token=API_TOKEN)
-dp = Dispatcher()
-engine = DeobfuscatorEngine()
-
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message):
-    """Приветственное сообщение"""
-    welcome_text = (
-        "🤖 **Roblox Deobfuscator Bot V2.5**\n\n"
-        "Я готов вскрывать Lua скрипты (IronBrew, MoonSec и др.).\n\n"
-        "✨ **Как это работает:**\n"
-        "1. Пришли мне файл `.lua` или `.txt` со скриптом.\n"
-        "2. Я запущу его в безопасной 'песочнице'.\n"
-        "3. Если скрипт попытается расшифровать себя, я перехвачу код!"
-    )
-    await message.answer(welcome_text, parse_mode="Markdown")
-
-@dp.message(F.document)
-async def handle_document(message: types.Message):
-    """Обработка присланного файла"""
-    user_id = message.from_user.id
-    file_name = message.document.file_name
-    
-    # Создаем уникальные имена для временных файлов
-    input_path = f"in_{user_id}_{file_name}"
-    output_path = f"out_{user_id}.lua"
-
-    status_msg = await message.answer("⏳ **Подготовка среды...**", parse_mode="Markdown")
-    
-    # Кэш для статуса, чтобы не спамить в Telegram API
-    last_status = [""]
-
-    def sync_status_updater(text):
-        """Обновление текста статуса из синхронного кода Engine"""
-        if text == last_status[0]: 
-            return
-        last_status[0] = text
+        # --- ЭТАП 1: Подготовка ---
+        update_status("🛠 Подготовка 'Черной дыры' (Universal Proxy)...")
         
-        async def edit_coro():
-            try:
-                await status_msg.edit_text(f"⚙️ **Процесс:**\n\n🔹 {text}", parse_mode="Markdown")
-            except TelegramBadRequest:
-                pass # Если сообщение не изменилось или удалено
-        
-        # Передаем выполнение в основной поток asyncio
-        asyncio.run_coroutine_threadsafe(edit_coro(), bot.loop)
-
-    try:
-        # 1. Скачиваем файл пользователя
-        file = await bot.get_file(message.document.file_id)
-        await bot.download_file(file.file_path, input_path)
-
-        # Читаем содержимое как байты (чтобы не было ошибок кодировки)
-        with open(input_path, "rb") as f:
-            content = f.read()
-
-        # 2. ЗАПУСК ДЕОБФУСКАЦИИ
-        # Запускаем в отдельном потоке, чтобы бот не "зависал"
         try:
-            result_data = await asyncio.wait_for(
-                asyncio.to_thread(engine.process, content, sync_status_updater),
-                timeout=120.0
-            )
-        except asyncio.TimeoutError:
-            result_data = b"-- [TIMEOUT] Script took more than 2 minutes to process."
-            await status_msg.edit_text("❌ **Ошибка:** Превышено время ожидания.")
+            # unpack_returned_tuples=True удобнее для возврата нескольких значений
+            lua = LuaRuntime(unpack_returned_tuples=True)
+        except Exception as e:
+            return f"-- [FATAL]: Ошибка старта Lua: {e}".encode('utf-8')
 
-        # 3. Сохранение и отправка результата
-        await status_msg.edit_text("✅ **Готово!** Формирую файл...")
+        # --- ЭТАП 2: Полифилл BIT ---
+        bit_polyfill = """
+        local bit = {}
+        function bit.tobit(x) x = x % 4294967296; if x >= 2147483648 then x = x - 4294967296 end; return x end
+        function bit.bnot(x) return 4294967295 - x % 4294967296 end
         
-        # Сохраняем результат как БАЙТЫ (wb)
-        with open(output_path, "wb") as f:
-            f.write(result_data)
+        local function bit_oper(a, b, oper)
+            local r, m, s = 0, 2^31, nil
+            repeat
+                s,a,b = a+b+m, a%m, b%m
+                r,m = r + m*oper%(s-a-b), m/2
+            until m < 1
+            return r
+        end
+        
+        function bit.band(a, b) return bit_oper(a, b, 4) end
+        function bit.bor(a, b)  return bit_oper(a, b, 1) end
+        function bit.bxor(a, b) return bit_oper(a, b, 3) end
+        function bit.lshift(a, b) return (a * 2^b) % 4294967296 end
+        function bit.rshift(a, b) return math.floor(a / 2^b) % 4294967296 end
+        
+        package.loaded.bit = bit
+        _G.bit = bit
+        _G.bit32 = bit
+        """
 
-        # Отправляем файл пользователю
-        final_file = FSInputFile(output_path, filename=f"Fixed_{file_name}")
-        await message.answer_document(
-            final_file, 
-            caption="✅ **Деобфускация завершена!**\n\n"
-                    "💡 *Если внутри байткод, используй декомпилятор unluac.*"
-        )
+        # --- ЭТАП 3: Создание Среды-Ловушки ---
+        update_status("🛡️ Активация режима эмуляции эксплойта...")
+        
+        sandbox_setup = bit_polyfill + """
+        _G.CAPTURED = nil
+        _G.LOGS = {}
+        
+        _G.log = function(msg) table.insert(_G.LOGS, msg) end
+        local log = _G.log
 
-    except Exception as e:
-        logger.error(f"Критическая ошибка: {e}")
-        await status_msg.edit_text(f"❌ **Произошла ошибка:**\n`{str(e)}`", parse_mode="Markdown")
+        -- [[ ХУК STRING.DUMP ]] --
+        local real_dump = string.dump
+        local function hooked_dump(func)
+            log("[HOOK] Попытка string.dump!")
+            local success, bytecode = pcall(real_dump, func)
+            if success and #bytecode > 50 then
+                 _G.CAPTURED = bytecode
+                 log("[!!!] ДЖЕКПОТ! string.dump перехвачен.")
+            end
+            return bytecode or ""
+        end
 
-    finally:
-        # Очистка: удаляем временные файлы
-        for p in [input_path, output_path]:
-            if os.path.exists(p):
-                try:
-                    os.remove(p)
-                except Exception as cleanup_err:
-                    logger.warning(f"Не удалось удалить файл {p}: {cleanup_err}")
+        -- [[ ХУК LOADSTRING ]] --
+        local function hooked_loadstring(chunk, chunkname)
+            if type(chunk) == "string" and #chunk > 50 then
+                _G.CAPTURED = chunk
+                log("[!!!] ДЖЕКПОТ! loadstring перехватил код.")
+                return function() end 
+            end
+            local f = load(chunk)
+            return f or function() end
+        end
 
-async def main():
-    # Важно: привязываем текущий цикл событий к объекту бота
-    bot.loop = asyncio.get_running_loop()
-    
-    # Удаляем старые обновления и запускаем бота
-    await bot.delete_webhook(drop_pending_updates=True)
-    logger.info("Бот запущен и готов к работе!")
-    await dp.start_polling(bot)
+        -- [[ PROXY ]] --
+        local function create_proxy(name)
+            local proxy = {}
+            local meta = {}
+            meta.__index = function(t, k) return create_proxy(name .. "." .. tostring(k)) end
+            meta.__call = function(t, ...) return create_proxy(name .. "()") end
+            meta.__tostring = function() return name end
+            meta.__len = function() return 0 end
+            meta.__add = function() return 0 end
+            meta.__sub = function() return 0 end
+            meta.__mul = function() return 0 end
+            meta.__div = function() return 1 end 
+            meta.__eq = function() return true end 
+            meta.__lt = function() return false end
+            meta.__metatable = "LOCKED"
+            setmetatable(proxy, meta)
+            return proxy
+        end
 
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("Бот остановлен.")
+        -- [[ ENV ]] --
+        local env = {
+            loadstring = hooked_loadstring,
+            load = hooked_loadstring,
+            string = string, math = math, table = table, 
+            bit = _G.bit, bit32 = _G.bit,
+            pairs = pairs, ipairs = ipairs, next = next,
+            type = type, tostring = tostring, tonumber = tonumber,
+            pcall = pcall, xpcall = xpcall, select = select,
+            error = error, unpack = unpack or table.unpack,
+            assert = assert,
+            
+            getgenv = function() return _G.sandbox_env end,
+            getrenv = function() return _G.sandbox_env end,
+            getreg = function() return {} end,
+            getgc = function() return {} end,
+            checkcaller = function() return true end,
+            
+            getfenv = function(f) return _G.sandbox_env end,
+            setfenv = function(f, t) return f end,
+            
+            game = create_proxy("game"),
+            workspace = create_proxy("workspace"),
+            script = create_proxy("script"),
+            task = { wait = function() end, spawn = function(f) f() end, delay = function(t, f) f() end },
+            Instance = { new = function(n) return create_proxy("Instance.new("..n..")") end }
+        }
+        
+        env.string.dump = hooked_dump
+        setmetatable(env, { __index = function(t, k) return create_proxy(tostring(k)) end })
+
+        env._G = env
+        env.shared = env
+        _G.sandbox_env = env
+        return env
+        """
+
+        # --- ЭТАП 4: Исполнение ---
+        update_status("🚀 Запуск (режим Binary Safe)...")
+        
+        try:
+            env = lua.execute(sandbox_setup)
+            
+            # Изменения здесь: добавлен режим "bt" (binary/text) вместо "t"
+            runner = lua.eval("""
+                function(code, env)
+                    local log = _G.log or function() end
+                    -- Используем "bt" чтобы разрешить и текст, и байткод
+                    local f, err = load(code, "obf_script", "bt", env)
+                    if not f then return false, "Syntax Error: " .. tostring(err) end
+                    
+                    log("Запуск...")
+                    local status, res = pcall(f)
+                    
+                    if not status then
+                        log("[ERROR] " .. tostring(res))
+                        return false, res
+                    end
+                    
+                    if type(res) == "function" then
+                        log("[HOOK] Return function detected")
+                        local s, dumped = pcall(string.dump, res)
+                        if s and #dumped > 50 then _G.CAPTURED = dumped end
+                    end
+                    
+                    return true, "Executed"
+                end
+            """)
+            
+            # === ИСПРАВЛЕНИЕ ===
+            # Преобразуем байты в latin1 строку.
+            # Lupa корректно передаст это в Lua как строку байтов (8-bit clean),
+            # избегая попыток декодировать это как UTF-8.
+            safe_content = content.decode('latin1')
+            
+            runner(safe_content, env)
+            
+            # ВАЖНО: Не используем str(), берем как есть
+            captured = lua.globals().CAPTURED
+            logs = list(lua.globals().LOGS)
+            
+            if captured:
+                update_status("✅ УСПЕХ! Данные перехвачены.")
+                return self._clean_code(captured)
+            else:
+                log_str = "\n".join([str(l) for l in logs])
+                # Если ничего не перехватили, возвращаем логи, но аккуратно кодируем
+                return f"-- [FAIL] Не удалось перехватить код.\n-- ЛОГИ:\n{log_str}".encode('utf-8', errors='replace')
+
+        except Exception as e:
+            # Ловим ошибки самого Python (например, Lupa error)
+            return f"-- [CRASH]: {e}".encode('utf-8', errors='replace')
+
+    def _clean_code(self, code_obj):
+        """Обработка результата (байты или текст)"""
+        
+        final_bytes = b""
+        
+        # 1. Нормализация входных данных в bytes
+        if isinstance(code_obj, (bytes, bytearray)):
+            final_bytes = code_obj
+        elif isinstance(code_obj, str):
+            # Если вернулась строка, пробуем latin1 (т.к. мы отправляли latin1)
+            try:
+                final_bytes = code_obj.encode('latin1')
+            except:
+                final_bytes = code_obj.encode('utf-8', errors='replace')
+        else:
+            final_bytes = str(code_obj).encode('utf-8')
+
+        # 2. Проверка сигнатуры Lua Bytecode (\x1bLua)
+        # Lua 5.1 signature: 1B 4C 75 61
+        if final_bytes.startswith(b'\x1bLua') or final_bytes.startswith(b'\x1b\x4c'):
+            header = b"-- [[ BYTECODE CAPTURED ]] --\n-- Use 'unluac' to decompile.\n\n"
+            return header + final_bytes
+
+        # 3. Если это текст (исходник)
+        try:
+            # Пробуем декодировать как utf-8 текст
+            text_code = final_bytes.decode('utf-8')
+            formatted = text_code.replace(";", "\n")
+            return f"-- [[ DEOBFUSCATED SOURCE ]] --\n\n{formatted}".encode('utf-8')
+        except:
+            # Если не вышло, значит это какой-то бинарный мусор или шифрованная строка
+            return b"-- [[ UNKNOWN BINARY DATA ]] --\n" + final_bytes
