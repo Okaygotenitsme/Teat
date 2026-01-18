@@ -1,130 +1,46 @@
-local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
-local UnitAI = {}
 
-local function getStat(model, name, default)
-	local attr = model:GetAttribute(name)
-	return (attr ~= nil) and attr or default
-end
+local towersFolder = Workspace:FindFirstChild("Towers") or Instance.new("Folder", Workspace)
+towersFolder.Name = "Towers"
 
-local function createHealthBar(model, isTower)
-	local adornee = model.PrimaryPart or (model:IsA("BasePart") and model)
+local function createTowerUI(obj)
+	local adornee = (obj:IsA("Model") and obj.PrimaryPart) or (obj:IsA("BasePart") and obj)
 	if not adornee then return end
 	
-	local bgui = Instance.new("BillboardGui")
+	local bgui = Instance.new("BillboardGui", adornee)
 	bgui.Name = "HealthGui"
-	bgui.Size = UDim2.new(4, 0, 1, 0)
+	bgui.Size = UDim2.new(6, 0, 1.5, 0)
 	bgui.AlwaysOnTop = true
-	bgui.ExtentsOffset = Vector3.new(0, isTower and 5 or 3, 0)
-	bgui.Parent = adornee
+	bgui.ExtentsOffset = Vector3.new(0, 6, 0)
 	
-	local label = Instance.new("TextLabel")
+	local label = Instance.new("TextLabel", bgui)
 	label.Size = UDim2.new(1, 0, 1, 0)
 	label.BackgroundTransparency = 1
-	label.TextColor3 = isTower and Color3.new(1, 0.8, 0) or Color3.new(1, 1, 1)
+	label.TextColor3 = Color3.new(1, 0.8, 0)
 	label.TextStrokeTransparency = 0
 	label.TextScaled = true
-	label.Text = tostring(model:GetAttribute("Health") or 0)
-	label.Parent = bgui
+	label.Text = tostring(obj:GetAttribute("Health") or 0)
 	
-	model:GetAttributeChangedSignal("Health"):Connect(function()
-		local val = math.max(0, math.floor(model:GetAttribute("Health") or 0))
-		label.Text = tostring(val)
+	obj:GetAttributeChangedSignal("Health"):Connect(function()
+		label.Text = tostring(math.max(0, math.floor(obj:GetAttribute("Health") or 0)))
 	end)
 end
 
-local function findEnemies(selfModel, myOwner)
-	local out = {}
-	local spawned = Workspace:FindFirstChild("SpawnedUnits")
-	if not spawned then return out end
-	for _, m in ipairs(spawned:GetChildren()) do
-		if m ~= selfModel and m:IsA("Model") and m.PrimaryPart then
-			local o = m:FindFirstChild("Owner")
-			if o and o.Value ~= myOwner then table.insert(out, m) end
+local function setupTower(name, health)
+	local tower = Workspace:FindFirstChild(name)
+	if tower then
+		tower.Parent = towersFolder
+		tower:SetAttribute("Health", health)
+		if tower:IsA("Model") and not tower.PrimaryPart then
+			tower.PrimaryPart = tower:FindFirstChildWhichIsA("BasePart")
 		end
+		createTowerUI(tower)
+		print("Башня настроена: " .. name)
+	else
+		warn("Башня не найдена в Workspace: " .. name)
 	end
-	return out
 end
 
-local function findEnemyTowers(myOwner)
-	local out = {}
-	local towers = Workspace:FindFirstChild("Towers")
-	if not towers then return out end
-	for _, t in ipairs(towers:GetChildren()) do
-		local hasPos = (t:IsA("Model") and t.PrimaryPart) or t:IsA("BasePart")
-		if hasPos then
-			local o = t:FindFirstChild("Owner")
-			if not o or o.Value ~= myOwner then table.insert(out, t) end
-		end
-	end
-	return out
-end
-
-local function nearest(model, list)
-	local myPart = model.PrimaryPart
-	if not myPart then return nil, math.huge end
-	local best, bestDist = nil, math.huge
-	for _, target in ipairs(list) do
-		local tPart = (target:IsA("Model") and target.PrimaryPart) or target
-		if tPart and tPart:IsA("BasePart") then
-			local d = (tPart.Position - myPart.Position).Magnitude
-			if d < bestDist then bestDist = d; best = target end
-		end
-	end
-	return best, bestDist
-end
-
-function UnitAI.Attach(unitModel)
-	local Damage = getStat(unitModel, "Damage", 10)
-	local Speed = getStat(unitModel, "Speed", 16)
-	local Range = getStat(unitModel, "Range", 8)
-	local AttackSpeed = getStat(unitModel, "AttackSpeed", 1)
-	local myOwner = ""
-	local oObj = unitModel:WaitForChild("Owner", 5)
-	if oObj then myOwner = oObj.Value end
-
-	createHealthBar(unitModel, false)
-
-	local animator = unitModel:FindFirstChildOfClass("AnimationController") or Instance.new("AnimationController", unitModel)
-	local wAnim = unitModel:FindFirstChild("WalkAnim")
-	local aAnim = unitModel:FindFirstChild("AttackAnim")
-	local wTrack = wAnim and animator:LoadAnimation(wAnim)
-	local aTrack = aAnim and animator:LoadAnimation(aAnim)
-
-	local lastAttack = 0
-	local active = false
-	task.delay(getStat(unitModel, "SpawnSpeed", 0.5), function() active = true end)
-
-	local conn
-	conn = RunService.Heartbeat:Connect(function(dt)
-		if not unitModel.Parent or (unitModel:GetAttribute("Health") or 0) <= 0 then
-			conn:Disconnect()
-			unitModel:Destroy()
-			return
-		end
-		if not active or not unitModel.PrimaryPart then return end
-
-		local target, dist = nearest(unitModel, findEnemies(unitModel, myOwner))
-		if not target then target, dist = nearest(unitModel, findEnemyTowers(myOwner)) end
-
-		if target then
-			if dist <= Range then
-				if wTrack and wTrack.IsPlaying then wTrack:Stop() end
-				if tick() - lastAttack >= AttackSpeed then
-					lastAttack = tick()
-					if aTrack then aTrack:Play() end
-					local th = target:GetAttribute("Health")
-					if th then target:SetAttribute("Health", th - Damage) end
-				end
-			else
-				if aTrack and aTrack.IsPlaying then aTrack:Stop() end
-				if wTrack and not wTrack.IsPlaying then wTrack:Play() end
-				local dir = (target.PrimaryPart or target).Position - unitModel.PrimaryPart.Position
-				local moveDir = (dir * Vector3.new(1, 0, 1)).Unit
-				unitModel.PrimaryPart.CFrame = CFrame.new(unitModel.PrimaryPart.Position + moveDir * Speed * dt, unitModel.PrimaryPart.Position + moveDir)
-			end
-		end
-	end)
-end
-
-return UnitAI
+setupTower("MainTower", 2000)
+setupTower("TowerLeft", 1000)
+setupTower("TowerRight", 1000)
