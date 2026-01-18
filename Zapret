@@ -1,46 +1,53 @@
-local Workspace = game:GetService("Workspace")
+local DataStoreService = game:GetService("DataStoreService")
+local Players = game:GetService("Players")
 
-local towersFolder = Workspace:FindFirstChild("Towers") or Instance.new("Folder", Workspace)
-towersFolder.Name = "Towers"
+-- Создаем "хранилище" с названием GameData
+local gameDataStore = DataStoreService:GetDataStore("PlayerSave_v1")
 
-local function createTowerUI(obj)
-	local adornee = (obj:IsA("Model") and obj.PrimaryPart) or (obj:IsA("BasePart") and obj)
-	if not adornee then return end
-	
-	local bgui = Instance.new("BillboardGui", adornee)
-	bgui.Name = "HealthGui"
-	bgui.Size = UDim2.new(6, 0, 1.5, 0)
-	bgui.AlwaysOnTop = true
-	bgui.ExtentsOffset = Vector3.new(0, 6, 0)
-	
-	local label = Instance.new("TextLabel", bgui)
-	label.Size = UDim2.new(1, 0, 1, 0)
-	label.BackgroundTransparency = 1
-	label.TextColor3 = Color3.new(1, 0.8, 0)
-	label.TextStrokeTransparency = 0
-	label.TextScaled = true
-	label.Text = tostring(obj:GetAttribute("Health") or 0)
-	
-	obj:GetAttributeChangedSignal("Health"):Connect(function()
-		label.Text = tostring(math.max(0, math.floor(obj:GetAttribute("Health") or 0)))
+local function onPlayerAdded(player)
+	local ls = Instance.new("Folder")
+	ls.Name = "leaderstats"
+	ls.Parent = player
+
+	local wins = Instance.new("IntValue")
+	wins.Name = "Wins"
+	wins.Parent = ls
+
+	local cups = Instance.new("IntValue")
+	cups.Name = "Cups"
+	cups.Parent = ls
+
+	-- Пытаемся загрузить данные
+	local success, data = pcall(function()
+		return gameDataStore:GetAsync(player.UserId)
 	end)
-end
 
-local function setupTower(name, health)
-	local tower = Workspace:FindFirstChild(name)
-	if tower then
-		tower.Parent = towersFolder
-		tower:SetAttribute("Health", health)
-		if tower:IsA("Model") and not tower.PrimaryPart then
-			tower.PrimaryPart = tower:FindFirstChildWhichIsA("BasePart")
-		end
-		createTowerUI(tower)
-		print("Башня настроена: " .. name)
+	if success and data then
+		wins.Value = data.Wins or 0
+		cups.Value = data.Cups or 0
+		print("Данные игрока " .. player.Name .. " загружены!")
 	else
-		warn("Башня не найдена в Workspace: " .. name)
+		print("Новый игрок или ошибка загрузки.")
 	end
 end
 
-setupTower("MainTower", 2000)
-setupTower("TowerLeft", 1000)
-setupTower("TowerRight", 1000)
+local function onPlayerRemoving(player)
+	-- Сохраняем данные при выходе
+	local dataToSave = {
+		Wins = player.leaderstats.Wins.Value,
+		Cups = player.leaderstats.Cups.Value
+	}
+	
+	local success, err = pcall(function()
+		gameDataStore:SetAsync(player.UserId, dataToSave)
+	end)
+	
+	if success then
+		print("Данные " .. player.Name .. " сохранены.")
+	else
+		warn("Ошибка сохранения: " .. err)
+	end
+end
+
+Players.PlayerAdded:Connect(onPlayerAdded)
+Players.PlayerRemoving:Connect(onPlayerRemoving)
