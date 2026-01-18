@@ -60,66 +60,75 @@ class LuaBeautifier:
 
         return "\n".join(formatted)
 
-# --- MELOTEN OBFUSCATOR V1 (NEW LEVEL) ---
-class MelotenObfuscatorV1:
+# --- MELOTEN OBFUSCATOR V2 (Eclipse) ---
+class MelotenObfuscatorV2:
     def __init__(self, source, layers=1):
         self.original_source = source
         self.layers = layers
         
     def _n(self):
-        length = random.randint(20, 40)
+        length = random.randint(25, 50)
         suffix = ''.join(random.choices("Il1O0", k=length))
         return f"_{suffix}"
 
     def _generate_names(self):
-        self.key = random.randint(100, 300)
+        self.key1 = random.randint(100, 300)
+        self.key2 = random.randint(50, 200)
         self.vars = {k: self._n() for k in [
             'vm', 'state', 'bytes', 'idx', 'xor', 'junk', 
-            'magic', 'dec', 'len', 'byte_val', 'table', 
+            'magic1', 'magic2', 'dec', 'len', 'byte_val', 'table', 
             'str_lib', 'bit_lib', 'cache', 'fake', 'env_check',
-            'bogus', 'integrity', 'hash'
+            'bogus', 'integrity', 'hash', 'decrypt', 'mutate'
         ]}
 
     def _junk_code(self):
         v1 = self.vars['junk']
         ops = [
-            f"local {v1} = (math.pi * 3) - (10 + math.random(1,5));",
-            f"if (os.clock() > math.huge) then while true do end end;", 
-            f"-- Hidden Opcode: 0x{random.randint(1000,9999):X}",
-            f"local _{random.randint(100,999)} = math.min(math.huge, math.random());",
-            f"local {v1}_str = string.rep('a', 1); if #({v1}_str) ~= 1 then return end;",
-            f"for _=1,1 do end; -- Filler",
-            f"assert(type({v1}) == 'nil', 'Tamper detected');",
+            f"local {v1} = math.sin(math.pi / 2) + math.cos(math.pi);",
+            f"if (math.huge < 0) then repeat until false end;", 
+            f"-- Shadow Opcode: 0x{random.randint(5000,9999):X}",
+            f"local _{random.randint(500,999)} = math.abs(-1);",
+            f"local {v1}_tbl = {{}}; if type({v1}_tbl) ~= 'table' then return end;",
+            f"for i=1,1 do local temp = i; end; -- Dummy loop",
+            f"assert(2 + 2 == 4, 'Arithmetic tamper detected');",
+            f"local {v1}_num = 42; {v1}_num = {v1}_num - 42;",
         ]
         return random.choice(ops)
 
     def _build_layer(self, source_code):
         self._generate_names()
         
-        b64_source = base64.b64encode(source_code.encode('utf-8')).decode('utf-8')
+        # Double encoding: first gzip-like, then base64
+        import zlib
+        compressed = zlib.compress(source_code.encode('utf-8'))
+        b64_source = base64.b64encode(compressed).decode('utf-8')
         
         raw_bytes = b64_source.encode('utf-8')
         enc_bytes = []
         for i, b in enumerate(raw_bytes):
-            mutator = (i * 5 + i % 2) % 255
-            dynamic_key = (self.key + mutator + (i // 2)) % 255
-            val = (b ^ dynamic_key)
+            mutator1 = (i * 7 + i % 3) % 255
+            mutator2 = (i * 5 + (i // 3)) % 255
+            dyn1 = (self.key1 + mutator1) % 255
+            dyn2 = (self.key2 + mutator2) % 255
+            val = b ^ dyn1 ^ dyn2
             enc_bytes.append(val)
         
         payload = "".join([f"\\{b}" for b in enc_bytes])
 
         # Random state values
-        init_state = random.randint(2000, 3000)
-        loop_state = random.randint(1500, 2000)
-        process_state = random.randint(1000, 1500)
+        init_state = random.randint(3000, 4000)
+        loop_state = random.randint(2000, 3000)
+        process_state = random.randint(1500, 2000)
+        decompress_state = random.randint(1000, 1500)
         end_state = random.randint(500, 1000)
-        bogus_state = random.randint(3000, 4000)
+        bogus_state = random.randint(4000, 5000)
 
-        vm_script = f"""--[[ Meloten Secure V1 (New Era) ]]
+        vm_script = f"""--[[ Meloten Secure V2 (Eclipse) ]]
 local {self.vars['str_lib']} = string
 local {self.vars['table']} = table
 local {self.vars['bit_lib']} = bit32 or require('bit')
 local {self.vars['env_check']} = getfenv or function() return _ENV end
+local zlib = require('zlib') or (function() return {decompress = function(data) return data end} end)()  -- Fallback if no zlib
 
 if {self.vars['env_check']}() ~= _G then while true do end end
 
@@ -136,23 +145,27 @@ local function {self.vars['xor']}(a, b)
 end
 
 local function {self.vars['integrity']}()
-    local h = 0
-    for i=1, #_VERSION do h = h + {self.vars['str_lib']}.byte(_VERSION, i) end
-    return h % 100 == {random.randint(0,99)} -- Fake check
+    return true  -- Fixed to always pass
 end
 
 if not {self.vars['integrity']}() then while true do end end
+
+local function {self.vars['mutate']}(val, idx)
+    return val + (idx % 5) - (idx % 3)
+end
 
 local function {self.vars['vm']}({self.vars['bytes']})
     local {self.vars['state']} = {init_state}
     local {self.vars['dec']} = {{}}
     local {self.vars['idx']} = 1
     local {self.vars['len']} = #{self.vars['bytes']}
-    local {self.vars['magic']} = {self.key}
+    local {self.vars['magic1']} = {self.key1}
+    local {self.vars['magic2']} = {self.key2}
     
     while {self.vars['state']} ~= 0 do
         {self._junk_code()}
-        {self._junk_code()} -- More junk
+        {self._junk_code()}
+        {self._junk_code()}  -- More junk for obfuscation
         
         if {self.vars['state']} == {init_state} then
             {self.vars['idx']} = 1
@@ -162,29 +175,37 @@ local function {self.vars['vm']}({self.vars['bytes']})
             if {self.vars['idx']} <= {self.vars['len']} then
                 {self.vars['state']} = {process_state}
             else
-                {self.vars['state']} = {end_state}
+                {self.vars['state']} = {decompress_state}
             end
         
         elseif {self.vars['state']} == {process_state} then
             local {self.vars['byte_val']} = {self.vars['str_lib']}.byte({self.vars['bytes']}, {self.vars['idx']})
-            local mut = (({self.vars['idx']} - 1) * 5 + ({self.vars['idx']} % 2)) % 255
-            local dyn = ({self.vars['magic']} + mut + (({self.vars['idx']} // 2))) % 255
-            local clean = {self.vars['xor']}({self.vars['byte_val']}, dyn)
+            local mut1 = (({self.vars['idx']} - 1) * 7 + (({self.vars['idx']} - 1) % 3)) % 255
+            local mut2 = (({self.vars['idx']} - 1) * 5 + (({self.vars['idx']} - 1) // 3)) % 255
+            local dyn1 = ({self.vars['magic1']} + mut1) % 255
+            local dyn2 = ({self.vars['magic2']} + mut2) % 255
+            local clean = {self.vars['xor']}({self.vars['xor']}({self.vars['byte_val']}, dyn1), dyn2)
+            clean = {self.vars['mutate']}(clean, {self.vars['idx']})
             
             {self.vars['table']}.insert({self.vars['dec']}, {self.vars['str_lib']}.char(clean))
             {self.vars['idx']} = {self.vars['idx']} + 1
             {self.vars['state']} = {loop_state}
             
+        elseif {self.vars['state']} == {decompress_state} then
+            local raw = {self.vars['table']}.concat({self.vars['dec']})
+            {self.vars['dec']} = zlib.decompress(raw)
+            {self.vars['state']} = {end_state}
+            
         elseif {self.vars['state']} == {bogus_state} then
-            while true do end -- Anti-deobf trap
-        
+            repeat until false  -- Anti-deobf trap
+            
         elseif {self.vars['state']} == {end_state} then
              if ({self.vars['str_lib']} ~= string) then {self.vars['state']} = {bogus_state} end
              {self.vars['state']} = 0
         end
     end
     
-    return {self.vars['table']}.concat({self.vars['dec']})
+    return {self.vars['dec']}
 end
 
 local _payload = "{payload}"
@@ -209,7 +230,7 @@ end
 local _final = _d(_res)
 local _load = loadstring or load
 if getgenv then getgenv().SCRIPT_OWNER = "Meloten" end
-if debug and debug.getinfo then while true do end end -- Basic anti-debug
+if debug and debug.getinfo and debug.getinfo(1).currentline ~= -1 then repeat until false end  -- Enhanced anti-debug
 pcall(_load(_final))
 """
         return vm_script
@@ -225,7 +246,7 @@ pcall(_load(_final))
 @dp.message(Command("start"))
 async def start(message: types.Message):
     await message.answer(
-        "🛡 **Meloten Obfuscator V1 (New Era)**\n\n"
+        "🛡 **Meloten Obfuscator V2 (Eclipse)**\n\n"
         "🔥 **Функции:**\n"
         "1️⃣ Скинь `.lua` — выбери действие (кнопки).\n"
         "2️⃣ `/bypass <url>` — обход ссылок (Linkvertise, Lootlabs).\n"
@@ -249,7 +270,7 @@ async def help_cmd(message: types.Message):
         "• `/loadstring <url>` — Создать Remote Loadstring\n\n"
         "🛠 **Работа с кодом:**\n"
         "• **Просто файл** — Отправь файл, выбери Obfuscate или Beautify (кнопки).\n\n"
-        "🛡 **Защита V1:**\n"
+        "🛡 **Защита V2:**\n"
         "• `/setlayers <1-3>` — Выбор силы защиты.\n",
         parse_mode="Markdown"
     )
@@ -275,7 +296,7 @@ async def set_layers(message: types.Message, command: CommandObject):
         n = int(command.args)
         if 1 <= n <= max_limit:
             user_settings[message.from_user.id] = n
-            await message.answer(f"✅ Установлено слоев защиты V1: **{n}**")
+            await message.answer(f"✅ Установлено слоев защиты V2: **{n}**")
         else:
             await message.answer(f"⚠️ Лимит: 1-{max_limit} слоя.")
     except:
@@ -300,12 +321,9 @@ async def bypass_handler(message: types.Message, command: CommandObject):
     url = command.args.strip()
     wait_msg = await message.answer("⏳ **Обхожу рекламу...**\n_Это может занять 5-10 секунд._", parse_mode="Markdown")
 
-    # Используем публичный API. Если этот перестанет работать, попробуй другие endpoints.
-    # Пример endpoint'а: https://api.bypass.vip/bypass?url=...
     api_url = f"https://api.bypass.vip/bypass?url={url}"
 
     try:
-        # Таймаут 20 секунд, чтобы бот не завис
         timeout = aiohttp.ClientTimeout(total=20)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(api_url) as response:
@@ -316,7 +334,6 @@ async def bypass_handler(message: types.Message, command: CommandObject):
 
                 data = await response.json()
                 
-                # Обработка ответа
                 status = data.get('status', '')
                 result = data.get('result', '')
 
@@ -336,6 +353,7 @@ async def bypass_handler(message: types.Message, command: CommandObject):
     except Exception as e:
         logging.error(e)
         await wait_msg.edit_text(f"❌ **Критическая ошибка:**\n`{e}`", parse_mode="Markdown")
+
 
 @dp.message(F.document)
 async def handle_files(message: types.Message):
@@ -376,11 +394,11 @@ async def callback_handler(query: types.CallbackQuery):
     try:
         if query.data == 'obfuscate':
             layers = user_settings.get(user_id, 1)
-            obf = MelotenObfuscatorV1(source, layers=layers)
+            obf = MelotenObfuscatorV2(source, layers=layers)
             protected_code = obf.build()
             
             out = BufferedInputFile(protected_code.encode(), filename=f"Protected_{fname}")
-            await query.message.answer_document(out, caption=f"✅ **Готово (V1 New Era)**\n🛡 Layers: {layers}")
+            await query.message.answer_document(out, caption=f"✅ **Готово (V2 Eclipse)**\n🛡 Layers: {layers}")
         
         elif query.data == 'beautify':
             beauty = LuaBeautifier(source)
@@ -400,7 +418,7 @@ async def callback_handler(query: types.CallbackQuery):
         await query.answer("❌ Ошибка обработки.")
 
 async def main():
-    print("--- MELOTEN V1 NEW ERA STARTED ---")
+    print("--- MELOTEN V2 ECLIPSE STARTED ---")
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
