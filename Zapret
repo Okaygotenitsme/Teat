@@ -1,9 +1,7 @@
 import lupa
 from lupa import LuaRuntime
 import logging
-import subprocess
 import os
-import tempfile
 import re
 
 logger = logging.getLogger("DeobfuscatorEngine")
@@ -11,309 +9,194 @@ logging.basicConfig(level=logging.INFO)
 
 class DeobfuscatorEngine:
     def __init__(self):
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        self.unluac_path = os.path.join(base_dir, "unluac.jar")
-        logger.info(f"📁 Working Dir: {base_dir}")
+        # Нам больше не нужен unluac для этого метода, мы генерируем код сами
+        pass
 
     def process(self, content, status_callback=None):
         def update_status(msg):
             if status_callback: status_callback(msg)
             logger.info(f"[STATUS] {msg}")
 
-        if not self._check_java():
-            return b"-- [FATAL] Java is missing. Install Java to decompile."
+        update_status("🧠 Запуск Реконструктора Кода (Trace Reconstruction)...")
 
-        update_status("🧠 Инициализация среды эмуляции Roblox...")
+        lua = LuaRuntime(unpack_returned_tuples=True, encoding=None)
 
-        try:
-            # unpack_returned_tuples=True важно для корректной работы lua
-            lua = LuaRuntime(unpack_returned_tuples=True, encoding=None)
-        except Exception as e:
-            return f"-- [FATAL] Lua start error: {e}".encode('utf-8')
-
-        # --- 1. Продвинутые Полифиллы (Bitwise + Roblox Math) ---
-        polyfill = """
-        -- BITWISE --
-        local bit = {}
-        function bit.tobit(x) x = x % 4294967296; if x >= 2147483648 then x = x - 4294967296 end; return x end
-        function bit.bnot(x) return 4294967295 - x % 4294967296 end
-        local function bit_oper(a, b, oper)
-            local r, m, s = 0, 2^31, nil
-            repeat s,a,b = a+b+m, a%m, b%m; r,m = r + m*oper%(s-a-b), m/2 until m < 1
-            return r
-        end
-        function bit.band(a, b) return bit_oper(a, b, 4) end
-        function bit.bor(a, b)  return bit_oper(a, b, 1) end
-        function bit.bxor(a, b) return bit_oper(a, b, 3) end
-        function bit.lshift(a, b) return (a * 2^b) % 4294967296 end
-        function bit.rshift(a, b) return math.floor(a / 2^b) % 4294967296 end
+        # --- СКРИПТ-ШПИОН ---
+        # Мы создаем среду, где КАЖДОЕ действие записывается в строку кода.
+        setup_script = """
+        _G.RECONSTRUCTED_LINES = {}
+        local start_time = os.clock()
         
-        -- ROBLOX TYPES MOCK (Минимальный набор) --
-        local function create_struct(name, args) return {__type=name, args=args} end
-        
-        Vector3 = { new = function(...) return create_struct("Vector3", {...}) end, zero = create_struct("Vector3", {0,0,0}) }
-        CFrame = { new = function(...) return create_struct("CFrame", {...}) end }
-        UDim2 = { new = function(...) return create_struct("UDim2", {...}) end }
-        Color3 = { new = function(...) return create_struct("Color3", {...}) end, fromRGB = function(...) return create_struct("Color3", {...}) end }
-        Instance = { new = function(cls) return _G.create_proxy(cls) end }
-        
-        package.loaded.bit = bit; _G.bit = bit; _G.bit32 = bit 
-        """
-
-        # --- 2. Среда-шпион (Spyware Environment) ---
-        sandbox_setup = polyfill + """
-        _G.CAPTURED_CHUNKS = {}
-        _G.DETECTED_STRINGS = {}
-        _G.ACTION_LOG = {}
-        
-        -- Функция логирования
-        local function log_action(msg) 
-            if #_G.ACTION_LOG < 500 then -- Лимит логов, чтобы не забивать память
-                table.insert(_G.ACTION_LOG, msg) 
+        -- Функция записи найденной строки кода
+        local function emit(code_line)
+            -- Игнорируем спам (опционально)
+            if code_line:find("GetService") or code_line:find("http") or #code_line < 200 then
+                 table.insert(_G.RECONSTRUCTED_LINES, code_line)
             end
         end
 
-        local function capture_str(s) 
-            if type(s) == "string" and #s > 3 then 
-                -- Фильтр мусора: игнорируем системные сообщения Lua
-                if not s:find("stack begin") and not s:find("upvalue") then
-                    _G.DETECTED_STRINGS[s] = true 
-                end
-            end 
-            return s
-        end
-
-        -- Хук на string.char (основной источник строк в IronBrew)
-        local real_char = string.char
-        string.char = function(...)
-            local res = real_char(...)
-            capture_str(res)
-            return res
-        end
+        -- Генератор имен переменных (v1, v2, v3...)
+        local var_counter = 0
+        local obj_cache = {} -- Чтобы помнить, что game.Workspace это тот же объект
         
-        -- Хук на table.concat
-        local real_concat = table.concat
-        table.concat = function(t, sep, i, j)
-            local res = real_concat(t, sep, i, j)
-            capture_str(res)
-            return res
+        local function get_var_name(obj)
+            if obj_cache[obj] then return obj_cache[obj] end
+            var_counter = var_counter + 1
+            local name = "v"..var_counter
+            obj_cache[obj] = name
+            return name
         end
 
-        -- Хук на load/loadstring (перехват VM)
-        local real_load = load
-        local function hooked_load(chunk, name, mode, env)
-            if type(chunk) == "string" and (#chunk > 100 or chunk:sub(1,4) == "\27Lua") then
-                table.insert(_G.CAPTURED_CHUNKS, {data = chunk, size = #chunk})
-            end
-            -- Подменяем окружение на наше, чтобы вложенные скрипты тоже попались
-            return real_load(chunk, name, mode, _G.sandbox_env) 
-        end
-
-        -- PROXY (Фейковый Roblox API)
-        function _G.create_proxy(name)
+        -- ГЛАВНЫЙ PROXY
+        -- Это "фейковый" объект, который притворяется любой частью Roblox
+        local function create_proxy(path_name, real_ref)
             local proxy = {}
             local meta = {}
             
+            -- Сохраняем путь (например "game.Players")
+            local my_path = path_name 
+
             meta.__index = function(t, k)
-                local key = tostring(k)
-                -- log_action("Read: " .. name .. "." .. key) -- Слишком много спама, отключаем
+                local key_str = tostring(k)
+                local next_path = my_path .. "." .. key_str
                 
-                -- Стандартные ответы, чтобы скрипт "верил", что он в игре
-                if key == "PlaceId" then return 1818 end
-                if key == "UserId" then return 12345 end
-                if key == "Name" then return "Player1" end
-                if key == "LocalPlayer" then return _G.create_proxy("game.Players.LocalPlayer") end
-                if key == "Parent" then return _G.create_proxy(name .. ".Parent") end
-                
-                -- Возвращаем функцию, если скрипт пытается вызвать метод (например :FindFirstChild)
-                return function(...) 
-                    return _G.create_proxy(name .. ":" .. key) 
+                -- Если скрипт просит сервис, запишем это красиво
+                if key_str == "GetService" then
+                    return function(self, service_name)
+                        local call_str = 'game:GetService("' .. tostring(service_name) .. '")'
+                        emit("-- Access Service: " .. service_name)
+                        return create_proxy(call_str)
+                    end
                 end
+
+                -- Если это просто чтение свойства
+                -- emit(next_path) -- Можно раскомментировать для детального лога
+                
+                return create_proxy(next_path)
             end
-            
+
             meta.__newindex = function(t, k, v)
-                -- Ловим установку значений (например, изменение GUI)
-                log_action("SET: " .. name .. "." .. tostring(k) .. " = " .. tostring(v))
+                -- Скрипт пытается что-то изменить! Это 100% полезный код.
+                local val_str = tostring(v)
+                if type(v) == "string" then val_str = '"' .. val_str .. '"' end
+                
+                local line = my_path .. "." .. tostring(k) .. " = " .. val_str
+                emit(line)
             end
-            
+
             meta.__call = function(t, ...)
-                return _G.create_proxy(name .. "()")
+                local args = {...}
+                local arg_strs = {}
+                for i, arg in ipairs(args) do
+                    if type(arg) == "string" then
+                        table.insert(arg_strs, '"' .. arg .. '"')
+                    elseif type(arg) == "table" then
+                        table.insert(arg_strs, "tbl_" .. tostring(i)) -- Упрощение для таблиц
+                    else
+                        table.insert(arg_strs, tostring(arg))
+                    end
+                end
+                
+                -- Формируем строку вызова функции
+                local line = my_path .. "(" .. table.concat(arg_strs, ", ") .. ")"
+                emit(line)
+                
+                return create_proxy(line) -- Возвращаем результат как новый прокси
             end
             
-            meta.__tostring = function() return name end
+            meta.__tostring = function() return my_path end
+            
             setmetatable(proxy, meta)
             return proxy
         end
 
+        -- --- ОКРУЖЕНИЕ ---
         local env = {
-            loadstring = hooked_load, load = hooked_load,
-            print = function(...) local args={...}; log_action("SCRIPT PRINT: "..tostring(args[1])); end,
-            warn = function(...) local args={...}; log_action("SCRIPT WARN: "..tostring(args[1])); end,
-            error = function(...) log_action("SCRIPT ERROR: "..tostring((...))); end,
+            -- Базовые Lua функции
+            pairs = pairs, ipairs = ipairs, next = next, type = type, 
+            tostring = tostring, tonumber = tonumber, pcall = pcall, xpcall = xpcall,
+            error = error, select = select,
             
-            string = string, math = math, table = table, 
-            bit = bit, bit32 = bit, pairs = pairs, ipairs = ipairs, next = next,
-            type = type, tostring = tostring, tonumber = tonumber, pcall = pcall, xpcall = xpcall,
-            select = select, unpack = unpack or table.unpack,
-            setmetatable = setmetatable, getmetatable = getmetatable,
+            -- Фейковая стандартная библиотека
+            math = { random = function(...) emit("math.random(...)"); return 1 end, floor = math.floor, ceil = math.ceil },
+            string = string,
+            table = table,
             
-            -- Глобали Roblox
-            game = _G.create_proxy("game"),
-            workspace = _G.create_proxy("workspace"),
-            script = _G.create_proxy("script"),
+            -- ГЛАВНЫЕ ТОЧКИ ВХОДА ROBLOX
+            game = create_proxy("game"),
+            workspace = create_proxy("workspace"),
+            script = create_proxy("script"),
             
-            -- Эксплойт окружение (часто проверяется скриптами)
-            getgenv = function() return {} end,
-            syn = { request = function() return {Body="OK"} end },
-            request = function() return {Body="OK"} end,
+            -- EXPLOIT ФУНКЦИИ (Часто используются в скриптах)
+            getgenv = function() return env end,
+            checkcaller = function() return true end,
             
-            Vector3 = Vector3, CFrame = CFrame, UDim2 = UDim2, Color3 = Color3, Instance = Instance
+            -- Вывод в консоль тоже запишем как код
+            print = function(...) 
+                local args = {...}
+                emit('print("' .. tostring(args[1]) .. '")') 
+            end,
+            warn = function(...)
+                local args = {...}
+                emit('warn("' .. tostring(args[1]) .. '")') 
+            end
         }
+        
+        -- Битовые операции (нужны для запуска VM)
+        local bit = {}
+        function bit.band(a, b) return a end -- Заглушки, так как нам важен поток, а не математика
+        function bit.rshift(a, b) return a end
+        function bit.bxor(a, b) return a end
+        env.bit = bit
+        env.bit32 = bit
+
         env._G = env
-        _G.sandbox_env = env
         return env
         """
 
         try:
-            update_status("🌪️ Трейсинг (Исполнение)...")
-            env = lua.execute(sandbox_setup)
+            env = lua.execute(setup_script)
             
-            # Запускаем pcall
+            # Обертка для запуска с игнорированием ошибок
             runner = lua.eval("""
                 function(code, env)
-                    local f, err = load(code, "chunk", "bt", env)
-                    if not f then return "LOAD ERR: "..tostring(err) end
-                    
-                    -- Изолируем выполнение
-                    local status, res = pcall(f)
-                    return status
+                    local f = load(code, "chunk", "bt", env)
+                    if not f then return end
+                    pcall(f) -- Запускаем и ловим все действия
                 end
             """)
+            
+            update_status("🌪️ Трейсинг потока исполнения...")
             runner(content, env)
-
-            # --- СБОР ---
-            strings_tbl = lua.globals().DETECTED_STRINGS
-            detected_strings = list(strings_tbl)
-            action_log = list(lua.globals().ACTION_LOG)
-            chunks = lua.globals().CAPTURED_CHUNKS
             
-            best_chunk = None
-            max_size = 0
-            if len(chunks) > 0:
-                for i in range(1, len(chunks) + 1):
-                    c = chunks[i]
-                    if c.size > max_size:
-                        max_size = c.size
-                        best_chunk = c.data
+            # Забираем реконструированный код
+            lines_table = list(lua.globals().RECONSTRUCTED_LINES)
             
-            target_code = best_chunk if best_chunk else content
-            return self._finalize_output(target_code, detected_strings, action_log, update_status)
+            return self._finalize(lines_table, update_status)
 
         except Exception as e:
-            return f"-- [CRASH]: {str(e)}".encode('utf-8')
+            return f"-- [CRASH]: {e}".encode('utf-8')
 
-    def _check_java(self):
-        try:
-            subprocess.run(["java", "-version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            return True
-        except: return False
-
-    def _finalize_output(self, code_bytes, strings, logs, callback):
-        if callback: callback("📝 Анализ найденных данных...")
+    def _finalize(self, lines, callback):
+        if callback: callback("📝 Сборка чистого исходника...")
         
-        final_text = ""
+        final_code = "-- [[ RECONSTRUCTED SOURCE CODE ]] --\n"
+        final_code += "-- Generated by Dynamic Tracing Engine\n"
+        final_code += f"-- Total instructions captured: {len(lines)}\n\n"
         
-        # --- КАТЕГОРИЗАЦИЯ СТРОК (RegEx Magic) ---
-        assets = []
-        urls = []
-        webhooks = []
-        others = []
-        
-        for s in strings:
-            s_str = str(s).replace('\n', ' ').replace('\r', '')
-            if "rbxassetid" in s_str or re.search(r'\d{8,}', s_str): # ID обычно длинные
-                assets.append(s_str)
-            elif "http" in s_str:
-                if "discord" in s_str: webhooks.append(s_str)
-                else: urls.append(s_str)
-            else:
-                if len(s_str) > 4: others.append(s_str)
-
-        final_text += "-- [[ 🕵️ DEOBFUSCATOR REPORT ]] --\n\n"
-        
-        if webhooks:
-            final_text += "-- [🚨 WEBHOOKS FOUND] --\n"
-            for w in webhooks: final_text += f"-- {w}\n"
-            final_text += "\n"
-            
-        if assets:
-            final_text += "-- [📦 ASSETS / IDs] --\n"
-            for a in assets: final_text += f"-- {a}\n"
-            final_text += "\n"
-
-        final_text += "-- [📝 OTHER STRINGS] --\n"
-        for o in others: final_text += f"-- {o}\n"
-        final_text += "\n" + "="*50 + "\n\n"
-        
-        # --- DECOMPILATION ---
-        if callback: callback("🧬 Декомпиляция...")
-        decompiled = self._try_decompile(code_bytes)
-        
-        if decompiled:
-            try:
-                src = decompiled.decode('utf-8', 'ignore')
-            except:
-                src = decompiled.decode('latin-1', 'ignore')
-            src = self._beautify_lua(src)
-            final_text += src
-        else:
-            final_text += "-- [WARNING] Decompilation failed. Here is the raw dump.\n"
-            final_text += str(code_bytes)
-
-        # --- LOGS ---
-        final_text += "\n\n" + "="*50 + "\n-- [[ EXECUTION LOGS ]] --\n"
-        for l in logs[-50:]:
-            final_text += f"-- {l}\n"
-
-        return final_text.encode('utf-8')
-
-    def _try_decompile(self, bytecode):
-        if not os.path.exists(self.unluac_path): return None
-        try:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".lua", mode='wb') as tmp:
-                tmp.write(bytecode)
-                path = tmp.name
-            
-            # Увеличиваем Heap Memory Java, так как VM файлы огромные
-            res = subprocess.run(["java", "-Xss5m", "-Xmx1024m", "-jar", self.unluac_path, path], capture_output=True)
-            os.remove(path)
-            
-            if res.returncode == 0: return res.stdout
-            return None # Если ошибка, возвращаем None
-        except: return None
-
-    def _beautify_lua(self, source_code):
-        # Базовый бьютифайер
-        source_code = re.sub(r'(\s)(local|return|if|for|while|repeat|function)(\s)', r'\n\2 ', source_code)
-        replacements = { " then ": " then\n", " do ": " do\n", " end ": "\nend\n", ";": ";\n" }
-        for k, v in replacements.items(): source_code = source_code.replace(k, v)
-        
-        lines = source_code.splitlines()
-        formatted = []
-        indent = 0
+        # Удаляем дубликаты подряд (часто бывают в циклах)
+        unique_lines = []
+        last_line = ""
         for line in lines:
-            line = line.strip()
-            if not line: continue
-            if line.startswith(("--")): formatted.append(line); continue
+            line = str(line)
+            if line != last_line:
+                unique_lines.append(line)
+                last_line = line
+        
+        final_code += "\n".join(unique_lines)
+        
+        if len(unique_lines) == 0:
+            final_code += "\n-- [WARNING] No actions captured.\n"
+            final_code += "-- The script might have detected the sandbox or crashed early."
             
-            if line.startswith(("end", "until", "}", ")", "else", "elseif")):
-                indent = max(0, indent - 1)
-            
-            formatted.append("\t" * indent + line)
-            
-            if line.endswith(("then", "do", "repeat", "{", "(")) or ("function" in line and not line.endswith("end")):
-                indent += 1
-            if line.startswith(("else", "elseif")):
-                indent += 1
-                
-        return "\n".join(formatted)
+        return final_code.encode('utf-8')
