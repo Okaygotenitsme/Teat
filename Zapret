@@ -5,18 +5,15 @@ import uuid
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.types import FSInputFile
 from aiogram.filters import Command
-
-# Импортируем движок
 from engine import DeobfuscatorEngine
 
 # --- НАСТРОЙКИ ---
-API_TOKEN = 'ТВОЙ_ТОКЕН_СЮДА'
+API_TOKEN = 'ТВОЙ_ТОКЕН_ЗДЕСЬ' 
 
-# Настройка логгера
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(message)s")
-logger = logging.getLogger("DeobfBot")
+# Логгер
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+logger = logging.getLogger("BotCore")
 
-# Инициализация бота и диспетчера
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 engine = DeobfuscatorEngine()
@@ -24,104 +21,106 @@ engine = DeobfuscatorEngine()
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     await message.answer(
-        "🤖 **Roblox Deobfuscator V2**\n\n"
-        "Скинь `.lua` или `.txt` файл.\n"
-        "Я запущу его в безопасной среде и вытащу:\n"
-        "🔹 RemoteSpy (сетевые запросы)\n"
-        "🔹 Спрятанные строки\n"
-        "🔹 Глобальные переменные\n"
-        "🔹 Исходный код (если повезет)\n\n"
-        "🚀 Поддерживает MoonSec, IronBrew, Luraph.",
+        "🔮 **Lua Deobfuscator V3 (Terminator)**\n\n"
+        "Я умею вскрывать:\n"
+        "🦠 MoonSec V2/V3\n"
+        "🦠 IronBrew\n"
+        "🦠 Luraph\n"
+        "🦠 PSU Obfuscator\n\n"
+        "📤 **Отправь мне .lua или .txt файл.**\n"
+        "Я запущу его в эмуляторе и просканирую память на наличие ссылок, скриптов и ключей.",
         parse_mode="Markdown"
     )
 
 @dp.message(F.document)
 async def handle_document(message: types.Message):
     user_id = message.from_user.id
-    # Генерируем уникальное имя, чтобы файлы разных юзеров не путались
-    unique_id = uuid.uuid4().hex[:8]
+    unique_id = uuid.uuid4().hex[:6]
     file_name = message.document.file_name or "script.lua"
     
-    input_path = f"temp_{user_id}_{unique_id}.lua"
+    # Пути
+    input_path = f"temp_{unique_id}.lua"
     output_path = f"Deobf_{unique_id}_{file_name}.txt"
 
-    status_msg = await message.answer("⏳ **Загрузка и анализ...**", parse_mode="Markdown")
+    status_msg = await message.answer("📥 **Скачиваю файл...**", parse_mode="Markdown")
     
-    # Получаем текущий цикл событий (event loop)
-    loop = asyncio.get_running_loop()
-    
-    # Хак для обновления статуса из синхронного кода (движка) в асинхронный (бот)
-    last_status = [""]
-    
-    def sync_status_updater(text):
-        """Эта функция вызывается из engine.py"""
-        if text == last_status[0]: return
-        last_status[0] = text
-        
-        async def edit_coro():
-            try:
-                if text:
-                    await status_msg.edit_text(f"⚙️ **Статус:** {text}", parse_mode="Markdown")
-            except: pass 
-        
-        # Безопасно планируем обновление сообщения в главном потоке
-        if not loop.is_closed():
-            asyncio.run_coroutine_threadsafe(edit_coro(), loop)
-
     try:
-        # 1. Скачиваем файл
+        # 1. Скачивание
         file = await bot.get_file(message.document.file_id)
         await bot.download_file(file.file_path, input_path)
-
+        
         with open(input_path, "rb") as f: content = f.read()
 
-        # 2. ЗАПУСК ДВИЖКА (ИСПРАВЛЕНО)
-        # Используем run_in_executor - это "классический" и самый надежный способ
-        # запустить синхронную функцию в фоне без блокировки бота.
+        # Получаем текущий цикл событий
+        loop = asyncio.get_running_loop()
+        last_text = [""] # Используем список для mutable замыкания
+        
+        # --- ИСПРАВЛЕННЫЙ КОЛБЭК ---
+        def status_callback(text):
+            # Эта функция выполняется в фоновом потоке
+            if text == last_text[0]: return
+            last_text[0] = text
+            
+            # Если цикл событий закрыт, выходим
+            if loop.is_closed(): return
+            
+            # Создаем корутину-обертку. Это исправляет ошибку "coroutine object required"
+            async def _updater():
+                try:
+                    # Игнорируем ошибки, если сообщение не изменилось
+                    await status_msg.edit_text(f"⚙️ {text}")
+                except Exception:
+                    pass 
+
+            # Безопасно передаем корутину в главный поток
+            asyncio.run_coroutine_threadsafe(_updater(), loop)
+        # -----------------------------
+
+        # 2. ЗАПУСК ДВИЖКА
+        await status_msg.edit_text("🌪️ **Запуск движка V3...**")
+        
+        # Запускаем синхронную функцию engine.process в пуле потоков
+        # Тайм-аут 3 минуты (180 секунд)
         result_data = await asyncio.wait_for(
-            loop.run_in_executor(None, engine.process, content, sync_status_updater),
-            timeout=120.0 # Тайм-аут 2 минуты, чтобы бот не висел вечно
+            loop.run_in_executor(None, engine.process, content, status_callback),
+            timeout=180.0
         )
 
-        # 3. Сохраняем результат
+        # 3. Отправка результата
         with open(output_path, "wb") as f: f.write(result_data)
         out_file = FSInputFile(output_path)
         
-        # Определяем описание (caption) для файла
-        caption = "✅ **Анализ завершен!**"
-        if b"DECOMPILED SOURCE" in result_data:
-            caption += "\n📜 Код частично декомпилирован."
-        elif b"REMOTE SPY" in result_data:
-            caption += "\n📡 Перехвачены сетевые пакеты (RemoteSpy)."
-        elif b"DUMPED STRINGS" in result_data:
-            caption += "\n🔎 Строки и данные извлечены."
-        
+        caption = "✅ **Готово!**\n"
+        if b"INTERCEPTED URLS" in result_data: caption += "⚠️ Найдены HTTP ссылки!\n"
+        if b"DECOMPILED SOURCE" in result_data: caption += "📜 Код декомпилирован.\n"
+        else: caption += "🧱 Код в VM, строки извлечены."
+
         await message.answer_document(out_file, caption=caption)
 
     except asyncio.TimeoutError:
-        await status_msg.edit_text("❌ **Ошибка:** Скрипт выполнялся слишком долго (более 2 минут).")
+        await status_msg.edit_text("⏱ **Тайм-аут:** Скрипт выполнялся слишком долго.")
     except Exception as e:
-        logger.error(f"Error processing file: {e}")
-        try: await status_msg.edit_text("❌ Произошла внутренняя ошибка при обработке.")
+        logger.error(f"Error handling file: {e}")
+        try:
+            await status_msg.edit_text(f"❌ Критическая ошибка: {str(e)[:50]}")
         except: pass
     finally:
-        # Чистка мусора (удаляем временные файлы)
+        # Уборка мусора
         for p in [input_path, output_path]:
-            if os.path.exists(p):
+            if os.path.exists(p): 
                 try: os.remove(p)
                 except: pass
 
 async def main():
-    logger.info("Бот запускается...")
-    # Удаляем старые обновления, чтобы бот не отвечал на сообщения, пришедшие пока он спал
+    # Очистка вебхуков перед запуском
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
+    # Фикс для Windows
+    if os.name == 'nt':
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     try:
-        # Исправление для Windows (SelectorEventLoop), чтобы не было ошибок при закрытии
-        if os.name == 'nt':
-            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("Бот остановлен пользователем.")
+        print("Бот выключен.")
