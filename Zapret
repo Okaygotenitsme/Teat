@@ -7,69 +7,77 @@ import tempfile
 import re
 import binascii
 
-# Логгер
+# Настройка логгера
 logger = logging.getLogger("DeobfuscatorEngine")
 
 class DeobfuscatorEngine:
     def __init__(self):
         base_dir = os.path.dirname(os.path.abspath(__file__))
         self.unluac_path = os.path.join(base_dir, "unluac.jar")
-        logger.info(f"📁 Working Dir: {base_dir}")
+        logger.info(f"📁 Engine initialized. Root: {base_dir}")
 
     def process(self, content, status_callback=None):
+        """
+        Главный метод обработки.
+        content: байты скрипта
+        status_callback: функция для отправки статусов боту
+        """
         def update_status(msg):
             if status_callback: status_callback(msg)
             logger.info(f"[STATUS] {msg}")
 
+        # Проверка Java
         if not self._check_java():
-            return b"-- [FATAL] Java is missing. Install Java to use unluac."
+            return b"-- [FATAL ERROR] Java not installed. Unluac requires Java."
 
-        update_status("🥷 Запуск стелс-режима (MoonSec Bypass V2)...")
+        update_status("🔥 Инициализация Lupa (Lua 5.1)...")
 
         try:
+            # Создаем Lua Runtime
             lua = LuaRuntime(unpack_returned_tuples=True, encoding=None)
         except Exception as e:
             return f"-- [FATAL] Lua start error: {e}".encode('utf-8')
 
-        # --- ХРАНИЛИЩА ДАННЫХ (В Python) ---
+        # --- ХРАНИЛИЩА (Bridge Python <-> Lua) ---
         captured_logs = []
         captured_strings = []
         captured_chunks = []
-        
-        # Python-функции, которые мы пробросим в Lua
+        captured_urls = []
+
+        # Python-функции, доступные внутри Lua
         def py_log(msg):
-            if len(captured_logs) < 500: captured_logs.append(str(msg))
-        
+            msg_str = str(msg)
+            if len(captured_logs) < 200: captured_logs.append(msg_str)
+            # Ловим ссылки
+            if "http" in msg_str: captured_urls.append(msg_str)
+
         def py_capture_str(s):
-            if isinstance(s, str) and len(s) > 4:
-                captured_strings.append(s)
+            if isinstance(s, (str, bytes)):
+                try:
+                    s_decoded = s.decode('utf-8') if isinstance(s, bytes) else s
+                    if len(s_decoded) > 4: # Игнорируем мусор короче 4 символов
+                        captured_strings.append(s_decoded)
+                        if "http" in s_decoded: captured_urls.append(s_decoded)
+                except: pass
             return s
 
         def py_capture_chunk(chunk, name):
-            if isinstance(chunk, (str, bytes)) and len(chunk) > 100:
+            if isinstance(chunk, (str, bytes)) and len(chunk) > 50:
                 captured_chunks.append({"data": chunk, "name": name})
-                py_log(f"💥 CAPTURED SCRIPT CHUNK ({len(chunk)} bytes)!")
+                py_log(f"⚡ CAPTURED SCRIPT CHUNK ({len(chunk)} bytes) form '{name}'")
             return chunk
 
-        # --- LUA SETUP ---
+        # Прокидываем функции в глобальную область Lua
         lua_globals = lua.globals()
         lua_globals.py_log = py_log
         lua_globals.py_capture_str = py_capture_str
         lua_globals.py_capture_chunk = py_capture_chunk
 
+        # --- LUA SETUP SCRIPT (САМОЕ ВАЖНОЕ) ---
         setup_script = """
-        -- [[ POLYFILLS FOR LUA 5.1 COMPATIBILITY ]] --
-        -- Исправление ошибки 'getfenv is nil'
-        if not getfenv then
-            _G.getfenv = function(lvl) return _G end
-            getfenv = _G.getfenv
-        end
-        if not setfenv then
-            _G.setfenv = function(fn, env) return fn end
-            setfenv = _G.setfenv
-        end
-
-        -- BIT32 (Критично для работы MoonSec)
+        -- [[ LUA ENVIRONMENT EMULATION V3 ]] --
+        
+        -- 1. Bit32 Library (Critical for MoonSec/IronBrew)
         local bit = {}
         function bit.tobit(x) x = x % 4294967296; if x >= 2147483648 then x = x - 4294967296 end; return x end
         function bit.bnot(x) return 4294967295 - x % 4294967296 end
@@ -84,101 +92,165 @@ class DeobfuscatorEngine:
         function bit.lshift(a, b) return (a * 2^b) % 4294967296 end
         function bit.rshift(a, b) return math.floor(a / 2^b) % 4294967296 end
         
-        local bit32 = {
-            band = bit.band, bor = bit.bor, bxor = bit.bxor,
-            lshift = bit.lshift, rshift = bit.rshift, bnot = bit.bnot
-        }
         _G.bit = bit
-        _G.bit32 = bit32
-        package.loaded.bit = bit
+        _G.bit32 = {
+            band = bit.band, bor = bit.bor, bxor = bit.bxor,
+            lshift = bit.lshift, rshift = bit.rshift, bnot = bit.bnot,
+            arshift = bit.rshift -- упрощение
+        }
 
+        -- 2. Mock Roblox Globals (Чтобы скрипт не падал)
+        local Dummy = {}
+        local mt_dummy = {
+            __index = function(t, k) return function(...) return t end end,
+            __newindex = function(t, k, v) end,
+            __call = function(...) return Dummy end,
+            __tostring = function() return "Instance" end
+        }
+        setmetatable(Dummy, mt_dummy)
+
+        _G.game = {
+            GetService = function(s, n) return Dummy end,
+            HttpGet = function(s, u) py_log("📡 HttpGet: "..tostring(u)); return "-- Fetched Lib" end,
+            PlaceId = 123456,
+            JobId = "DeadBeef"
+        }
+        _G.workspace = Dummy
+        _G.script = {Source = "", Name = "LocalScript", Parent = nil}
+        _G.warn = py_log
+        _G.print = py_log
+        _G.error = py_log
+        
+        -- Executor Environment
+        _G.getgenv = function() return _G end
+        _G.getrenv = function() return _G end
+        _G.getreg = function() return {} end
+        _G.checkcaller = function() return true end
+        
+        local function fake_req(opts)
+            if type(opts) == "table" and opts.Url then py_log("📡 Request: "..tostring(opts.Url)) end
+            if type(opts) == "string" then py_log("📡 Request: "..tostring(opts)) end
+            return {Body = "{}", StatusCode = 200}
+        end
+        _G.request = fake_req
+        _G.http_request = fake_req
+        _G.syn = { request = fake_req, protect_gui = function() end }
+
+        -- 3. HOOKS (Шпионы)
+        
         -- Hook load/loadstring
-        local real_load = load
-        local function hooked_load(chunk, name, ...)
-            py_capture_chunk(chunk, tostring(name))
-            -- Пытаемся загрузить чанк, чтобы он исполнился и распаковал следующий слой
-            return real_load(chunk, name, ...)
+        local old_load = load
+        local function hooked_load(chunk, name)
+            if type(chunk) == "string" then
+                if #chunk > 100 then 
+                     py_capture_chunk(chunk, tostring(name or "chunk"))
+                end
+            end
+            return old_load(chunk, name)
         end
         _G.load = hooked_load
         _G.loadstring = hooked_load
 
-        -- Hook string.char
-        local real_char = string.char
+        -- Hook string.char (Сборщик строк)
+        local old_char = string.char
         string.char = function(...)
-            local res = real_char(...)
+            local res = old_char(...)
             if #res > 4 then py_capture_str(res) end
             return res
         end
         
         -- Hook table.concat
-        local real_concat = table.concat
-        table.concat = function(t, sep, i, j)
-            local res = real_concat(t, sep, i, j)
-            if #res > 50 then py_capture_str(res) end
+        local old_concat = table.concat
+        table.concat = function(t, s, i, j)
+            local res = old_concat(t, s, i, j)
+            if type(res) == "string" and #res > 4 then py_capture_str(res) end
             return res
         end
 
-        -- Эмуляция Roblox
-        _G.game = {
-            GetService = function(s, n) 
-                return {
-                    LocalPlayer = {Name = "Player1", UserId = 123456},
-                    HttpGet = function(s, u) py_log("HTTP GET: "..u); return "-- Lib" end
-                } 
-            end,
-            HttpGet = function(s, u) py_log("HTTP GET: "..u); return "-- Lib" end
-        }
-        _G.workspace = {}
-        _G.script = {Source = "..."}
+        -- 4. MEMORY SCANNER (Upvalue Explorer)
+        -- Рекурсивно сканирует функции, чтобы найти строки
         
-        _G.getgenv = function() return _G end
-        _G.getrenv = function() return _G end
+        local seen_tables = {}
+        
+        local function scan_val(val, depth)
+            if depth > 4 then return end
+            
+            if type(val) == "string" and #val > 4 then
+                py_capture_str(val)
+            elseif type(val) == "function" and debug and debug.getupvalue then
+                local i = 1
+                while true do
+                    local n, v = debug.getupvalue(val, i)
+                    if not n then break end
+                    scan_val(v, depth + 1)
+                    i = i + 1
+                end
+            elseif type(val) == "table" and not seen_tables[val] then
+                seen_tables[val] = true
+                for k, v in pairs(val) do
+                    scan_val(k, depth + 1)
+                    scan_val(v, depth + 1)
+                end
+            end
+        end
+
+        _G.GLOBAL_SCAN = function()
+            seen_tables = {} -- сброс кэша
+            -- Сканируем глобальную среду
+            for k, v in pairs(_G) do
+                if k ~= "_G" and k ~= "package" then
+                     scan_val(v, 1)
+                end
+            end
+        end
         """
 
         try:
-            update_status("🌪️ Исполнение байт-кода...")
+            update_status("🌪️ Запуск эмулятора и скрипта...")
             lua.execute(setup_script)
             
+            # Обертка для безопасного запуска пользовательского кода
             runner = lua.eval("""
                 function(code)
-                    -- Безопасный вызов getfenv
-                    local env = _G
-                    if getfenv then env = getfenv() end
-                    env.script = _G.script
+                    if not getfenv then _G.getfenv = function() return _G end end
                     
-                    local f = load(code)
-                    if not f then return "Load Error" end
+                    local f, err = load(code)
+                    if not f then return "LoadError: "..tostring(err) end
                     
-                    local success, err = pcall(f)
-                    if not success then return "Runtime Error: " .. tostring(err) end
-                    return "Completed"
+                    local s, e = pcall(f)
+                    if not s then return "RuntimeError: "..tostring(e) end
+                    return "Success"
                 end
             """)
             
             status = runner(content)
-            update_status(f"Статус VM: {status}")
+            update_status(f"Скрипт выполнен: {status}")
 
-            # --- АНАЛИЗ РЕЗУЛЬТАТОВ ---
-            best_chunk = None
-            max_size = 0
+            # ЗАПУСК СКАНЕРА ПОСЛЕ ВЫПОЛНЕНИЯ
+            update_status("🧠 Сканирование памяти (Upvalues & Tables)...")
+            try:
+                lua.execute("_G.GLOBAL_SCAN()")
+            except Exception as e:
+                logger.error(f"Scan warning: {e}")
+
+            # --- ФИНАЛИЗАЦИЯ ---
             
+            # Выбираем лучший чанк кода (если скрипт распаковал себя)
+            best_chunk = None
+            max_len = 0
             for c in captured_chunks:
-                if len(c['data']) > max_size:
-                    max_size = len(c['data'])
+                if len(c['data']) > max_len:
+                    max_len = len(c['data'])
                     best_chunk = c['data']
             
-            if not best_chunk:
-                for s in captured_strings:
-                    if len(s) > max_size and ("local" in s or "function" in s or "return" in s):
-                        max_size = len(s)
-                        best_chunk = s
+            # Если ничего не перехватили, возвращаем исходный
+            final_code_bytes = best_chunk if best_chunk else content
 
-            target_code = best_chunk if best_chunk else content
-
-            return self._finalize_output(target_code, captured_strings, captured_logs, update_status)
+            return self._generate_report(final_code_bytes, captured_strings, captured_logs, captured_urls, update_status)
 
         except Exception as e:
-            return f"-- [CRASH INTERNAL]: {str(e)}".encode('utf-8')
+            logger.error(f"Engine Crash: {e}")
+            return f"-- [CRASH] Engine error: {str(e)}".encode('utf-8')
 
     def _check_java(self):
         try:
@@ -186,65 +258,63 @@ class DeobfuscatorEngine:
             return True
         except: return False
 
-    def _clean_string(self, s):
-        if isinstance(s, bytes):
-            try: return s.decode('utf-8')
-            except: return str(s)
-        return str(s)
-
-    def _finalize_output(self, code_bytes, strings, logs, callback):
-        if callback: callback("💅 Ренейминг переменных и форматирование...")
+    def _generate_report(self, code_bytes, strings, logs, urls, callback):
+        if callback: callback("💅 Формирование отчета...")
         
+        # Попытка декомпиляции через unluac
         decompiled = self._try_decompile(code_bytes)
         
-        # --- HEADER (ВОТ ОН, ДОБАВЛЕН) ---
-        final_text = "--[[Deobfuscated with using:\nhttp://t.me/Meloten_Deobfuscator_bot]]\n\n"
-        
-        final_text += "-- [[ REPORT ]] --\n"
-        final_text += f"-- Captured Strings: {len(strings)}\n"
-        final_text += f"-- Execution Logs: {len(logs)}\n\n"
+        report = "-- [[ TERMINATOR V3 REPORT ]] --\n"
+        report += f"-- Scan Time: Done\n"
+        report += f"-- Strings Captured: {len(strings)}\n"
+        report += f"-- HTTP Requests: {len(urls)}\n\n"
 
-        # --- CONSTANTS ---
-        final_text += "-- [[ EXTRACTED CONSTANTS ]] --\n"
-        unique_strings = sorted(list(set([self._clean_string(s).replace('\n', ' ') for s in strings])), key=len, reverse=True)
-        for s in unique_strings[:50]:
-            if len(s) > 3: final_text += f'-- "{s}"\n'
+        if urls:
+            report += "-- [[ INTERCEPTED URLS ]] --\n"
+            for u in sorted(list(set(urls))):
+                report += f"-- {u}\n"
+            report += "\n"
+
+        report += "-- [[ DUMPED STRINGS ]] --\n"
+        # Очистка и сортировка уникальных строк
+        clean_strings = sorted(list(set([s.replace('\n', ' ') for s in strings])), key=len, reverse=True)
+        for s in clean_strings[:100]: # Топ 100 длинных строк
+            report += f'-- "{s}"\n'
         
-        final_text += "\n" + "="*50 + "\n\n"
+        report += "\n" + "="*60 + "\n\n"
         
-        # --- SOURCE CODE ---
-        src = ""
         if decompiled:
+            report += "-- [[ DECOMPILED SOURCE (UNLUAC) ]] --\n\n"
             try:
                 src = decompiled.decode('utf-8', 'ignore')
             except:
                 src = decompiled.decode('latin-1', 'ignore')
-            final_text += "-- [[ DECOMPILED SOURCE (UNLUAC) ]] --\n\n"
+            
+            # Бьютифайер (упрощенный)
+            src = self._simple_beautify(src)
+            report += src
         else:
-            final_text += "-- [[ RAW DUMP (Decompilation Failed) ]] --\n\n"
+            report += "-- [[ RAW BYTECODE DUMP ]] --\n"
+            report += "-- Декомпиляция не удалась (возможно, нестандартный байт-код).\n\n"
             try:
-                src = code_bytes.decode('utf-8')
+                report += code_bytes.decode('utf-8', 'ignore')
             except:
-                src = f"-- Binary Blob: {binascii.hexlify(code_bytes[:100])}..."
-        
-        # BEAUTIFIER & RENAMER
-        if src and len(src) > 10:
-            src = self._rename_variables(src)
-            src = self._beautify_lua(src)
-        
-        final_text += src
-        
-        # --- LOGS ---
-        final_text += "\n\n" + "="*50 + "\n-- [[ EXECUTION LOGS ]] --\n"
-        for l in logs:
-            final_text += f"-- {l}\n"
+                report += f"-- Binary Blob Size: {len(code_bytes)} bytes"
 
-        return final_text.encode('utf-8')
+        report += "\n\n" + "="*60 + "\n-- [[ DEBUG LOGS ]] --\n"
+        for l in logs[-50:]: # Последние 50 логов
+            report += f"-- {l}\n"
+            
+        return report.encode('utf-8', 'replace')
 
     def _try_decompile(self, bytecode):
         if not os.path.exists(self.unluac_path): return None
+        # Быстрая проверка хедера Lua 5.1
         if isinstance(bytecode, bytes) and not bytecode.startswith(b'\x1bLua'):
-            return None 
+            # Если это текст, возвращаем его как есть (возможно, распакованный скрипт)
+            if all(32 <= b < 127 or b in [9, 10, 13] for b in bytecode[:100]):
+                return bytecode
+            return None
 
         try:
             with tempfile.NamedTemporaryFile(delete=False, suffix=".lua", mode='wb') as tmp:
@@ -252,80 +322,16 @@ class DeobfuscatorEngine:
                 path = tmp.name
             
             res = subprocess.run(
-                ["java", "-Xmx1G", "-jar", self.unluac_path, path], 
-                capture_output=True, timeout=15
+                ["java", "-jar", self.unluac_path, path], 
+                capture_output=True, timeout=10
             )
             os.remove(path)
             if res.returncode == 0 and len(res.stdout) > 0: return res.stdout
             return None
         except: return None
 
-    def _rename_variables(self, code):
-        """Переименовывает мусорные переменные в var_1, func_2"""
-        potential_vars = set(re.findall(r'\b[a-zA-Z_][a-zA-Z0-9_]{5,}\b', code))
-        
-        whitelist = {
-            "string", "table", "math", "pairs", "ipairs", "tonumber", "tostring",
-            "getmetatable", "setmetatable", "error", "pcall", "xpcall", "select",
-            "unpack", "require", "game", "workspace", "script", "Instance", 
-            "Vector3", "CFrame", "new", "Connect", "Wait", "Destroy", "Parent",
-            "FindFirstChild", "WaitForChild", "GetService", "LocalPlayer",
-            "loadstring", "getgenv", "getrenv", "bit32", "getfenv", "setfenv"
-        }
-        
-        mapping = {}
-        var_counter = 1
-        func_counter = 1
-        
-        for var in potential_vars:
-            if var in whitelist: continue
-            
-            if re.search(r'[a-z]', var) and re.search(r'[A-Z]', var):
-                if re.search(rf'{re.escape(var)}\s*\(', code):
-                    new_name = f"func_{func_counter}"
-                    func_counter += 1
-                else:
-                    new_name = f"var_{var_counter}"
-                    var_counter += 1
-                
-                mapping[var] = new_name
-
-        sorted_vars = sorted(mapping.keys(), key=len, reverse=True)
-        
-        for old_name in sorted_vars:
-            new_name = mapping[old_name]
-            code = re.sub(rf'\b{re.escape(old_name)}\b', new_name, code)
-            
+    def _simple_beautify(self, code):
+        """Простая очистка кода от мусорных имен"""
+        # Замена длинных hex чисел
+        code = re.sub(r'0x[0-9a-fA-F]+', lambda m: str(int(m.group(0), 16)), code)
         return code
-
-    def _beautify_lua(self, source_code):
-        source_code = re.sub(r'--\s*\[\[.*?\]\]', '', source_code, flags=re.DOTALL)
-        source_code = re.sub(r'(\s)(local|return|if|for|while|repeat|function)(\s)', r'\n\2 ', source_code)
-        
-        replacements = {
-            " then ": " then\n", " do ": " do\n", " end ": "\nend\n",
-            " repeat ": "\nrepeat\n", " until ": "\nuntil ", ";": "\n"
-        }
-        for k, v in replacements.items():
-            source_code = source_code.replace(k, v)
-        
-        lines = source_code.splitlines()
-        formatted = []
-        indent = 0
-        for line in lines:
-            line = line.strip()
-            if not line: continue
-            if line.startswith("--"): formatted.append(line); continue
-            
-            if line.startswith(("end", "until", "}", "]", ")", "else", "elseif")):
-                indent = max(0, indent - 1)
-            
-            formatted.append("\t" * indent + line)
-            
-            if line.endswith(("then", "do", "repeat", "{", "(")) or \
-               ("function" in line and not line.endswith("end")):
-                indent += 1
-            if line.startswith(("else", "elseif")):
-                indent += 1
-                
-        return "\n".join(formatted)
