@@ -1,362 +1,111 @@
-# engine.py
-import lupa
-from lupa import LuaRuntime
-import logging
-import subprocess
-import os
-import tempfile
+# wrap_chunks.py
 import re
-import binascii
-import io
-from vm_detector import VMDetector  # новый модуль (см. vm_detector.py)
+import sys
+from pathlib import Path
 
-# Логгер
-logger = logging.getLogger("DeobfuscatorEngine")
+def to_lua_long_bracket(s: str):
+    # выбираем минимальное количество '=' чтобы закрывающая последовательность не встретилась в тексте
+    for n in range(0, 8):
+        eq = '=' * n
+        close = ']' + eq + ']'
+        if close not in s:
+            return f'[{eq}[\n{s}\n]{eq}]'
+    # fallback: escaped double-quoted string
+    esc = s.replace('\\', '\\\\').replace('"', '\\"')
+    return '"' + esc + '"'
 
-
-class DeobfuscatorEngine:
-    def __init__(self):
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        self.unluac_path = os.path.join(base_dir, "unluac.jar")
-        self.vm_detector = VMDetector()
-        logger.info(f"📁 Working Dir: {base_dir}")
-
-    def process(self, content, status_callback=None):
-        def update_status(msg):
-            if status_callback:
-                status_callback(msg)
-            logger.info(f"[STATUS] {msg}")
-
-        if not self._check_java():
-            return b"-- [FATAL] Java is missing. Install Java to use unluac."
-
-        update_status("🔎 Анализ файла (static heuristics)...")
-        try:
-            # content может быть bytes
-            if isinstance(content, bytes):
-                sample = content[:20000].decode('latin-1', 'ignore')
-            else:
-                sample = str(content)
-
-            # 1) VM detection (MoonSec/Luraph/IronBrew heuristics)
-            vm_info = self.vm_detector.analyze(sample)
-            if vm_info['is_vm']:
-                update_status("⚠️ Обнаружена виртуализация (MoonSec/Luraph/похожая). Использую статический анализ.")
-                # static path: extract strings and escape-seqs, не исполняем подозрительный код
-                extracted_strings = self.vm_detector.extract_strings(sample)
-                hex_blobs = self.vm_detector.extract_backslash_numbers(sample)
-                # Подготовим final output через _finalize_output (передаем content как был)
-                return self._finalize_output(content, extracted_strings, vm_info.get('globals', []),
-                                             vm_info.get('action_log', []), update_status)
-            else:
-                update_status("🧠 Запуск эвристического анализатора (sandbox tracing)...")
-        except Exception as e:
-            logger.exception("Ошибка при предварительном анализе: %s", e)
-            # fallthrough => попробуем runtime путь
-
-        # --- НАСТРОЙКА LUA VM (runtime tracing) ---
-        try:
-            # Создаём Lua VM - отключаем encoding, используем latin-1 через python<->lua мост
-            lua = LuaRuntime(unpack_returned_tuples=True, encoding=None)
-        except Exception as e:
-            return f"-- [FATAL] Lua start error: {e}".encode('utf-8')
-
-        # bit polyfill (упрощённая, стабильная версия)
-        bit_polyfill = """
-        local bit = {}
-        function bit.tobit(x) x = x % 4294967296; if x >= 2147483648 then x = x - 4294967296 end; return x end
-        function bit.bnot(x) return 4294967295 - x % 4294967296 end
-        function bit.band(a,b) local r=0;m=1; while a>0 or b>0 do local aa=a%2; local bb=b%2; if aa==1 and bb==1 then r=r+m end; a=(a-aa)/2; b=(b-bb)/2; m=m*2; end; return r end
-        function bit.bor(a,b) local r=0;m=1; while a>0 or b>0 do local aa=a%2; local bb=b%2; if aa==1 or bb==1 then r=r+m end; a=(a-aa)/2; b=(b-bb)/2; m=m*2; end; return r end
-        function bit.bxor(a,b) local r=0;m=1; while a>0 or b>0 do local aa=a%2; local bb=b%2; if aa~=bb then r=r+m end; a=(a-aa)/2; b=(b-bb)/2; m=m*2; end; return r end
-        function bit.lshift(a,b) return (a * 2^b) % 4294967296 end
-        function bit.rshift(a,b) return math.floor(a / 2^b) % 4294967296 end
-        function bit.arshift(a,b)
-            local z = math.floor(a / 2^b) % 4294967296
-            if a >= 2147483648 then z = z + 4294967296 - 2^(32-b) end
-            return z
-        end
-        package.loaded.bit = bit; _G.bit = bit; _G.bit32 = bit
-        """
-
-        # sandbox_setup: улучшено — не подавляем все ошибки, логируем побольше, но осторожно
-        sandbox_setup = bit_polyfill + """
-        _G.CAPTURED_CHUNKS = {}
-        _G.DETECTED_STRINGS = {}
-        _G.ACTION_LOG = {}
-        _G.FINAL_GLOBALS = {}
-
-        local function log_action(msg)
-            if #_G.ACTION_LOG < 200 then
-                table.insert(_G.ACTION_LOG, tostring(msg))
-            end
-        end
-
-        local function capture_str(s)
-            if type(s) == "string" and #s > 3 then
-                if not s:find("stack begin") and not s:find("upvalue") then
-                    _G.DETECTED_STRINGS[s] = true
-                end
-            end
+def decode_backslash_numbers(s: str):
+    # преобразует "\116\101\115" -> "tes" если возможно, иначе возвращает исходную строк
+    try:
+        parts = re.findall(r'\\d{1,3})', s)
+        if not parts:
             return s
-        end
+        b = bytes(int(p) for p in parts)
+        return b.decode('utf-8', 'ignore')
+    except Exception:
+        return s
 
-        local real_char = string.char
-        string.char = function(...)
-            local ok, res = pcall(real_char, ...)
-            if ok then capture_str(res) end
-            return res
-        end
+def find_long_quoted_blocks(text, min_len=80):
+    # найдём двойные и одинарные строки с возможными \ddd внутри
+    pattern = re.compile(r'("(?:(?:\\\d{1,3})|[^"\){'+str(min_len)+r',}"|\'(?:(?:\\\d{1,3})|[^\'\\]){'+str(min_len)+r',}\')', re.S)
+    return [m.group(0) for m in pattern.finditer(text)]
 
-        local real_concat = table.concat
-        table.concat = function(t, sep, i, j)
-            local ok, res = pcall(real_concat, t, sep, i, j)
-            if ok then capture_str(res) end
-            return res
-        end
+def find_large_function_blocks(text, min_len=200):
+    # грубое приближение: (function ... end) или function ... end) или return(function ... end)
+    pattern = re.compile(r'function[\s\S]{'+str(min_len)+r',}?end', re.I)
+    blocks = [m.group(0) for m in pattern.finditer(text)]
+    # также захватить "function(...)[\s\S]{min_len,}end" без внешних скобок
+    pattern2 = re.compile(r'function\s*[^]*\)[\s\S]{'+str(min_len)+r',}?end', re.I)
+    blocks += [m.group(0) for m in pattern2.finditer(text)]
+    # убираем вложенные/дубликаты по длине (оставляем уникальные)
+    uniq = []
+    seen = set()
+    for b in blocks:
+        key = (len(b), b[:80])
+        if key in seen: continue
+        seen.add(key)
+        uniq.append(b)
+    return uniq
 
-        local real_load = load
-        local function hooked_load(chunk, name, mode, env)
-            if type(chunk) == "string" and #chunk > 50 then
-                table.insert(_G.CAPTURED_CHUNKS, {data = chunk, size = #chunk, type = "string"})
-            end
-            return real_load(chunk, name, mode, env)
-        end
+def wrap_all(input_path, output_path):
+    text = Path(input_path).read_text(encoding='latin-1')  # binary-safe-ish
+    blocks = []
 
-        function _G.dump_globals()
-            local ignore = {string=1, math=1, table=1, bit=1, bit32=1, pairs=1, ipairs=1, next=1, _G=1, sandbox_env=1, package=1}
-            local g = getfenv and getfenv() or _G
-            for k, v in pairs(g) do
-                if not ignore[k] then
-                    if type(v) == "string" or type(v) == "number" or type(v) == "boolean" then
-                        table.insert(_G.FINAL_GLOBALS, tostring(k) .. " = " .. tostring(v))
-                    end
-                end
-            end
-        end
+    # 1) long quoted blocks (strings with many escapes)
+    q = find_long_quoted_blocks(text, min_len=60)
+    blocks.extend(q)
 
-        local function create_proxy(name)
-            local proxy = {}
-            local meta = {}
-            meta.__index = function(t, k)
-                local key = tostring(k)
-                if key == "PlaceId" then return 123456 end
-                if key == "UserId" then return 1001 end
-                if key == "HttpGet" or key == "HttpGetAsync" then
-                    return function(u) log_action("HTTP GET: "..tostring(u)); return "ProxyResponse" end
-                end
-                return create_proxy(name .. "." .. key)
-            end
-            meta.__newindex = function(t, k, v)
-                log_action("Write: " .. name .. "." .. tostring(k) .. " = " .. tostring(v))
-            end
-            meta.__call = function(t, ...) return create_proxy(name) end
-            meta.__tostring = function() return name end
-            setmetatable(proxy, meta)
-            return proxy
-        end
+    # 2) long function blocks
+    funcs = find_large_function_blocks(text, min_len=200)
+    blocks.extend(funcs)
 
-        local env = {
-            loadstring = hooked_load, load = hooked_load,
-            print = function(...) local a={...}; log_action("Print: "..tostring(a[1])); end,
-            warn = function(...) local a={...}; log_action("Warn: "..tostring(a[1])); end,
-            error = function(...) log_action("Error suppressed"); end,
-            string = string, math = math, table = table,
-            bit = bit, bit32 = bit, pairs = pairs, ipairs = ipairs, next = next,
-            type = type, tostring = tostring, tonumber = tonumber, pcall = pcall, xpcall = xpcall,
-            select = select, unpack = unpack or table.unpack,
-            setmetatable = setmetatable, getmetatable = getmetatable,
+    # 3) fallback: very large continuous regions (e.g. the whole dump) split into chunks of N chars
+    if not blocks:
+        # split in 10000-char chunks
+        for i in range(0, len(text), 10000):
+            chunk = text[i:i+10000]
+            if len(chunk) > 200:
+                blocks.append(chunk)
 
-            game = create_proxy("game"),
-            workspace = create_proxy("workspace"),
-            script = create_proxy("script"),
-            getgenv = function() return {} end,
-        }
-        env._G = env
-        _G.sandbox_env = env
-        return env
-        """
+    # deduplicate by content
+    uniq = []
+    seen = set()
+    for b in blocks:
+        key = b[:200]
+        if key in seen: continue
+        seen.add(key)
+        uniq.append(b)
 
-        try:
-            update_status("🌪️ Исполнение (tracing) — выполняю осторожно...")
-            env = lua.execute(sandbox_setup)
+    out_lines = []
+    out_lines.append('-- extracted_blocks.lua  (auto-generated by wrap_chunks.py)\n')
+    out_lines.append('-- Each big fragment is placed into local mel_N variables for manual/automatic analysis\n\n')
 
-            runner = lua.eval("""
-                function(code, env)
-                    local f, err = load(code, "chunk", "bt", env)
-                    if not f then return false, err end
-                    -- Запускаем через pcall
-                    local ok, res = pcall(f)
-                    pcall(_G.dump_globals)
-                    return ok, res
-                end
-            """)
-            ok, res = runner(content, env)
-            # --- СБОР РЕЗУЛЬТАТОВ ---
-            strings_tbl = lua.globals().DETECTED_STRINGS
-            detected_strings = list(strings_tbl)
-            global_dump = list(lua.globals().FINAL_GLOBALS)
-            action_log = list(lua.globals().ACTION_LOG)
-            chunks = lua.globals().CAPTURED_CHUNKS
-
-            best_chunk = None
-            max_size = 0
-            if len(chunks) > 0:
-                for i in range(1, len(chunks) + 1):
-                    c = chunks[i]
-                    if c.size > max_size:
-                        max_size = c.size
-                        best_chunk = c.data
-
-            target_code = best_chunk if best_chunk else content
-            return self._finalize_output(target_code, detected_strings, global_dump, action_log, update_status)
-        except Exception as e:
-            logger.exception("CRASH in runtime path: %s", e)
-            return f"-- [CRASH ERROR]: {str(e)}".encode('utf-8')
-
-    def _check_java(self):
-        try:
-            res = subprocess.run(["java", "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            return res.returncode == 0
-        except Exception:
-            return False
-
-    def _clean_string(self, s):
-        """Очищает байтовые строки для красивого вывода"""
-        if isinstance(s, bytes):
-            try:
-                return s.decode('utf-8')
-            except:
-                try:
-                    return s.decode('latin-1')
-                except:
-                    return str(s)
-        return str(s)
-
-    def _finalize_output(self, code_bytes, strings, globals_dump, logs, callback):
-        """Собирает финальный файл"""
-        if callback:
-            callback("🧬 Попытка декомпиляции (unluac)...")
-        decompiled = self._try_decompile(code_bytes)
-
-        final_text = ""
-        final_text += "-- [[ DUMPED STRINGS (DECRYPTED / STATIC) ]] --\n"
-        final_text += "-- Assets, Keys, and Messages found during analysis:\n\n"
-
-        sorted_strings = sorted(strings, key=lambda x: len(str(x)), reverse=True)
-        seen = set()
-        for s in sorted_strings:
-            clean = self._clean_string(s).replace('\n', ' ').replace('\r', '')
-            if clean not in seen and len(clean) > 3:
-                final_text += f'-- "{clean}"\n'
-                seen.add(clean)
-
-        if globals_dump:
-            final_text += "\n" + "=" * 50 + "\n"
-            final_text += "-- [[ GLOBAL VARIABLES DUMP ]] --\n"
-            final_text += "-- Variables left in environment after run:\n\n"
-            for g in globals_dump:
-                final_text += f"-- {self._clean_string(g)}\n"
-
-        final_text += "\n" + "=" * 50 + "\n\n"
-
-        if decompiled:
-            if callback: callback("💅 Форматирование кода...")
-            try:
-                src = decompiled.decode('utf-8', 'ignore')
-            except:
-                src = decompiled.decode('latin-1', 'ignore')
-
-            src = self._beautify_lua(src)
-            final_text += "-- [[ DECOMPILED SOURCE ]] --\n\n"
-            final_text += src
+    for i, b in enumerate(uniq, start=1):
+        # try to clean quotes if it's quoted string
+        raw = b
+        if (b.startswith('"') and b.endswith('"')) or (b.startswith("'") and b.endswith("'")):
+            # strip outer quotes, keep inner escapes
+            inner = b[1:-1]
+            decoded = decode_backslash_numbers(inner)
+            # we keep both representations: decoded comment + raw in long bracket
+            out_lines.append(f'-- fragment #{i} : decoded preview (best-effort):\n')
+            preview = decoded
+            if len(preview) > 500:
+                preview = preview[:500] + '...'
+            out_lines.append(f'-- {preview}\n')
+            lua_literal = to_lua_long_bracket(decoded)
+            out_lines.append(f'local mel_{i} = {lua_literal}\n\n')
         else:
-            final_text += "-- [WARNING] Unluac failed (Virtualization / nonstandard bytecode).\n"
-            final_text += "-- Below is the raw bytecode/script captured from memory.\n\n"
-            try:
-                if isinstance(code_bytes, bytes):
-                    text_view = code_bytes.decode('utf-8')
-                    final_text += text_view
-                else:
-                    final_text += str(code_bytes)
-            except:
-                if isinstance(code_bytes, bytes):
-                    final_text += f"-- Binary Blob Size: {len(code_bytes)} bytes\n"
-                    try:
-                        final_text += f"-- MD5: {binascii.hexlify(binascii.unhexlify(binascii.hexlify(code_bytes)[:32]))}\n"
-                    except:
-                        final_text += f"-- Binary (hex head): {binascii.hexlify(code_bytes[:200])}... (truncated)\n"
-                else:
-                    final_text += str(code_bytes) + "\n"
+            # function or blob -> wrap as is in long bracket
+            out_lines.append(f'-- fragment #{i} : raw blob (length {len(raw)})\n')
+            lua_literal = to_lua_long_bracket(raw)
+            out_lines.append(f'local mel_{i} = {lua_literal}\n\n')
 
-        final_text += "\n\n" + "=" * 50 + "\n"
-        final_text += "-- [[ ACTION LOG ]] --\n\n"
-        for l in logs[-200:]:
-            final_text += f"-- {self._clean_string(l)}\n"
+    Path(output_path).write_text(''.join(out_lines), encoding='utf-8')
+    print(f'Wrote {len(uniq)} fragments to {output_path}')
 
-        return final_text.encode('utf-8')
-
-    def _try_decompile(self, bytecode):
-        if not os.path.exists(self.unluac_path):
-            return None
-        try:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".lua", mode='wb') as tmp:
-                # Если bytecode это bytes - пишем как есть. Если строка - кодируем latin-1.
-                if isinstance(bytecode, bytes):
-                    tmp.write(bytecode)
-                else:
-                    tmp.write(str(bytecode).encode('latin-1', 'ignore'))
-                path = tmp.name
-
-            res = subprocess.run(
-                ["java", "-Xmx1G", "-jar", self.unluac_path, path],
-                capture_output=True,
-                timeout=20
-            )
-            try:
-                os.remove(path)
-            except:
-                pass
-
-            if res.returncode == 0 and len(res.stdout) > 0:
-                return res.stdout
-            return None
-        except Exception as e:
-            logger.exception("unluac failed: %s", e)
-            return None
-
-    def _beautify_lua(self, source_code):
-        # Базовый форматтер — немного улучшен
-        source_code = re.sub(r'(\s)(local|return|if|for|while|repeat|function)(\s)', r'\n\2 ', source_code)
-
-        replacements = {
-            " then ": " then\n", " do ": " do\n", " end ": "\nend\n",
-            " repeat ": "\nrepeat\n", " until ": "\nuntil ", ";": ";\n"
-        }
-        for k, v in replacements.items():
-            source_code = source_code.replace(k, v)
-
-        lines = source_code.splitlines()
-        formatted = []
-        indent = 0
-
-        for line in lines:
-            line = line.rstrip()
-            if not line.strip():
-                continue
-            stripped = line.strip()
-            if stripped.startswith("--"):
-                formatted.append("\t" * indent + stripped)
-                continue
-
-            if stripped.startswith(("end", "until")):
-                indent = max(0, indent - 1)
-
-            formatted.append("\t" * indent + stripped)
-
-            if stripped.endswith(("then", "do", "repeat")) or (stripped.startswith("function") and not stripped.endswith("end")):
-                indent += 1
-            if stripped.startswith(("else", "elseif")):
-                indent += 0
-
-        return "\n".join(formatted)
+if __name__ == "__main__":
+    if len(sys.argv) < 3:
+        print("Usage: python wrap_chunks.py <input_dump.txt> <output_extracted.lua>")
+        sys.exit(1)
+    wrap_all(sys.argv[1], sys.argv[2])
