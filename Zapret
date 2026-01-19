@@ -67,11 +67,11 @@ class DeobfuscatorEngine:
         lua_globals.py_capture_chunk = py_capture_chunk
 
         # --- ADVANCED LUA ENVIRONMENT (MOONSEC BYPASS) ---
-        setup_script = """
+        # ВНИМАНИЕ: Используем r""" (raw string), чтобы Python не экранировал \n и \t
+        setup_script = r"""
         -- [[ HARDENED EMULATION ENVIRONMENT ]] --
         
         -- 1. Anti-Tamper Bypass (C-Function Spoofing)
-        -- Делаем так, чтобы наши перехваченные функции выглядели как родные
         local function c_spoof(target, name)
             local mt = {
                 __tostring = function() return "function: 0x" .. string.format("%x", math.random(100000, 999999)) end
@@ -80,14 +80,13 @@ class DeobfuscatorEngine:
             local proxy_mt = getmetatable(proxy)
             proxy_mt.__call = target
             proxy_mt.__tostring = mt.__tostring
-            return target -- В Lupa сложно сделать полный прокси, возвращаем таргет, но переопределяем tostring глобально ниже
+            return target 
         end
 
         -- 2. Debug Library Emulation (Критично для MoonSec)
         local _debug = {}
         _debug.traceback = function() return "Stack traceback:\n\t[C]: in function 'run'" end
         _debug.getinfo = function(f, w)
-            -- MoonSec проверяет, является ли функция Lua или C
             return {
                 source = "=[C]", 
                 short_src = "[C]", 
@@ -101,7 +100,7 @@ class DeobfuscatorEngine:
         end
         _debug.getupvalue = function(f, i) return nil, nil end
         _debug.setupvalue = function(f, i, v) end
-        _debug.getmetatable = function(o) return nil end -- Скрываем метатаблицы
+        _debug.getmetatable = function(o) return nil end 
         _G.debug = _debug
 
         -- 3. Bit32 Polyfill (Roblox Standard)
@@ -164,7 +163,6 @@ class DeobfuscatorEngine:
         _G.error = _G.print
 
         -- 5. CRITICAL: Hook load/loadstring/assert
-        -- Именно здесь MoonSec часто распаковывает финальный скрипт
         local old_load = load
         local function hooked_load(chunk, name)
             if type(chunk) == "string" then
@@ -186,17 +184,12 @@ class DeobfuscatorEngine:
         _G.load = hooked_load
         _G.loadstring = hooked_loadstring
         
-        -- Hook assert (часто используется для запуска кода)
         local old_assert = assert
         _G.assert = function(v, m, ...)
-            if type(v) == "function" then
-               -- py_log("Assert running a function!")
-            end
             return old_assert(v, m, ...)
         end
         
-        -- Anti-Anti-Tamper: Global Tostring Spoof
-        -- MoonSec проверяет tostring(loadstring). Если вернет не то - краш.
+        -- Anti-Anti-Tamper
         local old_tostring = tostring
         _G.tostring = function(v)
             if v == _G.print or v == _G.loadstring or v == _G.load or v == _G.bit then
@@ -210,7 +203,7 @@ class DeobfuscatorEngine:
             update_status("🌪️ Запуск скрипта в песочнице...")
             lua.execute(setup_script)
             
-            runner = lua.eval("""
+            runner = lua.eval(r"""
                 function(code)
                     local s, e = pcall(function() 
                         local f = loadstring(code)
@@ -227,7 +220,6 @@ class DeobfuscatorEngine:
 
             # --- POST-PROCESSING ---
             
-            # 1. Поиск самого большого чанка (вероятно, распакованный код)
             best_chunk = None
             max_len = 0
             for c in captured_chunks:
@@ -235,7 +227,6 @@ class DeobfuscatorEngine:
                     max_len = len(c['data'])
                     best_chunk = c['data']
             
-            # Если нашли распакованный чанк, используем его, иначе оригинал
             target_bytes = best_chunk if best_chunk else content
             is_captured = True if best_chunk else False
             
@@ -267,7 +258,6 @@ class DeobfuscatorEngine:
             for u in sorted(list(set(urls))):
                 report += f"'{u}'\n"
 
-        # Пытаемся декомпилировать (если это байткод) или форматировать (если текст)
         decompiled = None
         is_bytecode = False
         
@@ -275,7 +265,6 @@ class DeobfuscatorEngine:
             is_bytecode = True
             decompiled = self._try_decompile(code_bytes)
         else:
-            # Это исходный код (текст), просто пробуем декодировать
             try:
                 decompiled = code_bytes.decode('utf-8')
             except:
@@ -316,14 +305,10 @@ class DeobfuscatorEngine:
         except: return None
 
     def _beautify_lua(self, code):
-        """Простой форматтер для Lua, чтобы убрать кашу в одну строку"""
-        # 1. Добавляем переносы строк после ключевых слов
         code = code.replace(';', ';\n')
         code = code.replace(' then ', ' then\n\t')
         code = code.replace(' do ', ' do\n\t')
         code = code.replace(' end ', '\nend\n')
-        # 2. Пытаемся разбить длинные строки
         if len(code) > 1000 and code.count('\n') < 10:
-             # Если файл — одна большая строка, рубим по пробелам грубо
              code = code.replace(' ', '\n')
         return code
