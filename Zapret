@@ -1,118 +1,455 @@
-import asyncio
-import os
+import lupa
+from lupa import LuaRuntime
 import logging
-import uuid
-from aiogram import Bot, Dispatcher, F, types
-from aiogram.types import FSInputFile
-from aiogram.filters import Command
+import subprocess
+import os
+import tempfile
+import re
+import binascii
 
-# Импорт обновленного движка
-from engine import DeobfuscatorEngine
+# Логгер
+logger = logging.getLogger("DeobfuscatorEngine")
 
-# --- НАСТРОЙКИ ---
-API_TOKEN = 'ТВОЙ_ТОКЕН_СЮДА'
+class DeobfuscatorEngine:
+    def __init__(self):
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        self.unluac_path = os.path.join(base_dir, "unluac.jar")
+        logger.info(f"📁 Working Dir: {base_dir}")
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-logger = logging.getLogger("DeobfBot")
+    def process(self, content, status_callback=None):
+        def update_status(msg):
+            if status_callback: status_callback(msg)
+            logger.info(f"[STATUS] {msg}")
 
-bot = Bot(token=API_TOKEN)
-dp = Dispatcher()
-engine = DeobfuscatorEngine()
+        if not self._check_java():
+            return b"-- [FATAL] Java is missing. Install Java to use unluac."
 
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message):
-    await message.answer(
-        "🔮 **Roblox Ultimate Deobfuscator**\n\n"
-        "Скинь `.lua` или `.txt`. Я проведу глубокий анализ.\n\n"
-        "🛠 **Что я умею:**\n"
-        "1. Эмуляция `game`, `workspace`, `Instance.new` (обход проверок среды).\n"
-        "2. Эмуляция `getgenv`, `syn`, `debug` (обход проверок эксплойтов).\n"
-        "3. Перехват HTTP запросов и файловой системы.\n"
-        "4. Рекурсивный дамп глобальных переменных.\n"
-        "5. Распаковка MoonSec/IronBrew слоев.\n\n"
-        "⏳ Анализ может занять до 3-х минут для сложных скриптов.",
-        parse_mode="Markdown"
-    )
+        update_status("🧠 Инициализация Deep Emulation V3 (Anti-Recursion fix)...")
 
-@dp.message(F.document)
-async def handle_document(message: types.Message):
-    user_id = message.from_user.id
-    unique_id = uuid.uuid4().hex[:8]
-    file_name = message.document.file_name or "script.lua"
-    
-    input_path = f"temp_{user_id}_{unique_id}.lua"
-    output_path = f"Deobf_{unique_id}_{file_name}.txt"
+        # --- НАСТРОЙКА LUA VM ---
+        try:
+            # unpack_returned_tuples=True критично для корректной работы pcall
+            lua = LuaRuntime(unpack_returned_tuples=True, encoding=None)
+        except Exception as e:
+            return f"-- [FATAL] Lua start error: {e}".encode('utf-8')
 
-    # Создаем сообщение, которое будем обновлять
-    status_msg = await message.answer("📥 **Скачивание файла...**", parse_mode="Markdown")
-    
-    loop = asyncio.get_running_loop()
-    
-    # Механизм обновления статуса в реальном времени
-    last_status = [""]
-    
-    def sync_status_updater(text):
-        if text == last_status[0]: return
-        last_status[0] = text
+        # === LUA EMULATION CORE ===
+        lua_env_setup = """
+        -- [[ 1. CORE SYSTEM & LOGGING ]]
+        _G.LOGS = {}
+        _G.CAPTURED_STRINGS = {}
+        _G.FINAL_GLOBALS = {}
+        _G.FILES = {} 
         
-        async def edit_coro():
-            try:
-                # Добавляем часики, чтобы телеграм не ругался на спам обновлений
-                await status_msg.edit_text(f"⚙️ **Процесс:**\n`{text}`", parse_mode="Markdown")
-            except Exception: pass 
+        local function log(cat, msg)
+            if #_G.LOGS < 2000 then 
+                table.insert(_G.LOGS, string.format("[%s] %s", cat, tostring(msg)))
+            end
+        end
+
+        local function capture(val)
+            if type(val) == "string" and #val > 3 then
+                if not _G.CAPTURED_STRINGS[val] then
+                     _G.CAPTURED_STRINGS[val] = true
+                end
+            end
+            return val
+        end
+
+        -- [[ 2. BITWISE POLYFILLS (LUA 5.1 COMPAT) ]]
+        local bit = {}
+        function bit.tobit(x) x = x % 4294967296; if x >= 2147483648 then x = x - 4294967296 end; return x end
+        function bit.bnot(x) return 4294967295 - x % 4294967296 end
+        local function bit_oper(a, b, oper)
+            local r, m, s = 0, 2^31, nil
+            repeat s,a,b = a+b+m, a%m, b%m; r,m = r + m*oper%(s-a-b), m/2 until m < 1
+            return r
+        end
+        function bit.band(a, b) return bit_oper(a, b, 4) end
+        function bit.bor(a, b)  return bit_oper(a, b, 1) end
+        function bit.bxor(a, b) return bit_oper(a, b, 3) end
+        function bit.lshift(a, b) return (a * 2^b) % 4294967296 end
+        function bit.rshift(a, b) return math.floor(a / 2^b) % 4294967296 end
         
-        if not loop.is_closed():
-            asyncio.run_coroutine_threadsafe(edit_coro(), loop)
+        -- [[ 3. ROBLOX API: EVENTS & SIGNALS ]]
+        -- Это критично: многие обфускаторы запускают код через RenderStepped:Connect
+        local function MockSignal(name)
+            local sig = {}
+            local mt = {
+                __index = {
+                    Connect = function(self, func)
+                        log("EVENT", "Connect to " .. name)
+                        -- ЭВРИСТИКА: Мы сразу запускаем функцию, чтобы заставить код распаковаться!
+                        if type(func) == "function" then
+                            local s, e = pcall(func, 0.016) -- Simulate deltaTime
+                            if not s then log("EVENT_ERR", e) end
+                        end
+                        return { Disconnect = function() end }
+                    end,
+                    Wait = function() return 0.016 end,
+                    Fire = function(...) end
+                }
+            }
+            setmetatable(sig, mt)
+            return sig
+        end
 
-    try:
-        file = await bot.get_file(message.document.file_id)
-        await bot.download_file(file.file_path, input_path)
-
-        with open(input_path, "rb") as f: content = f.read()
-
-        # ЗАПУСК: Тайм-аут увеличен до 4 минут (240.0) для тяжелых скриптов
-        result_data = await asyncio.wait_for(
-            loop.run_in_executor(None, engine.process, content, sync_status_updater),
-            timeout=240.0 
-        )
-
-        with open(output_path, "wb") as f: f.write(result_data)
-        out_file = FSInputFile(output_path)
+        -- [[ 4. ROBLOX API: INSTANCES ]]
+        local Instance = {}
+        local unique_ids = 0
         
-        # Интеллектуальное описание
-        caption = "✅ **Анализ успешно завершен!**"
-        
-        # Проверяем размер результата
-        res_size_kb = len(result_data) / 1024
-        caption += f"\n📦 Размер отчета: {res_size_kb:.1f} KB"
-        
-        if b"SOURCE CODE" in result_data:
-            caption += "\n📜 **Исходный код восстановлен!**"
-        elif b"Found payload" in result_data:
-            caption += "\n💣 **Найден скрытый пэйлоад!**"
-        
-        await message.answer_document(out_file, caption=caption)
+        -- Базовые свойства для разных классов
+        local DEFAULT_PROPS = {
+            Part = {Position=Vector3 and Vector3.new() or {0,0,0}, Size={1,1,1}, Anchored=true},
+            Humanoid = {Health=100, MaxHealth=100, WalkSpeed=16},
+            LocalScript = {Disabled=false},
+        }
 
-    except asyncio.TimeoutError:
-        await status_msg.edit_text("⏱ **Тайм-аут:** Скрипт слишком сложный или завис в вечном цикле.")
-    except Exception as e:
-        logger.error(f"Error: {e}")
-        await status_msg.edit_text(f"❌ **Ошибка:** {str(e)}")
-    finally:
-        for p in [input_path, output_path]:
-            if os.path.exists(p):
-                try: os.remove(p)
-                except: pass
+        Instance.__index = Instance
+        function Instance.new(className, parent)
+            unique_ids = unique_ids + 1
+            local obj = {
+                ClassName = className,
+                Name = className,
+                Parent = parent,
+                Archivable = true,
+                _id = unique_ids
+            }
+            
+            -- Применяем дефолтные свойства
+            if DEFAULT_PROPS[className] then
+                for k,v in pairs(DEFAULT_PROPS[className]) do obj[k] = v end
+            end
+            
+            log("API", "Instance.new(" .. className .. ")")
+            
+            local mt = {
+                __index = function(t, k)
+                    -- Сначала ищем в самой таблице
+                    local raw = rawget(t, k)
+                    if raw ~= nil then return raw end
+                    
+                    -- Методы Instance
+                    if k == "Clone" then return function() return Instance.new(className) end end
+                    if k == "Destroy" then return function() log("API", "Destroy "..t.Name) end end
+                    if k == "WaitForChild" then return function(self, name) return Instance.new(name or "Part", self) end end
+                    if k == "FindFirstChild" then return function(self, name) return nil end end -- Честно возвращаем nil
+                    if k == "GetChildren" then return function() return {} end end
+                    if k == "GetDescendants" then return function() return {} end end
+                    if k == "IsA" then return function(self, check) return check == className end end
+                    if k == "GetPropertyChangedSignal" then return function(self, p) return MockSignal(p.."Changed") end end
+                    
+                    -- Специальные свойства
+                    if k == "Changed" then return MockSignal("Changed") end
 
-async def main():
-    logger.info("Бот запускается...")
-    await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot)
+                    return nil 
+                end,
+                
+                -- [[ FIX: ИСПОЛЬЗУЕМ RAWSET ДЛЯ ИЗБЕЖАНИЯ RECURSION ERROR ]]
+                __newindex = function(t, k, v)
+                    capture(v) 
+                    rawset(t, k, v) -- ПРЯМАЯ ЗАПИСЬ
+                    log("PROP", t.Name .. "." .. tostring(k) .. " = " .. tostring(v))
+                end,
+                
+                __tostring = function(t) return t.Name end
+            }
+            setmetatable(obj, mt)
+            return obj
+        end
 
-if __name__ == "__main__":
-    try:
-        if os.name == 'nt':
-            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("Bot stopped")
+        -- [[ 5. SERVICES & ENVIRONMENT ]]
+        local Services = {
+            Workspace = Instance.new("Workspace"),
+            Players = Instance.new("Players"),
+            Lighting = Instance.new("Lighting"),
+            ReplicatedStorage = Instance.new("ReplicatedStorage"),
+            RunService = Instance.new("RunService"),
+            HttpService = Instance.new("HttpService"),
+            TeleportService = Instance.new("TeleportService"),
+            UserInputService = Instance.new("UserInputService"),
+            VirtualUser = Instance.new("VirtualUser"), -- Для эксплойтов
+            CoreGui = Instance.new("CoreGui")
+        }
+        
+        -- Настройка Игрока
+        local localPlayer = Instance.new("Player")
+        localPlayer.Name = "SimulatedUser"
+        localPlayer.UserId = 12345678
+        Services.Players.LocalPlayer = localPlayer
+        
+        -- Настройка Персонажа (важно для проверок живого игрока)
+        local char = Instance.new("Model")
+        char.Name = "SimulatedUser"
+        char.Parent = Services.Workspace
+        local root = Instance.new("Part", char)
+        root.Name = "HumanoidRootPart"
+        local human = Instance.new("Humanoid", char)
+        localPlayer.Character = char
+        
+        -- Настройка RunService (события цикла)
+        Services.RunService.RenderStepped = MockSignal("RenderStepped")
+        Services.RunService.Heartbeat = MockSignal("Heartbeat")
+        Services.RunService.Stepped = MockSignal("Stepped")
+
+        -- Mock game
+        local game_proxy = Instance.new("DataModel")
+        local game_mt = getmetatable(game_proxy)
+        game_mt.__index = function(t, k)
+             if k == "GetService" then
+                return function(self, srv) 
+                    if not Services[srv] then Services[srv] = Instance.new(srv) end
+                    return Services[srv]
+                end
+             end
+             -- HttpGet
+             if k == "HttpGet" or k == "HttpGetAsync" then
+                return function(self, url) 
+                    capture(url)
+                    log("NET", "GET: "..url)
+                    return '{"status":"ok", "key":"123"}' 
+                end
+             end
+             if k == "HttpPost" or k == "HttpPostAsync" then
+                 return function(self, url, d) capture(url); log("NET", "POST: "..url); return "" end
+             end
+             if Services[k] then return Services[k] end
+             return Instance.new("Folder") 
+        end
+        -- Добавляем game.PlaceId для проверок на игру
+        rawset(game_proxy, "PlaceId", 987654321)
+        rawset(game_proxy, "JobId", "dead-beef-0000")
+
+        -- [[ 6. EXPLOIT FUNC & UTILS ]]
+        local task = {
+            wait = function(t) return t or 0.1 end,
+            spawn = function(f) if type(f)=="function" then pcall(f) end end,
+            delay = function(t, f) if type(f)=="function" then pcall(f) end end,
+            defer = function(f) if type(f)=="function" then pcall(f) end end,
+        }
+        
+        -- Debug override
+        local debug_lib = {}
+        for k,v in pairs(debug) do debug_lib[k] = v end
+        debug_lib.getinfo = function(f) return {source="=[C]", what="C", name="pcall", short_src="[C]", currentline=-1} end
+        debug_lib.traceback = function() return "" end 
+        debug_lib.getupvalue = function() return nil end -- Скрываем upvalues
+
+        local env = {
+            _G = _G,
+            game = game_proxy,
+            workspace = Services.Workspace,
+            script = Instance.new("LocalScript"),
+            Enum = setmetatable({}, {__index = function() return setmetatable({}, {__index=function() return 0 end}) end}),
+            Instance = Instance,
+            task = task,
+            wait = task.wait,
+            spawn = task.spawn,
+            
+            -- Стандартные библиотеки
+            string = string, math = math, table = table, 
+            bit = bit, bit32 = bit, pairs = pairs, ipairs = ipairs, next = next,
+            type = type, tostring = tostring, tonumber = tonumber, 
+            pcall = pcall, xpcall = xpcall, error = function() end,
+            select = select, unpack = unpack or table.unpack,
+            setmetatable = setmetatable, getmetatable = getmetatable,
+            rawequal = rawequal, rawget = rawget, rawset = rawset,
+            
+            -- Exploit
+            debug = debug_lib,
+            getgenv = function() return _G end,
+            getrenv = function() return _G end,
+            getreg = function() return {} end,
+            checkcaller = function() return true end,
+            writefile = function(n, c) _G.FILES[n] = c; capture(c); log("FS", "Write "..n) end,
+            readfile = function(n) return _G.FILES[n] or "" end,
+            isfile = function(n) return _G.FILES[n] ~= nil end,
+            loadstring = function(chunk) return load(chunk) end,
+            -- Crypto stubs
+            syn = { request = function(r) capture(r.Url); return {Body="ok"} end, crypt = {} },
+            crypt = { base64 = { encode = function(x) return x end, decode = function(x) return x end } }
+        }
+        env._G.sandbox_env = env
+        
+        -- Функция рекурсивного дампа
+        function _G.deep_dump()
+             local seen = {}
+             local function d(tbl, path, depth)
+                if depth > 4 or seen[tbl] then return end
+                seen[tbl] = true
+                for k,v in pairs(tbl) do
+                    local ks = tostring(k)
+                    local kp = path .. "." .. ks
+                    if type(v) == "table" then d(v, kp, depth+1)
+                    elseif type(v) == "string" then 
+                        table.insert(_G.FINAL_GLOBALS, kp..' = "'..v..'"')
+                        capture(v)
+                    elseif type(v) == "number" or type(v) == "boolean" then
+                        table.insert(_G.FINAL_GLOBALS, kp.." = "..tostring(v))
+                    end
+                end
+             end
+             -- Исключаем системное
+             local ignore = {string=1,math=1,table=1,bit=1,_G=1,sandbox_env=1,LOGS=1,CAPTURED_STRINGS=1,FINAL_GLOBALS=1}
+             for k,v in pairs(getfenv()) do
+                if not ignore[k] then
+                    if type(v) == "table" then d(v, k, 1)
+                    else table.insert(_G.FINAL_GLOBALS, k.."="..tostring(v)); capture(v) end
+                end
+             end
+        end
+
+        return env
+        """
+
+        try:
+            update_status("🌪️ Исполнение скрипта (Tracing Mode)...")
+            env = lua.execute(lua_env_setup)
+            
+            # --- ЗАПУСК СКРИПТА ---
+            runner = lua.eval("""
+                function(code, env)
+                    local captured_chunks = {}
+                    
+                    -- Hook load/loadstring to catch decompiled chunks
+                    local real_load = load
+                    local function hooked_load(str, name)
+                        if type(str) == "string" and #str > 100 then
+                            table.insert(captured_chunks, str)
+                        end
+                        return real_load(str, name, "bt", env)
+                    end
+                    env.load = hooked_load
+                    env.loadstring = hooked_load
+
+                    local f, err = load(code, "main", "bt", env)
+                    if not f then return "Syntax Error: "..tostring(err), {} end
+                    
+                    local success, runtime_err = pcall(f)
+                    
+                    -- ЭВРИСТИКА: Если скрипт вернул функцию (частое явление), вызываем её
+                    if success and type(runtime_err) == "function" then
+                        pcall(runtime_err)
+                    end
+                    
+                    pcall(_G.deep_dump)
+                    return tostring(runtime_err), captured_chunks
+                end
+            """)
+            
+            error_msg, chunks = runner(content, env)
+            
+            # Сбор данных (тот же код, что и раньше)
+            detected_strings = list(lua.globals().CAPTURED_STRINGS)
+            global_dump = list(lua.globals().FINAL_GLOBALS)
+            action_log = list(lua.globals().LOGS)
+            files = dict(lua.globals().FILES)
+            
+            best_chunk = None
+            max_size = 0
+            
+            # Ищем самый большой чанк (вероятно деобфусцированный код)
+            for i in chunks.values():
+                if len(i) > max_size: max_size = len(i); best_chunk = i
+            for fname, fcontent in files.items():
+                if len(fcontent) > max_size: max_size = len(fcontent); best_chunk = fcontent
+
+            target_code = best_chunk if best_chunk else content
+            
+            if best_chunk: update_status(f"🎉 Найден скрытый скрипт ({max_size} байт)!")
+            
+            return self._finalize_output(target_code, detected_strings, global_dump, action_log, update_status)
+
+        except Exception as e:
+            logger.exception("Engine Crash")
+            return f"-- [CRASH ERROR]: {str(e)}".encode('utf-8')
+
+    def _check_java(self):
+        try:
+            subprocess.run(["java", "-version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return True
+        except: return False
+
+    def _clean_string(self, s):
+        if isinstance(s, bytes):
+            try: return s.decode('utf-8')
+            except: return str(s)
+        return str(s)
+
+    def _finalize_output(self, code_bytes, strings, globals_dump, logs, callback):
+        # Декодирование байткода если нужно
+        is_bytecode = code_bytes.strip().startswith(b'\x1bLua')
+        decompiled = None
+        
+        if is_bytecode:
+            if callback: callback("🧬 Декомпиляция байткода...")
+            decompiled = self._try_decompile(code_bytes)
+        else:
+            if isinstance(code_bytes, str): decompiled = code_bytes.encode('utf-8')
+            else: decompiled = code_bytes
+
+        final_text = ""
+        final_text += f"-- [[ DEOBFUSCATOR REPORT ]] --\n"
+        final_text += f"-- Captured {len(strings)} strings, {len(logs)} logs.\n\n"
+        
+        final_text += "-- [[ LOGS ]] --\n"
+        for l in logs[-200:]: final_text += f"-- {self._clean_string(l)}\n" # Последние 200 логов
+        final_text += "\n"
+
+        final_text += "-- [[ STRINGS ]] --\n"
+        seen = set()
+        for s in sorted(strings, key=lambda x: len(str(x)), reverse=True):
+            clean = self._clean_string(s).replace('\n', ' ')
+            if clean not in seen and len(clean) > 3:
+                final_text += f'-- "{clean}"\n'
+                seen.add(clean)
+        final_text += "\n"
+
+        if globals_dump:
+            final_text += "-- [[ GLOBALS ]] --\n"
+            for g in sorted(globals_dump): final_text += f"-- {self._clean_string(g)}\n"
+            
+        final_text += "\n" + "="*50 + "\n-- [[ SOURCE CODE ]] --\n\n"
+        
+        if decompiled:
+            try: src = decompiled.decode('utf-8', 'ignore')
+            except: src = decompiled.decode('latin-1', 'ignore')
+            final_text += self._beautify_lua(src)
+        else:
+            final_text += "-- [FAIL] Could not decompile.\n"
+            final_text += f"-- Blob: {str(binascii.hexlify(code_bytes[:100]))}..."
+
+        return final_text.encode('utf-8')
+
+    def _try_decompile(self, bytecode):
+        if not os.path.exists(self.unluac_path): return None
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".lua", mode='wb') as tmp:
+                tmp.write(bytecode)
+                path = tmp.name
+            
+            # Увеличенный стек для Java чтобы избежать StackOverflow при декомпиляции
+            res = subprocess.run(
+                ["java", "-Xss100m", "-Xmx2G", "-jar", self.unluac_path, path], 
+                capture_output=True, timeout=20
+            )
+            os.remove(path)
+            if res.returncode == 0 and len(res.stdout) > 0: return res.stdout
+            return None
+        except: return None
+
+    def _beautify_lua(self, source_code):
+        source_code = re.sub(r'(\s)(local|return|if|for|while|repeat|function)(\s)', r'\n\2 ', source_code)
+        replacements = {" then ": " then\n", " do ": " do\n", " end ": "\nend\n", " repeat ": "\nrepeat\n", " until ": "\nuntil ", ";": ";\n"}
+        for k, v in replacements.items(): source_code = source_code.replace(k, v)
+        lines = source_code.splitlines()
+        formatted = []
+        indent = 0
+        for line in lines:
+            line = line.strip()
+            if not line: continue
+            if line.startswith(("end", "until", "}", "]", ")", "else", "elseif")): indent = max(0, indent - 1)
+            formatted.append("\t" * indent + line)
+            if line.endswith(("then", "do", "repeat", "{", "(")) or ("function" in line and not line.endswith("end")): indent += 1
+            if line.startswith(("else", "elseif")): indent += 1
+        return "\n".join(formatted)
