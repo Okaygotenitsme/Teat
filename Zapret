@@ -1,542 +1,67 @@
-import lupa
-from lupa import LuaRuntime
-import logging
-import subprocess
-import os
-import tempfile
+# vm_detector.py
 import re
 import binascii
-import time
 
-# --- КОНФИГУРАЦИЯ ---
-JAVA_STACK_SIZE = "512m" # Огромный стек для unluac
-LUA_MEMORY_LIMIT = 1024 * 1024 * 500 # 500 MB RAM limit for Lua
-INSTRUCTION_LIMIT = 5000000 # Лимит операций процессора (чтобы не вис намертво)
+class VMDetector:
+    """
+    Небольшой модуль для детекции виртуализации (MoonSec / Luraph / IronBrew heuristics)
+    и для извлечения строк / backslash-number sequences.
+    Это не "полный" devirtualizer — но часто достаточно для извлечения плейнстрингов.
+    """
 
-logger = logging.getLogger("TitanEngine")
-
-class DeobfuscatorEngine:
-    def __init__(self):
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        self.unluac_path = os.path.join(base_dir, "unluac.jar")
-        logger.info(f"📁 Engine initialized at: {base_dir}")
-
-    def process(self, content, status_callback=None):
+    def analyze(self, text):
         """
-        Главный метод обработки.
+        Возвращает словарь с ключами:
+         - is_vm: bool
+         - reasons: list
         """
-        def update_status(msg):
-            if status_callback: status_callback(msg)
-            logger.info(f"[STATUS] {msg}")
+        reasons = []
+        lower = text.lower()
+        # очевидные метки
+        if "moonsec" in lower or "this file was protected" in lower:
+            reasons.append("found 'moonsec' / 'protected' marker")
+        # специфичные функции / странные имена
+        if re.search(r'\ba\.[a-zA-Z0-9_]{6,}\b', text):
+            reasons.append("found obfuscated table access patterns like a.something")
+        if re.search(r'\\\\\d{1,3}\\\\\d{1,3}\\\\\d{1,3}', text):
+            reasons.append("found repeated backslash-number escapes (\\4\\8\\116..)")
+        if re.search(r'getfenv\s*\(', text):
+            reasons.append("uses getfenv")
+        if re.search(r'while\s+true\s+do\s+local\s+[a-zA-Z_0-9]+', text):
+            reasons.append("large numeric loop detected")
+        is_vm = len(reasons) > 0
+        return {'is_vm': is_vm, 'reasons': reasons}
 
-        if not self._check_java():
-            return b"-- [FATAL] Java not found. Install Java JDK 17+."
+    def extract_strings(self, text, min_len=4):
+        """Извлекает все строковые литералы длиннее min_len"""
+        results = set()
+        # двойные и одинарные кавычки
+        for m in re.findall(r'"([^"\\]{%d,})"' % min_len, text):
+            results.add(m)
+        for m in re.findall(r"'([^'\\]{%d,})'" % min_len, text):
+            results.add(m)
+        # также ищем long sequences похожие на rbxassetid:// и http
+        for m in re.findall(r'(rbxassetid://[0-9]+)', text):
+            results.add(m)
+        for m in re.findall(r'(https?://[^\s\'"]{8,})', text):
+            results.add(m)
+        return list(results)
 
-        update_status("🔥 Запуск TITAN ENGINE (Deep Emulation Mode)...")
-
-        # --- ЗАПУСК LUA VM ---
-        try:
-            # Создаем Lua машину
-            lua = LuaRuntime(unpack_returned_tuples=True, encoding=None)
-        except Exception as e:
-            return f"-- [FATAL] Lua init failed: {e}".encode('utf-8')
-
-        # ==============================================================================
-        # ГИГАНТСКИЙ СКРИПТ ЭМУЛЯЦИИ ROBLOX (Titan Environment)
-        # ==============================================================================
-        titan_env_script = """
-        -- [[ TITAN ENGINE V4: ROBLOX EMULATOR ]]
-        
-        -- 1. SYSTEM INTERNALS & STORAGE
-        _G.TITAN_STORAGE = {
-            LOGS = {},
-            STRINGS = {},
-            GLOBALS = {},
-            FILES = {},
-            CHUNKS = {},
-            START_TIME = os.clock()
-        }
-        
-        local STORAGE = _G.TITAN_STORAGE
-        
-        local function sys_log(tag, msg)
-            -- Логируем только важное, чтобы не забить память
-            if #STORAGE.LOGS < 5000 then
-                table.insert(STORAGE.LOGS, string.format("[%s] %s", tag, tostring(msg)))
-            end
-        end
-
-        local function capture_data(val, source)
-            if type(val) == "string" and #val > 3 then
-                -- Фильтрация мусора (слишком короткие или системные строки)
-                if not STORAGE.STRINGS[val] then
-                     STORAGE.STRINGS[val] = source or "unknown"
-                end
-            end
-        end
-
-        -- 2. CORE COMPATIBILITY (Lua 5.1 / LuaU Bitwise)
-        local bit = {}
-        function bit.tobit(x) x = x % 4294967296; if x >= 2147483648 then x = x - 4294967296 end; return x end
-        function bit.bnot(x) return 4294967295 - x % 4294967296 end
-        local function bit_oper(a, b, oper)
-            local r, m, s = 0, 2^31, nil
-            repeat s,a,b = a+b+m, a%m, b%m; r,m = r + m*oper%(s-a-b), m/2 until m < 1
-            return r
-        end
-        function bit.band(a, b) return bit_oper(a, b, 4) end
-        function bit.bor(a, b)  return bit_oper(a, b, 1) end
-        function bit.bxor(a, b) return bit_oper(a, b, 3) end
-        function bit.lshift(a, b) return (a * 2^b) % 4294967296 end
-        function bit.rshift(a, b) return math.floor(a / 2^b) % 4294967296 end
-        function bit.arshift(a, b)
-            local z = math.floor(a / 2^b) % 4294967296
-            if a >= 2147483648 then z = z + 4294967296 - 2^(32-b) end
-            return z
-        end
-        function bit.ror(a, b) return bit.bor(bit.rshift(a, b), bit.lshift(a, 32 - b)) end
-        function bit.rol(a, b) return bit.bor(bit.lshift(a, b), bit.rshift(a, 32 - b)) end
-        function bit.tohex(x, n) return string.format("%0"..(n or 8).."x", x) end
-        function bit.swap(x) return bit.bor(bit.rshift(x, 24), bit.bor(bit.rshift(bit.band(x, 0x00FF0000), 8), bit.bor(bit.lshift(bit.band(x, 0x0000FF00), 8), bit.lshift(x, 24)))) end
-
-        -- 3. ADVANCED INSTANCE EMULATION (Metatable hooking protection)
-        local Instance = {}
-        local Instance_Registry = {} -- Храним ссылки
-        
-        -- Система сигналов (RBXScriptSignal)
-        local function MakeSignal(name)
-            local sig = {}
-            local mt = {
-                __index = {
-                    Connect = function(self, func)
-                        sys_log("SIGNAL", "Connected to " .. name)
-                        -- ЭВРИСТИКА: Немедленно вызываем callback, чтобы код внутри выполнился
-                        if type(func) == "function" then
-                            local s, e = pcall(func, 0.1) -- dt
-                            if not s then sys_log("SIGNAL_ERR", e) end
-                        end
-                        return { Disconnect = function() end, Connected = true }
-                    end,
-                    Wait = function() return 0.1 end,
-                    Fire = function(...) end
-                },
-                __tostring = function() return "RBXScriptSignal" end
-            }
-            setmetatable(sig, mt)
-            return sig
-        end
-
-        Instance.__index = Instance
-        function Instance.new(className, parent)
-            local obj = {
-                ClassName = className,
-                Name = className,
-                Parent = parent,
-                Archivable = true
-            }
-            
-            -- Дефолтные пропы, чтобы скрипт не падал на математике
-            if className == "Part" then 
-                obj.Position = {X=0, Y=0, Z=0} 
-                obj.CFrame = {p={X=0, Y=0, Z=0}, lookVector={X=0,Y=0,Z=1}}
-            end
-            if className == "Humanoid" then obj.Health = 100; obj.MaxHealth = 100 end
-
-            local proxy = newproxy(true)
-            local mt = getmetatable(proxy)
-            
-            mt.__index = function(t, k)
-                -- 1. Свойства объекта
-                local val = rawget(obj, k)
-                if val ~= nil then return val end
-                
-                -- 2. Методы
-                if k == "Clone" then return function() return Instance.new(className) end end
-                if k == "Destroy" then return function() end end
-                if k == "WaitForChild" then return function(_, n) return Instance.new(n or "Folder", proxy) end end
-                if k == "FindFirstChild" then return function(_, n) return nil end end
-                if k == "GetChildren" then return function() return {} end end
-                if k == "IsA" then return function(_, c) return c == className end end
-                
-                -- 3. Сигналы
-                if k == "Changed" or k == "Touched" then return MakeSignal(k) end
-                
-                return nil
-            end
-            
-            mt.__newindex = function(t, k, v)
-                -- Ловим строки, которые пишут в свойства (например TextLabel.Text)
-                capture_data(v, "Property: "..k)
-                rawset(obj, k, v)
-                sys_log("PROP", className.."."..k.." set")
-            end
-            
-            mt.__tostring = function() return obj.Name end
-            mt.__metatable = "The metatable is locked" -- Эмуляция защиты Роблокса
-            
-            return proxy
-        end
-
-        -- 4. ROBLOX ENVIRONMENT MOCK
-        local Services = {
-            Workspace = Instance.new("Workspace"),
-            Players = Instance.new("Players"),
-            Lighting = Instance.new("Lighting"),
-            ReplicatedStorage = Instance.new("ReplicatedStorage"),
-            RunService = Instance.new("RunService"),
-            HttpService = Instance.new("HttpService"),
-            TeleportService = Instance.new("TeleportService"),
-            StarterGui = Instance.new("StarterGui"),
-            CoreGui = Instance.new("CoreGui")
-        }
-        
-        -- Настраиваем Игрока
-        local lp = Instance.new("Player")
-        lp.Name = "TitanUser"
-        lp.UserId = 2392039
-        Services.Players.LocalPlayer = lp
-        
-        -- Настраиваем RunService
-        local rs = Services.RunService
-        rawset(rs, "RenderStepped", MakeSignal("RenderStepped"))
-        rawset(rs, "Heartbeat", MakeSignal("Heartbeat"))
-        rawset(rs, "Stepped", MakeSignal("Stepped"))
-        rawset(rs, "IsStudio", function() return false end)
-        rawset(rs, "IsClient", function() return true end)
-
-        local GameProxy = newproxy(true)
-        local GameMT = getmetatable(GameProxy)
-        GameMT.__index = function(t, k)
-            if k == "GetService" then
-                return function(_, s) 
-                    sys_log("API", "GetService: "..s)
-                    if not Services[s] then Services[s] = Instance.new(s) end
-                    return Services[s]
-                end
-            end
-            if k == "HttpGet" or k == "HttpGetAsync" then
-                return function(_, url)
-                    capture_data(url, "URL")
-                    sys_log("NET", "GET "..url)
-                    return "-- Fake Response"
-                end
-            end
-            if k == "PlaceId" then return 1818 end
-            if k == "JobId" then return "job-id-mock" end
-            if Services[k] then return Services[k] end
-            return Instance.new("Folder")
-        end
-        GameMT.__tostring = function() return "Game" end
-
-        -- 5. EXPLOIT ENVIRONMENT (Synapse/KrnL/Fluxus)
-        local ExploitEnv = {
-            getgenv = function() return _G end,
-            getrenv = function() return _G end,
-            getreg = function() return {} end,
-            getgc = function() return {} end,
-            checkcaller = function() return true end,
-            islclosure = function() return true end,
-            iscclosure = function() return false end,
-            newcclosure = function(f) return f end,
-            hookfunction = function(old, new) sys_log("HOOK", "Attempt to hook function"); return old end,
-            
-            -- File System
-            writefile = function(name, content) 
-                STORAGE.FILES[name] = content
-                capture_data(content, "File: "..name)
-                sys_log("FS", "Write "..name)
-            end,
-            readfile = function(name) return STORAGE.FILES[name] or "" end,
-            isfile = function(name) return STORAGE.FILES[name] ~= nil end,
-            delfile = function(name) STORAGE.FILES[name] = nil end,
-            listfiles = function() return {} end,
-            
-            -- Input
-            iswindowactive = function() return true end,
-            mouse1click = function() end,
-            keypress = function() end,
-            
-            -- Crypt
-            syn = {
-                request = function(t) capture_data(t.Url, "SynReq"); return {Body="ok", StatusCode=200} end,
-                crypt = {
-                    base64 = {
-                        encode = function(d) return d end, -- Заглушки, чтобы не ломать логику
-                        decode = function(d) return d end
-                    }
-                }
-            },
-            bit = bit -- inject bitwise
-        }
-
-        -- 6. HOOKING SYSTEM (ANTI-FREEZE & CAPTURE)
-        
-        -- Перехват loadstring для сбора деобфусцированных скриптов
-        local real_load = load
-        local function safe_load(chunk, name)
-            if type(chunk) == "string" then
-                if #chunk > 50 then
-                    -- Сохраняем чанк
-                    local hash = tostring(#chunk)
-                    STORAGE.CHUNKS[hash] = chunk
-                    sys_log("LOAD", "Captured chunk size: " .. #chunk)
-                end
-            end
-            return real_load(chunk, name, "bt", _G) -- Исполняем в глобальном env
-        end
-
-        -- Перехват string.char (IronBrew часто собирает строки так)
-        local real_char = string.char
-        local function safe_char(...)
-            local args = {...}
-            if #args > 10000 then return "" end -- Защита памяти
-            local res = real_char(unpack(args))
-            capture_data(res, "BuiltString")
-            return res
-        end
-
-        -- 7. BUILDING THE GLOBAL ENV
-        local ENV = {
-            _G = _G,
-            game = GameProxy,
-            workspace = Services.Workspace,
-            script = Instance.new("LocalScript"),
-            
-            Instance = Instance,
-            Enum = setmetatable({}, {__index = function() return setmetatable({}, {__index=function() return 0 end}) end}),
-            
-            -- Task Library
-            task = {
-                wait = function() return 0.01 end,
-                spawn = function(f, ...) if f then pcall(f, ...) end end,
-                delay = function(t, f, ...) if f then pcall(f, ...) end end,
-                defer = function(f, ...) if f then pcall(f, ...) end end
-            },
-            wait = function() return 0.01 end,
-            spawn = function(f) if f then pcall(f) end end,
-            
-            -- Lua Libs
-            math = math, table = table, string = string, coroutine = coroutine,
-            debug = debug, os = os,
-            pairs = pairs, ipairs = ipairs, next = next, type = type, tostring = tostring,
-            tonumber = tonumber, pcall = pcall, xpcall = xpcall, error = error,
-            select = select, unpack = unpack or table.unpack,
-            getmetatable = getmetatable, setmetatable = setmetatable,
-            rawequal = rawequal, rawget = rawget, rawset = rawset,
-            loadstring = safe_load,
-            load = safe_load
-        }
-        
-        string.char = safe_char
-
-        -- Inject Exploit funcs
-        for k,v in pairs(ExploitEnv) do ENV[k] = v end
-        ENV.getgenv = function() return ENV end
-        
-        _G.TITAN_ENV = ENV
-        return ENV
+    def extract_backslash_numbers(self, text):
         """
-
-        try:
-            # 1. Загружаем среду
-            env = lua.execute(titan_env_script)
-
-            # 2. Подготавливаем Runner с хуком от зависания
-            # Это самое важное: debug.sethook останавливает выполнение через N инструкций
-            runner_code = f"""
-            function(code, env)
-                local LIMIT = {INSTRUCTION_LIMIT}
-                local counter = 0
-                
-                -- Флаг для аварийной остановки
-                local STOPPED_BY_LIMIT = false
-                
-                local function watchdog(mode)
-                    counter = counter + 1
-                    if counter > LIMIT then
-                        STOPPED_BY_LIMIT = true
-                        error("TITAN_TIMEOUT") -- Принудительно ломаем скрипт
-                    end
-                end
-                
-                -- Ставим хук на каждые 1000 инструкций
-                debug.sethook(watchdog, "", 1000)
-                
-                -- Подменяем env для исполняемого кода
-                local f, err = load(code, "target", "bt", env)
-                if not f then return "Syntax Error: "..tostring(err), false end
-                
-                setfenv(f, env)
-                
-                -- Запускаем в pcall, чтобы поймать наш же Error
-                local success, res = pcall(f)
-                
-                -- Снимаем хук
-                debug.sethook()
-                
-                -- Пытаемся запустить, если вернули функцию
-                if success and type(res) == "function" then
-                    debug.sethook(watchdog, "", 1000)
-                    pcall(res)
-                    debug.sethook()
-                end
-                
-                return tostring(res), STOPPED_BY_LIMIT
-            end
-            """
-            
-            runner = lua.eval(runner_code)
-            
-            update_status("🌪️ Исполнение в песочнице (Watchdog Active)...")
-            result_msg, stopped = runner(content, env)
-
-            if stopped:
-                update_status("🛑 Скрипт остановлен (превышен лимит инструкций), но данные сохранены.")
-            else:
-                update_status("✅ Скрипт завершил работу самостоятельно.")
-
-            # --- СБОР ДАННЫХ ИЗ LUA ---
-            # Извлекаем данные из глобальной таблицы _G.TITAN_STORAGE
-            storage = lua.globals().TITAN_STORAGE
-            
-            logs = list(storage.LOGS)
-            strings_raw = dict(storage.STRINGS) # {string: source}
-            chunks_raw = dict(storage.CHUNKS)
-            files_raw = dict(storage.FILES)
-            
-            # Собираем строки в список
-            detected_strings = list(strings_raw.keys())
-            
-            # --- РЕКУРСИВНЫЙ ДАМП ПЕРЕМЕННЫХ ---
-            # Дампим то, что скрипт положил в env (помимо наших системных)
-            global_dump = []
-            sys_keys = {"_G", "TITAN_ENV", "TITAN_STORAGE", "string", "math", "table", "package", "debug", "os", "io", "coroutine", "bit", "bit32"}
-            
-            for key in env:
-                k_str = str(key)
-                if k_str not in sys_keys:
-                    try:
-                        val = env[key]
-                        global_dump.append(f"{k_str} = {str(val)}")
-                    except: pass
-
-            # --- ПОИСК ЛУЧШЕГО ПЭЙЛОАДА ---
-            best_chunk = None
-            max_len = 0
-            
-            # Проверяем файлы
-            for name, data in files_raw.items():
-                if len(data) > max_len:
-                    max_len = len(data)
-                    best_chunk = data
-                    logs.append(f"[HEURISTIC] Found payload in file: {name}")
-
-            # Проверяем перехваченные loadstring
-            for hash_key, data in chunks_raw.items():
-                if len(data) > max_len:
-                    max_len = len(data)
-                    best_chunk = data
-                    logs.append(f"[HEURISTIC] Found payload in loadstring hook (size: {len(data)})")
-            
-            # Если ничего не нашли, берем входной файл
-            final_code = best_chunk if best_chunk else content
-            
-            if best_chunk:
-                update_status(f"🎉 УСПЕХ: Извлечен скрытый код ({max_len} байт)!")
-            
-            return self._finalize(final_code, detected_strings, global_dump, logs, update_status)
-
-        except Exception as e:
-            logger.error(f"Engine Failure: {e}")
-            return f"-- [ENGINE ERROR] {str(e)}\n-- Check logs.".encode('utf-8')
-
-    def _check_java(self):
-        try:
-            subprocess.run(["java", "-version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            return True
-        except: return False
-
-    def _finalize(self, code, strings, globals_list, logs, callback):
-        """ Сборка финального отчета """
+        Ищем последовательности вида "\\4\\8\\116\\111\\.." и превращаем их в строку.
+        Возвращаем список распакованных строк.
+        """
         out = []
-        out.append("-- [[ TITAN DEOBFUSCATOR REPORT ]] --")
-        out.append(f"-- Generated: {time.strftime('%Y-%m-%d %H:%M:%S')}")
-        out.append(f"-- Strings Captured: {len(strings)}")
-        out.append("\n" + "="*60 + "\n")
-        
-        # LOGS
-        out.append("-- [[ EXECUTION LOGS ]] --")
-        for l in logs[-100:]: out.append(f"-- {l}")
-        
-        # STRINGS
-        out.append("\n-- [[ DECRYPTED STRINGS ]] --")
-        # Сортируем по длине
-        sorted_strs = sorted(strings, key=len, reverse=True)
-        seen = set()
-        for s in sorted_strs:
-            safe_s = str(s).replace('\n', ' ').replace('\r', '')
-            if safe_s not in seen:
-                out.append(f'-- "{safe_s}"')
-                seen.add(safe_s)
-        
-        # GLOBALS
-        out.append("\n-- [[ GLOBAL VARIABLES ]] --")
-        for g in globals_list: out.append(f"-- {g}")
-
-        out.append("\n" + "="*60 + "\n")
-        out.append("-- [[ SOURCE CODE / BYTECODE ]] --\n")
-        
-        # Decompile check
-        is_bytecode = code.strip().startswith(b'\x1bLua')
-        if is_bytecode:
-            callback("🧬 Декомпиляция (unluac)...")
-            res = self._decompile(code)
-            if res:
-                out.append(self._beautify(res.decode('utf-8', 'ignore')))
-            else:
-                out.append("-- [WARNING] Unluac failed. Raw bytecode below:")
-                out.append(f"-- Header: {binascii.hexlify(code[:16])}...")
-        else:
+        # ищем группы с большим количеством backslash-number
+        for group in re.findall(r'(?:\\\d{1,3}){6,}', text):
             try:
-                txt = code.decode('utf-8')
-                out.append(self._beautify(txt))
-            except:
-                out.append("-- [BINARY DATA] Could not decode as text.")
-        
-        return "\n".join(out).encode('utf-8')
-
-    def _decompile(self, data):
-        if not os.path.exists(self.unluac_path): return None
-        try:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".lua", mode='wb') as f:
-                f.write(data)
-                tmp_name = f.name
-            
-            # Используем JAVA_STACK_SIZE чтобы избежать StackOverflow в unluac
-            cmd = ["java", f"-Xss{JAVA_STACK_SIZE}", "-jar", self.unluac_path, tmp_name]
-            res = subprocess.run(cmd, capture_output=True, timeout=30)
-            os.remove(tmp_name)
-            
-            if res.returncode == 0: return res.stdout
-            return None
-        except: return None
-
-    def _beautify(self, src):
-        # Простой форматтер для читаемости
-        indent = 0
-        formatted = []
-        for line in src.splitlines():
-            s_line = line.strip()
-            if not s_line: continue
-            
-            if s_line.startswith(("end", "until", "}", ")", "else", "elseif")):
-                indent = max(0, indent - 1)
-                
-            formatted.append("\t" * indent + s_line)
-            
-            if s_line.endswith(("then", "do", "repeat", "{", "(")) and not s_line.startswith("end"):
-                indent += 1
-            if s_line.startswith(("else", "elseif")):
-                indent += 1
-                
-        return "\n".join(formatted)
+                nums = re.findall(r'\\(\d{1,3})', group)
+                b = bytes(int(n) for n in nums)
+                try:
+                    out.append(b.decode('utf-8'))
+                except:
+                    out.append(b.decode('latin-1', 'ignore'))
+            except Exception:
+                continue
+        return out
