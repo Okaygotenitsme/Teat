@@ -1,4 +1,15 @@
 # engine.py
+"""
+Улучшённый движок деобфускации.
+Multi-pass pipeline:
+  - static heuristics / string extraction
+  - runtime tracing (sandbox with bit/bit32 polyfill + hooks)
+  - aggressive decoding (backslash numbers, base64, hex, single-byte XOR)
+  - attempt runtime tracing AGAIN on decoded candidates
+  - unluac runs last on all byte-candidates
+
+Выдаёт основной текстовый дамп и сохраняет extracted_blocks.lua (local mel_1 = ...)
+"""
 import os
 import re
 import io
@@ -11,7 +22,7 @@ import tempfile
 import subprocess
 from collections import OrderedDict
 
-# lupa bridge (runtime tracing)
+# try import lupa
 try:
     from lupa import LuaRuntime
 except Exception:
@@ -24,14 +35,14 @@ logger.addHandler(logging.NullHandler())
 
 
 class DeobfuscatorEngine:
-    def __init__(self):
+    def __init__(self, unluac_filename="unluac.jar"):
         base_dir = os.path.dirname(os.path.abspath(__file__))
-        self.unluac_path = os.path.join(base_dir, "unluac.jar")
+        self.unluac_path = os.path.join(base_dir, unluac_filename)
         self.vm_detector = VMDetector()
         self._last_extracted_path = None
-        logger.info(f"📁 Working Dir: {base_dir}")
+        logger.info(f"DeobfuscatorEngine init. Working dir: {base_dir}")
 
-    # ---------------- public API ----------------
+    # ---------- Public API ----------
     def process(self, content, status_callback=None):
         def update_status(msg):
             if status_callback:
@@ -41,42 +52,36 @@ class DeobfuscatorEngine:
                     pass
             logger.info(f"[STATUS] {msg}")
 
-        # Normalize sample text
+        # normalize sample text
         raw_bytes = content if isinstance(content, (bytes, bytearray)) else None
-        if raw_bytes is not None:
-            try:
-                sample = raw_bytes[:20000].decode('latin-1', 'ignore')
-            except Exception:
-                sample = str(raw_bytes)
-        else:
+        try:
+            sample = raw_bytes[:20000].decode('latin-1', 'ignore') if raw_bytes is not None else str(content)
+        except Exception:
             sample = str(content)
 
         update_status("🔎 Static heuristics...")
         try:
             vm_info = self.vm_detector.analyze(sample)
-            if vm_info.get('is_vm'):
-                update_status("⚠️ Virtualization/Protection detected — static extraction only.")
-                extracted_strings = self.vm_detector.extract_strings(sample)
-                backslash_decoded = self.vm_detector.extract_backslash_numbers(sample)
-                strings = extracted_strings + backslash_decoded
-                return self._finalize_output(content, strings, vm_info.get('reasons', []), vm_info.get('action_log', []), update_status)
-            else:
-                update_status("🧠 Attempt runtime tracing (sandbox) — cautious.")
-        except Exception as e:
-            logger.exception("VM detection error: %s", e)
+        except Exception:
+            vm_info = {'is_vm': False, 'reasons': []}
 
-        # If no Lua runtime available — bail with static hints
+        # if clear VM markers — do static-only path to avoid executing dangerous code
+        if vm_info.get('is_vm'):
+            update_status("⚠️ VM/protector detected (static path). Extracting strings and blobs.")
+            strings = self.vm_detector.extract_strings(sample)
+            backslash = self.vm_detector.extract_backslash_numbers(sample)
+            all_strings = list(OrderedDict.fromkeys(strings + backslash))
+            return self._finalize_output(content, all_strings, vm_info.get('reasons', []), [], update_status)
+
+        # require LuaRuntime for tracing path
         if LuaRuntime is None:
-            return b"-- [FATAL] lupa (LuaRuntime) not installed. Install lupa to enable runtime tracing."
+            return b"-- [FATAL] lupa (LuaRuntime) missing. Install lupa to enable runtime tracing."
 
-        # Runtime tracing
+        # runtime tracing: initial pass
         try:
+            update_status("🧠 Starting sandboxed Lua (initial trace)...")
             lua = LuaRuntime(unpack_returned_tuples=True, encoding=None)
-        except Exception as e:
-            return f"-- [FATAL] Lua start error: {e}".encode('utf-8')
-
-        try:
-            env = lua.execute(self._get_sandbox_setup())
+            env = lua.execute(self._sandbox_code())
             runner = lua.eval("""
                 function(code, env)
                     local f, err = load(code, "chunk", "bt", env)
@@ -86,51 +91,170 @@ class DeobfuscatorEngine:
                     return ok, res
                 end
             """)
-            update_status("🌪️ Running sandboxed trace (capture loads/strings)...")
-            ok, res = runner(content, env)
-
-            # Collect results robustly (lua tables <-> python)
-            strings_tbl = lua.globals().DETECTED_STRINGS
-            detected_strings = list(strings_tbl) if strings_tbl else []
-            global_dump = list(lua.globals().FINAL_GLOBALS) if lua.globals().FINAL_GLOBALS else []
-            action_log = list(lua.globals().ACTION_LOG) if lua.globals().ACTION_LOG else []
-            chunks = lua.globals().CAPTURED_CHUNKS if lua.globals().CAPTURED_CHUNKS else []
-
-            best_chunk = None
-            max_size = 0
-            try:
-                # try table-like iteration
-                for i in range(1, len(chunks) + 1):
-                    c = chunks[i]
-                    if getattr(c, 'size', 0) > max_size:
-                        max_size = c.size
-                        best_chunk = c.data
-            except Exception:
-                try:
-                    for c in chunks:
-                        s = getattr(c, 'size', 0)
-                        if s > max_size:
-                            max_size = s
-                            best_chunk = getattr(c, 'data', None)
-                except Exception:
-                    pass
-
-            target_code = best_chunk if best_chunk else content
-            return self._finalize_output(target_code, detected_strings, global_dump, action_log, update_status)
+            ok, _ = runner(content, env)
+            # collect results
+            detected_strings = self._lua_table_to_list(lua.globals().DETECTED_STRINGS)
+            globals_dump = self._lua_table_to_list(lua.globals().FINAL_GLOBALS)
+            action_log = self._lua_table_to_list(lua.globals().ACTION_LOG)
+            chunks = lua.globals().CAPTURED_CHUNKS or []
+            best_chunk = self._pick_best_chunk(chunks)
+            # target for next passes
+            target = best_chunk if best_chunk is not None else content
         except Exception as e:
-            logger.exception("Runtime tracing failed: %s", e)
-            return f"-- [CRASH] {e}".encode('utf-8')
+            logger.exception("Runtime initial pass failed: %s", e)
+            # fallback to static-only
+            return self._finalize_output(content, [], [], [f"runtime error: {e}"], update_status)
 
-    # ---------------- sandbox ----------------
-    def _get_sandbox_setup(self):
-        # bit and bit32 polyfill (improved)
+        # multi-pass decode on collected strings + code: produce decoded candidates
+        update_status("🔁 Decoding collected strings and generating candidates...")
+        candidates = []
+        # include raw bytes candidate if bytes
+        if isinstance(target, (bytes, bytearray)):
+            candidates.append(bytes(target))
+        else:
+            try:
+                candidates.append(str(target).encode('latin-1', 'ignore'))
+            except:
+                pass
+
+        # decode collected strings
+        decoded_candidates = []
+        for s in detected_strings:
+            s_clean = self._clean_string(s)
+            decs = self._try_common_decodings(s_clean)
+            # add original string as candidate if looks big
+            if len(s_clean) > 200:
+                try:
+                    decoded_candidates.append(s_clean.encode('latin-1', 'ignore'))
+                except:
+                    pass
+            # add explicit decodings
+            for kind, res in decs:
+                if kind == 'backslash':
+                    if isinstance(res, str):
+                        try:
+                            decoded_candidates.append(res.encode('latin-1', 'ignore'))
+                        except:
+                            pass
+                elif kind in ('base64', 'base64_raw', 'hex', 'hex_raw'):
+                    # attempt to capture raw bytes
+                    try:
+                        if kind.startswith('base64'):
+                            b = base64.b64decode(s_clean, validate=False)
+                            decoded_candidates.append(b)
+                        else:
+                            hexcand = re.sub(r'[^0-9a-fA-F]', '', s_clean)
+                            if len(hexcand) % 2 == 0:
+                                b = binascii.unhexlify(hexcand)
+                                decoded_candidates.append(b)
+                    except Exception:
+                        pass
+                elif kind == 'xor_single' and isinstance(res, tuple):
+                    try:
+                        decoded_candidates.append(res[1].encode('latin-1', 'ignore'))
+                    except:
+                        pass
+
+        # add any long backslash-blobs found in target text
+        try:
+            code_text = target.decode('latin-1', 'ignore') if isinstance(target, (bytes, bytearray)) else str(target)
+            backslash_blobs = self._extract_backslash_byte_blobs(code_text)
+            for b in backslash_blobs:
+                if len(b) > 32:
+                    decoded_candidates.append(b)
+        except Exception:
+            pass
+
+        # deduplicate candidates and append to main candidates list
+        def normalize_bytes(x):
+            return x if isinstance(x, (bytes, bytearray)) else str(x).encode('latin-1', 'ignore')
+        uniq = {}
+        for c in candidates + decoded_candidates:
+            try:
+                key = binascii.hexlify(normalize_bytes(c))[:200]
+            except:
+                key = str(c)[:200]
+            if key not in uniq:
+                uniq[key] = normalize_bytes(c)
+        candidates = list(uniq.values())
+
+        # second runtime pass: try to execute decoded candidate strings in sandbox (very cautious)
+        if LuaRuntime is not None:
+            try:
+                update_status("🌪️ Second sandbox pass on decoded candidates (cautious)...")
+                lua2 = LuaRuntime(unpack_returned_tuples=True, encoding=None)
+                env2 = lua2.execute(self._sandbox_code())
+                runner2 = lua2.eval("""
+                    function(code, env)
+                        local ok, res = pcall(function() local f, err = load(code, "chunk", "bt", env); if not f then return false, err end; return pcall(f) end)
+                        pcall(_G.dump_globals)
+                        return ok, res
+                    end
+                """)
+                # try only on a few largest candidates to save time
+                candidates_sorted = sorted(candidates, key=lambda b: len(b), reverse=True)[:6]
+                for idx, cand in enumerate(candidates_sorted):
+                    try:
+                        # treat as latin-1 string
+                        text = cand.decode('latin-1', 'ignore')
+                        ok, _ = runner2(text, env2)
+                        # collect newly captured chunks
+                        new_chunks = env2.CAPTURED_CHUNKS or []
+                        best_new = self._pick_best_chunk(new_chunks)
+                        if best_new:
+                            # prefer new captured chunk: add to head
+                            candidates.insert(0, best_new if isinstance(best_new, (bytes, bytearray)) else best_new.encode('latin-1', 'ignore'))
+                    except Exception:
+                        continue
+            except Exception:
+                logger.exception("Second runtime pass error (ignored)")
+
+        # finally: unluac last — try all candidates until one decompiles
+        update_status("🧪 Running unluac on candidates (last step)...")
+        unluac_success = False
+        unluac_src = None
+        mapping = {}
+        for i, cand in enumerate(candidates):
+            try:
+                res = self._try_decompile(cand)
+                if res:
+                    unluac_success = True
+                    try:
+                        src = res.decode('utf-8', 'ignore')
+                    except:
+                        src = res.decode('latin-1', 'ignore')
+                    src = self._beautify_lua(src)
+                    renamed, mapping = self._rename_obfuscated_identifiers(src)
+                    unluac_src = renamed
+                    break
+            except Exception:
+                continue
+
+        # build final output
+        return self._compose_final_output(
+            target, detected_strings, globals_dump, action_log, candidates,
+            unluac_success, unluac_src, mapping, update_status
+        )
+
+    # ---------- sandbox code (hooks + bit polyfill) ----------
+    def _sandbox_code(self):
+        # robust bit/bit32 polyfill
         bit_polyfill = """
         local bit = {}
         function bit.tobit(x) x = x % 4294967296; if x >= 2147483648 then x = x - 4294967296 end; return x end
         function bit.bnot(x) return 4294967295 - x % 4294967296 end
-        function bit.band(a,b) local r=0;m=1; while a>0 or b>0 do local aa=a%2; local bb=b%2; if aa==1 and bb==1 then r=r+m end; a=(a-aa)/2; b=(b-bb)/2; m=m*2; end; return r end
-        function bit.bor(a,b) local r=0;m=1; while a>0 or b>0 do local aa=a%2; local bb=b%2; if aa==1 or bb==1 then r=r+m end; a=(a-aa)/2; b=(b-bb)/2; m=m*2; end; return r end
-        function bit.bxor(a,b) local r=0;m=1; while a>0 or b>0 do local aa=a%2; local bb=b%2; if aa~=bb then r=r+m end; a=(a-aa)/2; b=(b-bb)/2; m=m*2; end; return r end
+        function bit._binop(a,b,f)
+            local r=0;m=1
+            while a>0 or b>0 do
+                local aa=a%2; local bb=b%2
+                if f(aa,bb) then r=r+m end
+                a=(a-aa)/2; b=(b-bb)/2; m=m*2
+            end
+            return r
+        end
+        function bit.band(a,b) return bit._binop(a,b,function(x,y) return x==1 and y==1 end) end
+        function bit.bor(a,b) return bit._binop(a,b,function(x,y) return x==1 or y==1 end) end
+        function bit.bxor(a,b) return bit._binop(a,b,function(x,y) return x~=y end) end
         function bit.lshift(a,b) return (a * 2^b) % 4294967296 end
         function bit.rshift(a,b) return math.floor(a / 2^b) % 4294967296 end
         function bit.arshift(a,b)
@@ -162,7 +286,7 @@ class DeobfuscatorEngine:
             return s
         end
 
-        -- hook common string builders
+        -- Hook string.char
         local real_char = string.char
         string.char = function(...)
             local ok, res = pcall(real_char, ...)
@@ -170,6 +294,7 @@ class DeobfuscatorEngine:
             return res
         end
 
+        -- Hook table.concat
         local real_concat = table.concat
         table.concat = function(t, sep, i, j)
             local ok, res = pcall(real_concat, t, sep, i, j)
@@ -177,6 +302,7 @@ class DeobfuscatorEngine:
             return res
         end
 
+        -- Hook load / loadstring
         local real_load = load
         local function hooked_load(chunk, name, mode, env)
             if type(chunk) == "string" and #chunk > 50 then
@@ -186,8 +312,9 @@ class DeobfuscatorEngine:
         end
 
         function _G.dump_globals()
+            local ok, g = pcall(function() return getfenv and getfenv() or _G end)
+            if not ok then return end
             local ignore = {string=1, math=1, table=1, bit=1, bit32=1, pairs=1, ipairs=1, next=1, _G=1, sandbox_env=1, package=1}
-            local g = getfenv and getfenv() or _G
             for k, v in pairs(g) do
                 if not ignore[k] then
                     if type(v) == "string" or type(v) == "number" or type(v) == "boolean" then
@@ -197,6 +324,7 @@ class DeobfuscatorEngine:
             end
         end
 
+        -- Proxy for Roblox APIs
         local function create_proxy(name)
             local proxy = {}
             local meta = {}
@@ -228,7 +356,6 @@ class DeobfuscatorEngine:
             type = type, tostring = tostring, tonumber = tonumber, pcall = pcall, xpcall = xpcall,
             select = select, unpack = unpack or table.unpack,
             setmetatable = setmetatable, getmetatable = getmetatable,
-
             game = create_proxy("game"),
             workspace = create_proxy("workspace"),
             script = create_proxy("script"),
@@ -238,205 +365,62 @@ class DeobfuscatorEngine:
         _G.sandbox_env = env
         return env
         """
+
         return sandbox
 
-    # --------------- finalization (multi-pass) ----------------
-    def _finalize_output(self, code_bytes, strings, globals_dump, logs, callback):
-        """
-        Multi-pass finalizer:
-         - static decodings on collected strings
-         - generate extracted_blocks.lua (mel_N)
-         - collect bytecode candidates (raw bytes, \ddd groups, captured chunks)
-         - run unluac LAST on all candidates
-        """
-        if callback:
-            callback("🔧 Postprocessing and multi-pass decoding...")
-
-        # prepare workspace
-        composed = []
-        composed.append("-- [[ DUMPED STRINGS (DECRYPTED / STATIC) ]] --\n")
-        composed.append("-- Assets, Keys, and Messages found during analysis:\n\n")
-
-        strings = strings or []
-        # try to expand decodings for strings
-        decoded_map = OrderedDict()
-        for s in sorted(set(strings), key=lambda x: len(str(x)), reverse=True):
-            s_clean = self._clean_string(s)
-            if len(s_clean) < 4:
-                continue
-            composed.append(f'-- "{s_clean}"\n')
-            # try common decodings and append as comments
-            decs = self._try_common_decodings(s_clean)
-            for t, r in decs[:3]:
-                if t == 'xor_single':
-                    composed.append(f'--   [xor_single key={r[0]}] {r[1][:200]}\n')
-                else:
-                    composed.append(f'--   [{t}] {str(r)[:200]}\n')
-            decoded_map[s_clean] = decs
-
-        # globals dump
-        if globals_dump:
-            composed.append("\n" + "=" * 50 + "\n")
-            composed.append("-- [[ GLOBAL VARIABLES DUMP ]] --\n")
-            composed.append("-- Variables left in environment after run:\n\n")
-            for g in globals_dump:
-                composed.append(f"-- {self._clean_string(g)}\n")
-
-        composed.append("\n" + "=" * 50 + "\n\n")
-
-        # Generate extracted mel file (from code_bytes or captured strings)
+    # ---------- helpers ----------
+    def _lua_table_to_list(self, tbl):
         try:
-            code_text = None
-            if isinstance(code_bytes, (bytes, bytearray)):
-                code_text = code_bytes.decode('latin-1', 'ignore')
-            else:
-                code_text = str(code_bytes)
-            mel_text = self._generate_mel_wrappers(code_text)
-            # write mel file
-            mel_path = os.path.join(tempfile.gettempdir(), f"extracted_blocks_{uuid.uuid4().hex[:8]}.lua")
-            with open(mel_path, 'w', encoding='utf-8') as mf:
-                mf.write(mel_text)
-            self._last_extracted_path = mel_path
-            composed.append("-- [[ extracted_blocks.lua generated and saved ]]\n")
-            composed.append(f"-- Path: {mel_path}\n")
-        except Exception:
-            self._last_extracted_path = None
-
-        # At this point: attempt to find bytecode candidates to pass to unluac *last*
-        candidates = []
-
-        # 1) if code_bytes already bytes -> candidate
-        if isinstance(code_bytes, (bytes, bytearray)):
-            candidates.append(bytes(code_bytes))
-
-        # 2) find long backslash-number groups inside code_text and decode to bytes
-        try:
-            bs = self._extract_backslash_byte_blobs(code_text)
-            for b in bs:
-                if b and len(b) > 64:
-                    candidates.append(b)
-                    composed.append(f"-- Found backslash-byte blob candidate (len {len(b)})\n")
-        except Exception:
-            pass
-
-        # 3) try to find base64-like long literals in decoded_map results
-        try:
-            for s, decs in decoded_map.items():
-                for t, r in decs:
-                    if t in ('base64', 'base64_raw'):
-                        if isinstance(r, str):
-                            # base64 decoded text (r may be readable)
-                            try:
-                                candidates.append(r.encode('latin-1', 'ignore'))
-                                composed.append(f"-- base64 decode candidate from string: {s[:80]}\n")
-                            except:
-                                pass
-        except Exception:
-            pass
-
-        # 4) try to extract raw-looking lua chunks inside captured big strings (mel file already contains them)
-        # We will attempt unluac on each candidate, but only at the very end.
-
-        # Before unluac, append any raw script-preview (we'll later try to decompile)
-        composed.append("\n-- [[ RAW / CAPTURED SCRIPT PREVIEW ]] --\n\n")
-        # if code_text is textual, attach truncated preview
-        try:
-            if code_text:
-                preview = code_text[:2000]
-                composed.append(preview + ("\n-- ...(truncated preview)\n" if len(code_text) > 2000 else "\n"))
-        except Exception:
-            pass
-
-        # === NOW: the LAST STEP: try unluac on candidates (unluac runs last) ===
-        composed.append("\n-- [[ Attempting unluac on candidates (last) ]] --\n")
-        unluac_success = False
-        unluac_results = []
-        for idx, cand in enumerate(candidates):
-            if not cand:
-                continue
-            if callback:
-                callback(f"🧪 unluac attempt #{idx+1} (last step)...")
+            if tbl is None:
+                return []
+            # lupa table behaves like dict-like; converting via list() may give keys.
             try:
-                res = self._try_decompile(cand)
-                if res:
-                    unluac_success = True
-                    try:
-                        src = res.decode('utf-8', 'ignore')
-                    except:
-                        src = res.decode('latin-1', 'ignore')
-                    # beautify and rename obfuscated local identifiers
-                    src = self._beautify_lua(src)
-                    renamed_src, mapping = self._rename_obfuscated_identifiers(src)
-                    unluac_results.append((cand, renamed_src, mapping))
-                    # we stop after first successful decompile (but still keep other candidates as fallback)
-                    break
+                return list(tbl)
             except Exception:
-                continue
-
-        # If unluac succeeded, append decompiled source, otherwise leave warning and include raw preview
-        if unluac_success and unluac_results:
-            cand, renamed_src, mapping = unluac_results[0]
-            composed.append("\n" + "=" * 50 + "\n")
-            composed.append("-- [[ DECOMPILED SOURCE (unluac result) ]] --\n\n")
-            composed.append(renamed_src)
-            composed.append("\n\n-- [[ Identifier mapping (sample) ]] --\n")
-            for k, v in list(mapping.items())[:200]:
-                composed.append(f"-- {k} -> {v}\n")
-        else:
-            composed.append("\n-- [WARNING] unluac failed on all candidates (file may be VM-protected / nonstandard bytecode).\n")
-            composed.append("-- Keep extracted_blocks.lua and captured previews for manual inspection.\n")
-
-        # Action log
-        composed.append("\n" + "=" * 50 + "\n")
-        composed.append("-- [[ ACTION LOG ]] --\n\n")
-        for l in (logs or [])[-1000:]:
-            composed.append(f"-- {self._clean_string(l)}\n")
-
-        return ''.join(composed).encode('utf-8')
-
-    # ---------------- decompiler wrapper (runs unluac) ----------------
-    def _try_decompile(self, byteblob):
-        """
-        Runs unluac.jar on byteblob. Returns stdout bytes or None.
-        """
-        if not os.path.exists(self.unluac_path):
-            logger.debug("unluac.jar not found at %s", self.unluac_path)
-            return None
-        try:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".lua", mode='wb') as tmp:
-                if isinstance(byteblob, (bytes, bytearray)):
-                    tmp.write(byteblob)
-                else:
-                    tmp.write(str(byteblob).encode('latin-1', 'ignore'))
-                path = tmp.name
-
-            res = subprocess.run(
-                ["java", "-Xmx2G", "-jar", self.unluac_path, path],
-                capture_output=True,
-                timeout=30
-            )
-            try:
-                os.remove(path)
-            except:
-                pass
-
-            if res.returncode == 0 and res.stdout:
-                return res.stdout
-            return None
-        except Exception as e:
-            logger.exception("unluac execution failed: %s", e)
-            return None
-
-    # -------------- helpers: extract backslash-byte blobs -------------
-    def _extract_backslash_byte_blobs(self, text):
-        """
-        Finds long sequences of \ddd\ddd... in text and converts them to raw bytes.
-        Returns list of bytes objects.
-        """
-        if not text:
+                # fallback: iterate integer indices
+                out = []
+                i = 1
+                while True:
+                    try:
+                        v = tbl[i]
+                        out.append(v)
+                        i += 1
+                    except Exception:
+                        break
+                return out
+        except Exception:
             return []
+
+    def _pick_best_chunk(self, chunks):
+        try:
+            if not chunks:
+                return None
+            max_size = 0
+            best = None
+            # try both table style and list style
+            try:
+                for i in range(1, len(chunks) + 1):
+                    c = chunks[i]
+                    if getattr(c, 'size', 0) > max_size:
+                        max_size = c.size
+                        best = c.data
+            except Exception:
+                for c in chunks:
+                    try:
+                        s = getattr(c, 'size', 0)
+                        if s > max_size:
+                            max_size = s
+                            best = getattr(c, 'data', None)
+                    except Exception:
+                        continue
+            return best
+        except Exception:
+            return None
+
+    def _extract_backslash_byte_blobs(self, text):
         out = []
-        # find long groups of \ddd (at least 8 numbers consecutively)
+        if not text:
+            return out
         for group in re.findall(r'(?:\\\d{1,3}){8,}', text):
             try:
                 nums = re.findall(r'\\(\d{1,3})', group)
@@ -446,53 +430,211 @@ class DeobfuscatorEngine:
                 continue
         return out
 
-    # ---------------- other utils ----------------
+    def _check_java(self):
+        try:
+            res = subprocess.run(["java", "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            return res.returncode == 0
+        except Exception:
+            return False
+
+    def _try_decompile(self, byteblob):
+        if not os.path.exists(self.unluac_path):
+            return None
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".lua", mode='wb') as tmp:
+                if isinstance(byteblob, (bytes, bytearray)):
+                    tmp.write(byteblob)
+                else:
+                    tmp.write(str(byteblob).encode('latin-1', 'ignore'))
+                path = tmp.name
+            res = subprocess.run(
+                ["java", "-Xmx2G", "-jar", self.unluac_path, path],
+                capture_output=True,
+                timeout=30
+            )
+            try:
+                os.remove(path)
+            except:
+                pass
+            if res.returncode == 0 and res.stdout:
+                return res.stdout
+            return None
+        except Exception:
+            return None
+
     def _clean_string(self, s):
         if isinstance(s, (bytes, bytearray)):
-            try:
-                return s.decode('utf-8')
-            except:
-                try:
-                    return s.decode('latin-1')
-                except:
-                    return str(s)
+            try: return s.decode('utf-8')
+            except: 
+                try: return s.decode('latin-1', 'ignore')
+                except: return str(s)
         return str(s)
 
+    # beautify (simple)
     def _beautify_lua(self, source_code):
-        source_code = re.sub(r'(\s)(local|return|if|for|while|repeat|function)(\s)', r'\n\2 ', source_code)
-        replacements = {
-            " then ": " then\n", " do ": " do\n", " end ": "\nend\n",
-            " repeat ": "\nrepeat\n", " until ": "\nuntil ", ";": ";\n"
-        }
-        for k, v in replacements.items():
-            source_code = source_code.replace(k, v)
+        try:
+            source_code = re.sub(r'(\s)(local|return|if|for|while|repeat|function)(\s)', r'\n\2 ', source_code)
+            replacements = {" then ": " then\n", " do ": " do\n", " end ": "\nend\n", " repeat ": "\nrepeat\n", " until ": "\nuntil ", ";": ";\n"}
+            for k, v in replacements.items():
+                source_code = source_code.replace(k, v)
+            lines = source_code.splitlines()
+            formatted, indent = [], 0
+            for line in lines:
+                line = line.rstrip()
+                if not line.strip(): continue
+                stripped = line.strip()
+                if stripped.startswith("--"):
+                    formatted.append("\t"*indent + stripped); continue
+                if stripped.startswith(("end", "until")):
+                    indent = max(0, indent - 1)
+                formatted.append("\t"*indent + stripped)
+                if stripped.endswith(("then", "do", "repeat")) or (stripped.startswith("function") and not stripped.endswith("end")):
+                    indent += 1
+            return "\n".join(formatted)
+        except Exception:
+            return source_code
 
-        lines = source_code.splitlines()
-        formatted = []
-        indent = 0
+    # rename short obfuscated identifiers -> mel_N
+    def _rename_obfuscated_identifiers(self, src, max_len=8):
+        keywords = set("""and break do else elseif end false for function if in local nil not or repeat return then true until while
+                        string table math pairs ipairs next coroutine package io os debug load loadfile require pcall xpcall""".split())
+        common_globals = set(["game","workspace","script","Instance","Vector3","CFrame","wait","warn","print","require","tick","DateTime"])
+        protected = keywords.union(common_globals)
+        ident_pattern = re.compile(r'\b([A-Za-z_][A-Za-z0-9_]*)\b')
+        counts = {}
+        for m in ident_pattern.finditer(src):
+            name = m.group(1)
+            if name in protected: continue
+            if len(name) <= max_len:
+                counts[name] = counts.get(name, 0) + 1
+        candidates = [n for n,c in counts.items() if c >= 1]
+        candidates = sorted(candidates, key=lambda x:(len(x), x))[:800]
+        mapping = {}
+        i = 1
+        for name in candidates:
+            mapping[name] = f"mel_{i}"; i += 1
+        def repl(m):
+            n = m.group(1); return mapping.get(n, n)
+        new_src = ident_pattern.sub(repl, src)
+        return new_src, mapping
 
-        for line in lines:
-            line = line.rstrip()
-            if not line.strip():
-                continue
-            stripped = line.strip()
-            if stripped.startswith("--"):
-                formatted.append("\t" * indent + stripped)
-                continue
+    # try common decodings on a string
+    def _try_common_decodings(self, s):
+        results = []
+        if not s or len(s) < 4: return results
+        # backslash numbers
+        ds = self._decode_backslash_numbers(s)
+        if ds != s: results.append(('backslash', ds))
+        # base64
+        try:
+            b = base64.b64decode(s, validate=False)
+            printable = sum(32 <= c < 127 for c in b); ratio = printable / max(1, len(b))
+            if (ratio > 0.5 and len(b) > 4) or len(b) > 32:
+                results.append(('base64', b.decode('latin-1', 'ignore')))
+            else:
+                results.append(('base64_raw', binascii.hexlify(b).decode()[:200]))
+        except Exception:
+            pass
+        # hex
+        hexcand = re.sub(r'[^0-9a-fA-F]', '', s)
+        if len(hexcand) >= 8 and len(hexcand) % 2 == 0:
+            try:
+                b = binascii.unhexlify(hexcand)
+                printable = sum(32 <= c < 127 for c in b); ratio = printable / max(1, len(b))
+                if ratio > 0.5:
+                    results.append(('hex', b.decode('latin-1', 'ignore')))
+                else:
+                    results.append(('hex_raw', binascii.hexlify(b).decode()[:200]))
+            except Exception:
+                pass
+        # single-byte XOR brute
+        try:
+            raw = s.encode('latin-1', 'ignore')
+            for key in range(1, 256):
+                b = bytes([c ^ key for c in raw])
+                printable = sum(32 <= c < 127 for c in b); ratio = printable / max(1, len(b))
+                if ratio > 0.85:
+                    results.append(('xor_single', (key, b.decode('latin-1', 'ignore'))))
+                    break
+        except Exception:
+            pass
+        return results
 
-            if stripped.startswith(("end", "until")):
-                indent = max(0, indent - 1)
+    def _decode_backslash_numbers(self, s):
+        nums = re.findall(r'\\(\d{1,3})', s)
+        if not nums: return s
+        try:
+            b = bytes(int(n) for n in nums)
+            try:
+                return b.decode('utf-8')
+            except:
+                return b.decode('latin-1', 'ignore')
+        except:
+            return s
 
-            formatted.append("\t" * indent + stripped)
+    # compose final output and save extracted_blocks.lua
+    def _compose_final_output(self, target_code, detected_strings, globals_dump, action_log, candidates,
+                              unluac_ok, unluac_src, mapping, callback):
+        if callback: callback("💾 Generating final report...")
+        parts = []
+        parts.append("-- [[ DUMPED STRINGS (DECRYPTED / STATIC) ]] --\n")
+        parts.append("-- Assets, Keys, and Messages found during analysis:\n\n")
+        sorted_strings = sorted(set(detected_strings or []), key=lambda x: len(str(x)), reverse=True)
+        seen = set()
+        for s in sorted_strings:
+            clean = self._clean_string(s).replace('\n', ' ').replace('\r', '')
+            if clean not in seen and len(clean) > 3:
+                parts.append(f'-- "{clean}"\n'); seen.add(clean)
+                decs = self._try_common_decodings(clean)
+                for t, r in decs[:2]:
+                    if t == 'xor_single':
+                        parts.append(f'--   [xor key={r[0]}] {r[1][:200]}\n')
+                    else:
+                        parts.append(f'--   [{t}] {str(r)[:200]}\n')
 
-            if stripped.endswith(("then", "do", "repeat")) or (stripped.startswith("function") and not stripped.endswith("end")):
-                indent += 1
-            if stripped.startswith(("else", "elseif")):
+        if globals_dump:
+            parts.append("\n" + "="*50 + "\n")
+            parts.append("-- [[ GLOBAL VARIABLES DUMP ]] --\n\n")
+            for g in globals_dump:
+                parts.append(f"-- {self._clean_string(g)}\n")
+
+        parts.append("\n" + "="*50 + "\n\n")
+        # add decompiled source or preview
+        if unluac_ok and unluac_src:
+            parts.append("-- [[ DECOMPILED SOURCE (unluac) ]] --\n\n")
+            parts.append(unluac_src)
+            parts.append("\n\n-- [[ Identifier mapping ]] --\n")
+            for k, v in list(mapping.items())[:500]:
+                parts.append(f"-- {k} -> {v}\n")
+        else:
+            parts.append("-- [WARNING] unluac failed on candidates (file may be VM-protected or nonstandard bytecode).\n")
+            parts.append("-- Keep extracted_blocks.lua and captured previews for manual inspection.\n\n")
+            try:
+                txt_preview = target_code.decode('latin-1', 'ignore') if isinstance(target_code, (bytes, bytearray)) else str(target_code)
+                parts.append("-- RAW / CAPTURED SCRIPT PREVIEW (truncated)\n")
+                parts.append(txt_preview[:4000] + ("\n-- ...(truncated)\n" if len(txt_preview) > 4000 else "\n"))
+            except Exception:
                 pass
 
-        return "\n".join(formatted)
+        parts.append("\n" + "="*50 + "\n")
+        parts.append("-- [[ ACTION LOG ]] --\n\n")
+        for l in (action_log or [])[-500:]:
+            parts.append(f"-- {self._clean_string(l)}\n")
 
-    # --------------- mel wrappers (extracted_blocks.lua) --------------
+        # generate extracted_blocks.lua (mel_N)
+        try:
+            code_text = target_code.decode('latin-1', 'ignore') if isinstance(target_code, (bytes, bytearray)) else str(target_code)
+            mel_text = self._generate_mel_wrappers(code_text)
+            mel_path = os.path.join(tempfile.gettempdir(), f"extracted_blocks_{uuid.uuid4().hex[:8]}.lua")
+            with open(mel_path, 'w', encoding='utf-8') as mf:
+                mf.write(mel_text)
+            self._last_extracted_path = mel_path
+            parts.append(f"\n-- extracted_blocks.lua saved: {mel_path}\n")
+        except Exception:
+            self._last_extracted_path = None
+
+        return ''.join(parts).encode('utf-8')
+
     def _generate_mel_wrappers(self, text_blob, min_string_len=60):
         fragments = []
         qpat = re.compile(r'("(?:(?:\\\\\d{1,3})|[^"\\\\]){'+str(min_string_len)+r',}"|\'(?:(?:\\\\\d{1,3})|[^\'\\\\]){'+str(min_string_len)+r',}\')', re.S)
@@ -513,9 +655,7 @@ class DeobfuscatorEngine:
             if key in seen: continue
             seen.add(key)
             uniq.append(f)
-
-        out = []
-        out.append('-- extracted_blocks.lua  (auto-generated)\n\n')
+        out = ["-- extracted_blocks.lua  (auto-generated)\n\n"]
         for i, b in enumerate(uniq, start=1):
             raw = b
             if (raw.startswith('"') and raw.endswith('"')) or (raw.startswith("'") and raw.endswith("'")):
@@ -544,110 +684,3 @@ class DeobfuscatorEngine:
                 return f'[{eq}[\n{s}\n]{eq}]'
         esc = s.replace('\\', '\\\\').replace('"', '\\"')
         return '"' + esc + '"'
-
-    def _decode_backslash_numbers(self, s: str):
-        nums = re.findall(r'\\(\d{1,3})', s)
-        if not nums:
-            return s
-        try:
-            b = bytes(int(n) for n in nums)
-            try:
-                return b.decode('utf-8')
-            except:
-                return b.decode('latin-1', 'ignore')
-        except Exception:
-            return s
-
-    # --------------- identifier renamer (local short -> mel_N) --------------
-    def _rename_obfuscated_identifiers(self, src: str, max_len=8):
-        keywords = set("""and break do else elseif end false for function if in local nil not or repeat return then true until while
-                        string table math pairs ipairs next coroutine package io os debug load loadfile require pcall xpcall""".split())
-        common_globals = set(["game","workspace","script","Instance","Vector3","CFrame","wait","warn","print","require","tick","DateTime"])
-        protected = keywords.union(common_globals)
-
-        ident_pattern = re.compile(r'\b([A-Za-z_][A-Za-z0-9_]*)\b')
-        counts = {}
-        for m in ident_pattern.finditer(src):
-            name = m.group(1)
-            if name in protected: continue
-            if len(name) <= max_len:
-                counts[name] = counts.get(name, 0) + 1
-
-        candidates = [n for n,c in counts.items() if c >= 1]
-        candidates = sorted(candidates, key=lambda x:(len(x), x))[:800]
-
-        mapping = {}
-        i = 1
-        for name in candidates:
-            mapping[name] = f"mel_{i}"
-            i += 1
-
-        def repl(m):
-            n = m.group(1)
-            return mapping.get(n, n)
-
-        new_src = ident_pattern.sub(repl, src)
-        return new_src, mapping
-
-    # --------------- decoders (common) ----------------
-    def _try_common_decodings(self, s: str):
-        results = []
-        ds = self._decode_backslash_numbers(s)
-        if ds != s:
-            results.append(('backslash', ds))
-
-        # base64
-        try:
-            b = base64.b64decode(s, validate=True)
-            printable = sum(32 <= c < 127 for c in b)
-            ratio = printable / max(1, len(b))
-            if ratio > 0.6 and len(b) > 4:
-                results.append(('base64', b.decode('utf-8', 'ignore')))
-            else:
-                results.append(('base64_raw', binascii.hexlify(b).decode()[:200]))
-        except Exception:
-            pass
-
-        # hex-like
-        hexcand = re.sub(r'[^0-9a-fA-F]', '', s)
-        if len(hexcand) >= 8 and len(hexcand) % 2 == 0:
-            try:
-                b = binascii.unhexlify(hexcand)
-                printable = sum(32 <= c < 127 for c in b)
-                ratio = printable / max(1, len(b))
-                if ratio > 0.6:
-                    results.append(('hex', b.decode('utf-8', 'ignore')))
-                else:
-                    results.append(('hex_raw', binascii.hexlify(b).decode()[:200]))
-            except:
-                pass
-
-        # single-byte XOR brute
-        best = None
-        try:
-            raw = s.encode('latin-1', 'ignore')
-            for key in range(1, 256):
-                b = bytes([c ^ key for c in raw])
-                printable = sum(32 <= c < 127 for c in b)
-                ratio = printable / max(1, len(b))
-                if ratio > 0.85:
-                    best = (key, b.decode('utf-8', 'ignore'))
-                    break
-        except Exception:
-            pass
-        if best:
-            results.append(('xor_single', best))
-        return results
-
-    # --------------- utilities for bot ----------------
-    def get_last_extracted_path(self):
-        return getattr(self, "_last_extracted_path", None)
-
-    def clear_last_extracted_path(self):
-        p = getattr(self, "_last_extracted_path", None)
-        if p and os.path.exists(p):
-            try:
-                os.remove(p)
-            except:
-                pass
-        self._last_extracted_path = None 
