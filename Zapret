@@ -3,14 +3,19 @@ ACTOR CoolFriend 15000
   Health 5000
   Radius 20
   Height 56
-  Speed 10              // Сделал чуть медленнее, чтобы не пугал скоростью
-  Scale 0.2             // <--- ЭТО УМЕНЬШИТ ЕГО (0.2 = 20% от размера фото)
+  Speed 12
+  
+  // РАЗМЕР: Я поставил 0.05 (это в 20 раз меньше оригинала). 
+  // Если будет СЛИШКОМ маленький, поменяй на 0.1
+  Scale 0.05 
+  
   Monster
   +FLOORCLIP
+  +LOOKALLAROUND // Чтобы он сразу тебя видел
   
-  // Чтобы он не дергался лишний раз
-  MinMissileChance 0    
-  
+  // Создаем переменную-переключатель (0 - добрый, 1 - злой)
+  var int user_angry;
+
   States
   {
   Spawn:
@@ -18,36 +23,31 @@ ACTOR CoolFriend 15000
     Loop
 
   See:
-    // null, null означает: "Никогда не переходи в атаку" и "Никогда не переходи в ближний бой"
-    FRND AABBCCDD 4 A_Chase(null, null) 
+    TNT1 A 0 A_JumpIf(user_angry == 1, "AngrySee") // Если злой - идем воевать
+    FRND AABBCCDD 3 A_Chase(0, 0) // Если нет - просто бегаем
     Loop
 
   Pain:
-    // Сюда код попадает ТОЛЬКО если ты в него выстрелил
-    TNT1 A 0 A_ChangeFlag("MISSILEMORE", 1) // Включаем агрессию
-    TNT1 A 0 A_ChangeFlag("MISSILEEVENMORE", 1)
-    
-    ANGR A 105 A_Pain   // Замирает на 3 секунды со злым лицом
+    TNT1 A 0 { user_angry = 1; } // ВКЛЮЧАЕМ РЕЖИМ ЗЛОСТИ
+    ANGR A 105 A_Pain // Замирает на 3 секунды со злым фото
     
     // Призыв клонов
     TNT1 A 0 A_SpawnItemEx("CoolFriendClone", 40, 40, 0, 0, 0, 0, 0, SXF_SETMASTER)
     TNT1 A 0 A_SpawnItemEx("CoolFriendClone", -40, 40, 0, 0, 0, 0, 0, SXF_SETMASTER)
     TNT1 A 0 A_SpawnItemEx("CoolFriendClone", 40, -40, 0, 0, 0, 0, 0, SXF_SETMASTER)
     TNT1 A 0 A_SpawnItemEx("CoolFriendClone", -40, -40, 0, 0, 0, 0, 0, SXF_SETMASTER)
-    
-    Goto AngrySee       // Идем в злой режим
+    Goto AngrySee
 
   AngrySee:
-    // Теперь он ведет себя как обычный монстр и ищет момент для атаки (Missile)
-    ANGR AABBCCDD 3 A_Chase
+    ANGR AABBCCDD 3 A_Chase // Теперь бегает и атакует по-настоящему
     Loop
 
   Missile:
-    // Этот блок теперь работает ТОЛЬКО после того, как сработал Pain и мы перешли в AngrySee
-    TNT1 A 0 A_Jump(60, "SummonMore") // Шанс призвать еще клонов
+    // Шанс призвать еще клонов во время боя
+    TNT1 A 0 A_Jump(64, "SummonMore") 
     
     ANGR E 8 A_FaceTarget
-    ANGR F 8 BRIGHT A_CustomMissile("FatShot", 32, 0, 0) // Огонь
+    ANGR F 8 BRIGHT A_CustomMissile("FatShot", 32, 0, 0)
     ANGR E 8
     Goto AngrySee
 
@@ -64,14 +64,14 @@ ACTOR CoolFriend 15000
   }
 }
 
-// Клон (тоже уменьшен)
+// Клон (тоже очень маленький)
 ACTOR CoolFriendClone
 {
   Health 100
   Speed 12
   Radius 20
   Height 56
-  Scale 0.2             // <--- У клонов тоже уменьшаем размер
+  Scale 0.05 
   Monster
   +FLOORCLIP
   States
