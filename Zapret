@@ -1,167 +1,140 @@
 import cv2
 import mediapipe as mp
 import numpy as np
-import time
 
-# Настройки
-CAM_ID = 0                # индекс камеры
-DRAW_COLOR = (255, 255, 255)  # белая линия (BGR)
-THICKNESS = 6
-SMOOTHING = 0.2           # для сглаживания движения (0..1, меньше = сильнее сглаживание)
-CLEAR_HOLD_TIME = 0.6     # сек, сколько держать жест "открытая ладонь", чтобы очистить
+# --- Инициализация ---
 
+# Инициализация модулей MediaPipe для рисования и определения рук
+mp_drawing = mp.solutions.drawing_utils
 mp_hands = mp.solutions.hands
-mp_draw = mp.solutions.drawing_utils
 
-def fingers_up(hand_landmarks, hand_label):
-    """
-    Возвращает список булевских значений для [thumb, index, middle, ring, pinky]
-    hand_label: "Left" или "Right" (от MediaPipe)
-    """
-    lm = hand_landmarks.landmark
-    fingers = []
+# Настройка параметров детектора рук
+# min_detection_confidence: минимальная уверенность для признания руки обнаруженной
+# min_tracking_confidence: минимальная уверенность для продолжения отслеживания
+hands = mp_hands.Hands(
+    max_num_hands=1, # Нам нужна только одна рука для рисования
+    min_detection_confidence=0.7,
+    min_tracking_confidence=0.7
+)
 
-    # Thumb: сравниваем x координаты (для правой/левой руки нужно по-разному)
-    # tip = 4, ip = 3, mcp = 2
-    if hand_label == "Right":
-        fingers.append(lm[4].x < lm[3].x)  # для правой руки палец "вправо" -> x меньше
+# Подключение к веб-камере (обычно 0 — это встроенная камера)
+cap = cv2.VideoCapture(0)
+
+# Переменные для рисования
+prev_x, prev_y = 0, 0 # Предыдущие координаты кончика пальца
+# Создаем "холст" — черное изображение того же размера, что и видео (пока заглушка)
+canvas_img = None
+
+# Цвет линии (белый в формате BGR) и толщина
+DRAW_COLOR = (255, 255, 255)
+BRUSH_THICKNESS = 5
+
+
+# --- Основной цикл программы ---
+
+print("Камера запускается. Рисуйте указательным пальцем. Покажите открытую ладонь ✋, чтобы очистить.")
+
+while cap.isOpened():
+    # Чтение кадра с камеры
+    success, frame = cap.read()
+    if not success:
+        print("Не удалось получить кадр с камеры.")
+        break
+
+    # Зеркальное отражение кадра по горизонтали для удобства
+    frame = cv2.flip(frame, 1)
+
+    # Если холст еще не создан, создаем его с размерами текущего кадра
+    if canvas_img is None:
+        canvas_img = np.zeros_like(frame)
+
+    # Получаем высоту и ширину кадра
+    h, w, c = frame.shape
+
+    # Конвертируем изображение из BGR (формат OpenCV) в RGB (формат для MediaPipe)
+    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+    # Обрабатываем кадр с помощью MediaPipe Hands
+    results = hands.process(frame_rgb)
+
+    # Флаг для определения жеста "открытая ладонь"
+    fingers_up = [False, False, False, False, False] # Большой, Указат., Средний, Безым., Мизинец
+
+    # Если руки обнаружены
+    if results.multi_hand_landmarks:
+        for hand_landmarks in results.multi_hand_landmarks:
+            # Опционально: рисуем скелет руки на кадре для наглядности
+            # mp_drawing.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+
+            # Получаем список всех ключевых точек руки
+            lmList = []
+            for id, lm in enumerate(hand_landmarks.landmark):
+                # Конвертируем нормализованные координаты (0.0-1.0) в пиксели
+                cx, cy = int(lm.x * w), int(lm.y * h)
+                lmList.append([id, cx, cy])
+
+            # --- Логика определения жестов ---
+            if len(lmList) != 0:
+                # Координаты кончиков пальцев (IDs: 4, 8, 12, 16, 20)
+                # Координаты средних суставов (IDs: 2, 6, 10, 14, 18)
+
+                # Проверка большого пальца (он работает немного иначе, проверяем по оси X)
+                # Если кончик (4) правее сустава (3) для правой руки (при зеркалировании)
+                if lmList[4][1] > lmList[3][1]: fingers_up[0] = True
+
+                # Проверка остальных 4 пальцев (если кончик выше среднего сустава по оси Y)
+                # Ось Y идет сверху вниз, поэтому "выше" значит меньше координата Y
+                if lmList[8][2] < lmList[6][2]: fingers_up[1] = True  # Указательный
+                if lmList[12][2] < lmList[10][2]: fingers_up[2] = True # Средний
+                if lmList[16][2] < lmList[14][2]: fingers_up[3] = True # Безымянный
+                if lmList[20][2] < lmList[18][2]: fingers_up[4] = True # Мизинец
+
+                # --- Режим ОЧИСТКИ (Жест ✋: все пальцы кроме, возможно, большого, подняты) ---
+                # Проверяем, подняты ли указательный, средний, безымянный и мизинец
+                if fingers_up[1] and fingers_up[2] and fingers_up[3] and fingers_up[4]:
+                   # Очищаем холст (заливаем черным)
+                   canvas_img = np.zeros_like(frame)
+                   # Сбрасываем предыдущую позицию, чтобы не было линии после очистки
+                   prev_x, prev_y = 0, 0
+                   cv2.putText(frame, "CLEARED!", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+
+                # --- Режим РИСОВАНИЯ (Иначе, если видна рука) ---
+                else:
+                    # Получаем координаты кончика указательного пальца (ID 8)
+                    curr_x, curr_y = lmList[8][1], lmList[8][2]
+
+                    # Если это первая точка после потери руки или старта
+                    if prev_x == 0 and prev_y == 0:
+                        prev_x, prev_y = curr_x, curr_y
+
+                    # Рисуем линию на холсте от предыдущей точки к текущей
+                    cv2.line(canvas_img, (prev_x, prev_y), (curr_x, curr_y), DRAW_COLOR, BRUSH_THICKNESS)
+
+                    # Обновляем предыдущую точку
+                    prev_x, prev_y = curr_x, curr_y
+
+                    # Рисуем кружок на кончике пальца в реальном видео для визуализации
+                    cv2.circle(frame, (curr_x, curr_y), 10, DRAW_COLOR, cv2.FILLED)
+
     else:
-        fingers.append(lm[4].x > lm[3].x)
+        # Если рука потеряна из виду, сбрасываем предыдущие координаты
+        prev_x, prev_y = 0, 0
 
-    # Для остальных пальцев сравниваем y: tip выше pip значит палец поднят
-    tips_ids = [8, 12, 16, 20]
-    pip_ids  = [6, 10, 14, 18]
-    for t, p in zip(tips_ids, pip_ids):
-        fingers.append(lm[t].y < lm[p].y)
+    # --- Объединение и отображение ---
 
-    return fingers  # [thumb, index, middle, ring, pinky]
+    # Накладываем холст с рисунком на оригинальный кадр с камеры
+    # Сложение изображений: черный цвет (0,0,0) не меняет оригинальный кадр,
+    # а белые линии добавляются.
+    combined_image = cv2.add(frame, canvas_img)
 
-def norm_to_pixel(norm_x, norm_y, frame_w, frame_h):
-    x = int(norm_x * frame_w)
-    y = int(norm_y * frame_h)
-    return x, y
+    # Показываем результат
+    cv2.imshow('Air Canvas', combined_image)
 
-def main():
-    cap = cv2.VideoCapture(CAM_ID)
-    if not cap.isOpened():
-        print("Не удалось открыть камеру.")
-        return
+    # Выход при нажатии клавиши 'q'
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
 
-    with mp_hands.Hands(
-        model_complexity=1,
-        max_num_hands=1,
-        min_detection_confidence=0.6,
-        min_tracking_confidence=0.6
-    ) as hands:
-
-        # Получим размеры кадра (будут известны после первого кадра)
-        ret, frame = cap.read()
-        if not ret:
-            print("Нет кадра с камеры.")
-            return
-        frame_h, frame_w = frame.shape[:2]
-        canvas = np.zeros_like(frame)  # холст для рисования
-
-        prev_x, prev_y = None, None
-        smoothed_x, smoothed_y = None, None
-
-        clear_start_time = None
-
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-
-            # Отзеркалим изображение, чтобы поведение было "зеркальным"
-            frame = cv2.flip(frame, 1)
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            results = hands.process(rgb)
-
-            draw_now = False
-            clear_now = False
-
-            if results.multi_hand_landmarks and results.multi_handedness:
-                hand_landmarks = results.multi_hand_landmarks[0]
-                hand_label = results.multi_handedness[0].classification[0].label  # "Left" / "Right"
-
-                # Где кончик указательного пальца?
-                index_tip = hand_landmarks.landmark[8]  # normalized coords
-
-                ix, iy = norm_to_pixel(index_tip.x, index_tip.y, frame_w, frame_h)
-
-                # Сглаживание позиции
-                if smoothed_x is None:
-                    smoothed_x, smoothed_y = ix, iy
-                else:
-                    smoothed_x = int(smoothed_x * (1 - SMOOTHING) + ix * SMOOTHING)
-                    smoothed_y = int(smoothed_y * (1 - SMOOTHING) + iy * SMOOTHING)
-
-                # Решаем рисовать или нет: есть ли поднятый указательный палец и НЕ подняты другие?
-                fingers = fingers_up(hand_landmarks, hand_label)
-                # fingers = [thumb, index, middle, ring, pinky]
-                index_is_up = fingers[1]
-                others = fingers[0] or fingers[2] or fingers[3] or fingers[4]
-
-                # Вариант: рисовать, когда индекс поднят (независимо от других):
-                # draw_now = index_is_up
-                # Но чтобы не рисовать при "открытой ладони" (очистка), проверим жест ✋:
-                all_up = all(fingers)
-
-                if all_up:
-                    # Начинаем/продолжаем отсчет для очистки
-                    if clear_start_time is None:
-                        clear_start_time = time.time()
-                    else:
-                        if time.time() - clear_start_time >= CLEAR_HOLD_TIME:
-                            clear_now = True
-                else:
-                    clear_start_time = None
-                    # Рисуем если индекс поднят (и не открытая ладонь)
-                    if index_is_up:
-                        draw_now = True
-                    else:
-                        prev_x, prev_y = None, None  # сброс точки при поднятии пальца нет
-
-                # Рисуем контур/точку указателя на экране (для удобства пользователю)
-                cv2.circle(frame, (smoothed_x, smoothed_y), 8, (0, 255, 255), -1)
-
-                # (опционально) отрисуем landmarks для отладки
-                # mp_draw.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
-
-            else:
-                clear_start_time = None
-                prev_x, prev_y = None, None
-
-            # Выполняем рисование на холсте
-            if draw_now:
-                if prev_x is None:
-                    prev_x, prev_y = smoothed_x, smoothed_y
-                # рисуем линию между предыдущей и текущей позициями
-                cv2.line(canvas, (prev_x, prev_y), (smoothed_x, smoothed_y), DRAW_COLOR, THICKNESS, cv2.LINE_AA)
-                prev_x, prev_y = smoothed_x, smoothed_y
-
-            if clear_now:
-                canvas[:] = 0  # очистка холста
-                clear_start_time = None
-                prev_x, prev_y = None, None
-                # краткий визуальный индикатор очистки
-                cv2.putText(frame, "CLEARED", (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
-
-            # Наложим холст поверх кадра
-            img = cv2.add(frame, canvas)
-
-            # UI подсказки
-            cv2.putText(img, "Index finger to draw. Open palm (hold) to clear. Esc to exit.", (10, frame_h - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
-
-            cv2.imshow("Draw by Finger", img)
-
-            key = cv2.waitKey(1) & 0xFF
-            if key == 27:  # ESC
-                break
-
-    cap.release()
-    cv2.destroyAllWindows()
-
-if __name__ == "__main__":
-    main()
+# --- Завершение работы ---
+cap.release()
+cv2.destroyAllWindows()
+print("Программа завершена.")
