@@ -1,140 +1,267 @@
-import cv2
-import mediapipe as mp
-import numpy as np
+<!doctype html>
 
-# --- Инициализация ---
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>2D Shooter — Huge Map Prototype</title>
+<style>
+  html,body{height:100%;margin:0;background:#111;color:#ddd;font-family:Arial,Helvetica,sans-serif}
+  #gameCanvas{display:block;background:#222;image-rendering:pixelated}
+  #ui{position:fixed;left:10px;top:10px;z-index:10}
+  .small{font-size:13px;opacity:.9}
+  #legend{position:fixed;right:10px;top:10px;background:rgba(0,0,0,0.5);padding:8px;border-radius:6px}
+  #minimap{position:fixed;right:10px;bottom:10px;border:2px solid rgba(255,255,255,0.05);background:#000;padding:4px;border-radius:4px}
+  button{padding:6px 8px;margin:4px;background:#333;color:#fff;border:1px solid #444;border-radius:4px}
+</style>
+</head>
+<body>
+<canvas id="gameCanvas"></canvas>
+<div id="ui">
+  <div class="small">WASD - move &nbsp; • &nbsp; Mouse - aim &nbsp; • &nbsp; Click - shoot</div>
+  <div style="margin-top:6px"><button id="toggleLabel">Toggle enemy label</button><button id="respawn">Respawn</button></div>
+  <div class="small" style="margin-top:6px" id="info">Map: Huge — Enemies alive: 0</div>
+</div>
+<div id="legend" class="small">
+  <div><strong>Legend</strong></div>
+  <div>Player — white triangle</div>
+  <div id="enemyLabelText">Enemy — red circle ("Furry")</div>
+</div>
+<canvas id="minimap" width="200" height="120"></canvas>
+<script>
+/* ----- Huge-map 2D shooter prototype (single-file) -----
+   - Self-contained HTML + JS. No external assets.
+   - Camera follows player across a large world.
+   - Enemies (labeled) spawn across the map; you can toggle label text between "Furry" and "Monster".
+   - Particles for gore-like effect on death (stylized).
+   - Optimized simple culling for large maps.
+*/(() => { const canvas = document.getElementById('gameCanvas'); const ctx = canvas.getContext('2d'); const minimap = document.getElementById('minimap'); const mctx = minimap.getContext('2d'); const info = document.getElementById('info'); const enemyLabelText = document.getElementById('enemyLabelText'); const toggleLabelBtn = document.getElementById('toggleLabel'); const respawnBtn = document.getElementById('respawn');
 
-# Инициализация модулей MediaPipe для рисования и определения рук
-mp_drawing = mp.solutions.drawing_utils
-mp_hands = mp.solutions.hands
+// viewport size function resize() { canvas.width = Math.floor(window.innerWidth); canvas.height = Math.floor(window.innerHeight); } window.addEventListener('resize', resize); resize();
 
-# Настройка параметров детектора рук
-# min_detection_confidence: минимальная уверенность для признания руки обнаруженной
-# min_tracking_confidence: минимальная уверенность для продолжения отслеживания
-hands = mp_hands.Hands(
-    max_num_hands=1, # Нам нужна только одна рука для рисования
-    min_detection_confidence=0.7,
-    min_tracking_confidence=0.7
-)
+// world parameters (HUGE map) const WORLD = { width: 8000,  // 8k x 6k world height: 4800 };
 
-# Подключение к веб-камере (обычно 0 — это встроенная камера)
-cap = cv2.VideoCapture(0)
+// player const player = { x: WORLD.width / 2, y: WORLD.height / 2, radius: 14, speed: 350, // px/sec rot: 0, health: 100 };
 
-# Переменные для рисования
-prev_x, prev_y = 0, 0 # Предыдущие координаты кончика пальца
-# Создаем "холст" — черное изображение того же размера, что и видео (пока заглушка)
-canvas_img = None
+// camera const camera = { x: player.x, y: player.y, width: canvas.width, height: canvas.height };
 
-# Цвет линии (белый в формате BGR) и толщина
-DRAW_COLOR = (255, 255, 255)
-BRUSH_THICKNESS = 5
+// controls const keys = {}; let mouse = { x: canvas.width / 2, y: canvas.height / 2, down: false }; window.addEventListener('keydown', e => { keys[e.key.toLowerCase()] = true; }); window.addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; }); canvas.addEventListener('mousemove', e => { const rect = canvas.getBoundingClientRect(); mouse.x = e.clientX - rect.left; mouse.y = e.clientY - rect.top; }); canvas.addEventListener('mousedown', e => { mouse.down = true; }); window.addEventListener('mouseup', e => { mouse.down = false; });
 
+// bullets const bullets = []; const BULLET_SPEED = 900; const FIRE_RATE = 0.12; // seconds between shots let timeSinceLastShot = 0;
 
-# --- Основной цикл программы ---
+// enemies let enemies = []; const ENEMY_COUNT = 600; // lots of enemies across the huge map const ENEMY_RADIUS = 12; let enemyLabelIsFurry = true;
 
-print("Камера запускается. Рисуйте указательным пальцем. Покажите открытую ладонь ✋, чтобы очистить.")
+// particles const particles = [];
 
-while cap.isOpened():
-    # Чтение кадра с камеры
-    success, frame = cap.read()
-    if not success:
-        print("Не удалось получить кадр с камеры.")
-        break
+// helper math function clamp(v,a,b){return Math.max(a,Math.min(b,v));} function rand(a,b){return a + Math.random()*(b-a);}
 
-    # Зеркальное отражение кадра по горизонтали для удобства
-    frame = cv2.flip(frame, 1)
+// spawn enemies randomly across world function spawnEnemies() { enemies = []; for (let i=0;i<ENEMY_COUNT;i++){ enemies.push({ id:i, x: Math.random()*WORLD.width, y: Math.random()*WORLD.height, vx: 0, vy: 0, radius: ENEMY_RADIUS, health: 20 + Math.floor(Math.random()*40), speed: 40 + Math.random()*80, aggroRange: 320 + Math.random()*240 }); } updateInfo(); }
 
-    # Если холст еще не создан, создаем его с размерами текущего кадра
-    if canvas_img is None:
-        canvas_img = np.zeros_like(frame)
+// respawn function respawnAll(){ player.x = WORLD.width/2; player.y = WORLD.height/2; player.health = 100; bullets.length = 0; particles.length = 0; spawnEnemies(); }
 
-    # Получаем высоту и ширину кадра
-    h, w, c = frame.shape
+toggleLabelBtn.addEventListener('click', ()=>{ enemyLabelIsFurry = !enemyLabelIsFurry; enemyLabelText.textContent = Enemy — red circle ("${enemyLabelIsFurry? 'Furry' : 'Monster'}"); }); respawnBtn.addEventListener('click', ()=>{ respawnAll(); });
 
-    # Конвертируем изображение из BGR (формат OpenCV) в RGB (формат для MediaPipe)
-    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+// spawn initial spawnEnemies();
 
-    # Обрабатываем кадр с помощью MediaPipe Hands
-    results = hands.process(frame_rgb)
+// camera follow & culling function worldToScreen(wx, wy) { const sx = Math.round(wx - camera.x + canvas.width/2); const sy = Math.round(wy - camera.y + canvas.height/2); return [sx, sy]; } function isOnScreen(wx, wy, pad=64) { const sx = wx - camera.x + canvas.width/2; const sy = wy - camera.y + canvas.height/2; return sx > -pad && sx < canvas.width + pad && sy > -pad && sy < canvas.height + pad; }
 
-    # Флаг для определения жеста "открытая ладонь"
-    fingers_up = [False, False, False, False, False] # Большой, Указат., Средний, Безым., Мизинец
+// shoot function shoot() { const sx = player.x; const sy = player.y; // convert mouse to world coords const mx = camera.x - canvas.width/2 + mouse.x; const my = camera.y - canvas.height/2 + mouse.y; const dx = mx - sx; const dy = my - sy; const mag = Math.hypot(dx,dy) || 1; const vx = dx / mag * BULLET_SPEED; const vy = dy / mag * BULLET_SPEED; bullets.push({x:sx+vx0.01,y:sy+vy0.01,vx,vy,ttl:2}); }
 
-    # Если руки обнаружены
-    if results.multi_hand_landmarks:
-        for hand_landmarks in results.multi_hand_landmarks:
-            # Опционально: рисуем скелет руки на кадре для наглядности
-            # mp_drawing.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+// particle spawn function spawnParticles(x,y,count,baseVel){ for(let i=0;i<count;i++){ const ang = Math.random()Math.PI2; const spd = baseVel * (0.4 + Math.random()*1.6); particles.push({x,y,vx:Math.cos(ang)*spd,vy:Math.sin(ang)*spd,ttl:0.8 + Math.random()*0.6,size:2+Math.random()*3}) } }
 
-            # Получаем список всех ключевых точек руки
-            lmList = []
-            for id, lm in enumerate(hand_landmarks.landmark):
-                # Конвертируем нормализованные координаты (0.0-1.0) в пиксели
-                cx, cy = int(lm.x * w), int(lm.y * h)
-                lmList.append([id, cx, cy])
+// update loop let lastTime = performance.now(); function update(now){ const dt = Math.min((now - lastTime)/1000, 0.033); lastTime = now;
 
-            # --- Логика определения жестов ---
-            if len(lmList) != 0:
-                # Координаты кончиков пальцев (IDs: 4, 8, 12, 16, 20)
-                # Координаты средних суставов (IDs: 2, 6, 10, 14, 18)
+// player movement
+let dx = 0, dy = 0;
+if(keys['w']||keys['arrowup']) dy -= 1;
+if(keys['s']||keys['arrowdown']) dy += 1;
+if(keys['a']||keys['arrowleft']) dx -= 1;
+if(keys['d']||keys['arrowright']) dx += 1;
+const len = Math.hypot(dx,dy) || 1;
+player.x += (dx/len) * player.speed * dt;
+player.y += (dy/len) * player.speed * dt;
+player.x = clamp(player.x, 0, WORLD.width);
+player.y = clamp(player.y, 0, WORLD.height);
 
-                # Проверка большого пальца (он работает немного иначе, проверяем по оси X)
-                # Если кончик (4) правее сустава (3) для правой руки (при зеркалировании)
-                if lmList[4][1] > lmList[3][1]: fingers_up[0] = True
+// rotate player towards mouse
+const mx = camera.x - canvas.width/2 + mouse.x;
+const my = camera.y - canvas.height/2 + mouse.y;
+player.rot = Math.atan2(my - player.y, mx - player.x);
 
-                # Проверка остальных 4 пальцев (если кончик выше среднего сустава по оси Y)
-                # Ось Y идет сверху вниз, поэтому "выше" значит меньше координата Y
-                if lmList[8][2] < lmList[6][2]: fingers_up[1] = True  # Указательный
-                if lmList[12][2] < lmList[10][2]: fingers_up[2] = True # Средний
-                if lmList[16][2] < lmList[14][2]: fingers_up[3] = True # Безымянный
-                if lmList[20][2] < lmList[18][2]: fingers_up[4] = True # Мизинец
+// shooting
+timeSinceLastShot += dt;
+if (mouse.down && timeSinceLastShot >= FIRE_RATE) {
+  shoot(); timeSinceLastShot = 0;
+}
 
-                # --- Режим ОЧИСТКИ (Жест ✋: все пальцы кроме, возможно, большого, подняты) ---
-                # Проверяем, подняты ли указательный, средний, безымянный и мизинец
-                if fingers_up[1] and fingers_up[2] and fingers_up[3] and fingers_up[4]:
-                   # Очищаем холст (заливаем черным)
-                   canvas_img = np.zeros_like(frame)
-                   # Сбрасываем предыдущую позицию, чтобы не было линии после очистки
-                   prev_x, prev_y = 0, 0
-                   cv2.putText(frame, "CLEARED!", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+// bullets
+for (let i = bullets.length-1; i>=0; i--) {
+  const b = bullets[i];
+  b.x += b.vx * dt;
+  b.y += b.vy * dt;
+  b.ttl -= dt;
+  if (b.ttl <= 0) { bullets.splice(i,1); continue; }
+  // collision with enemies (simple AABB/circle check)
+  for (let j = enemies.length-1; j>=0; j--) {
+    const e = enemies[j];
+    const dist = Math.hypot(b.x - e.x, b.y - e.y);
+    if (dist < e.radius) {
+      e.health -= 20 + Math.random()*15;
+      bullets.splice(i,1);
+      spawnParticles(b.x,b.y,6,120);
+      if (e.health <= 0) {
+        // death
+        spawnParticles(e.x,e.y,18,220);
+        enemies.splice(j,1);
+        break;
+      }
+      break;
+    }
+  }
+}
 
-                # --- Режим РИСОВАНИЯ (Иначе, если видна рука) ---
-                else:
-                    # Получаем координаты кончика указательного пальца (ID 8)
-                    curr_x, curr_y = lmList[8][1], lmList[8][2]
+// enemies behavior (simple: wander until player within aggroRange, then chase)
+for (let e of enemies){
+  const toPlayer = Math.hypot(player.x - e.x, player.y - e.y);
+  if (toPlayer < e.aggroRange) {
+    // chase
+    const ang = Math.atan2(player.y - e.y, player.x - e.x);
+    e.vx += Math.cos(ang) * 20 * dt;
+    e.vy += Math.sin(ang) * 20 * dt;
+  } else {
+    // wander a bit
+    e.vx += (Math.random()*2-1) * 10 * dt;
+    e.vy += (Math.random()*2-1) * 10 * dt;
+  }
+  // limit speed and integrate
+  const vmax = e.speed;
+  const sp = Math.hypot(e.vx,e.vy) || 1;
+  if (sp > vmax) { e.vx = e.vx/sp*vmax; e.vy = e.vy/sp*vmax; }
+  e.x += e.vx * dt; e.y += e.vy * dt;
+  e.x = clamp(e.x, 0, WORLD.width); e.y = clamp(e.y, 0, WORLD.height);
 
-                    # Если это первая точка после потери руки или старта
-                    if prev_x == 0 and prev_y == 0:
-                        prev_x, prev_y = curr_x, curr_y
+  // simple enemy damaging player if close
+  const d2p = Math.hypot(player.x - e.x, player.y - e.y);
+  if (d2p < player.radius + e.radius) {
+    player.health -= 10*dt; // continuous contact damage
+  }
+}
 
-                    # Рисуем линию на холсте от предыдущей точки к текущей
-                    cv2.line(canvas_img, (prev_x, prev_y), (curr_x, curr_y), DRAW_COLOR, BRUSH_THICKNESS)
+// particles
+for (let i = particles.length-1; i>=0; i--) {
+  const p = particles[i];
+  p.x += p.vx * dt; p.y += p.vy * dt;
+  p.vx *= 0.92; p.vy *= 0.92;
+  p.ttl -= dt;
+  if (p.ttl <= 0) particles.splice(i,1);
+}
 
-                    # Обновляем предыдущую точку
-                    prev_x, prev_y = curr_x, curr_y
+// update camera to follow player (clamped to world bounds)
+camera.x = clamp(player.x, canvas.width/2, WORLD.width - canvas.width/2);
+camera.y = clamp(player.y, canvas.height/2, WORLD.height - canvas.height/2);
 
-                    # Рисуем кружок на кончике пальца в реальном видео для визуализации
-                    cv2.circle(frame, (curr_x, curr_y), 10, DRAW_COLOR, cv2.FILLED)
+updateInfo();
+draw();
+requestAnimationFrame(update);
 
-    else:
-        # Если рука потеряна из виду, сбрасываем предыдущие координаты
-        prev_x, prev_y = 0, 0
+}
 
-    # --- Объединение и отображение ---
+function updateInfo(){ info.textContent = Map: ${WORLD.width}×${WORLD.height} — Enemies alive: ${enemies.length} — Health: ${Math.max(0, Math.round(player.health))}; }
 
-    # Накладываем холст с рисунком на оригинальный кадр с камеры
-    # Сложение изображений: черный цвет (0,0,0) не меняет оригинальный кадр,
-    # а белые линии добавляются.
-    combined_image = cv2.add(frame, canvas_img)
+// draw world function draw() { // clear ctx.clearRect(0,0,canvas.width,canvas.height);
 
-    # Показываем результат
-    cv2.imshow('Air Canvas', combined_image)
+// background grid (culling by drawing tiles inside camera bounds)
+const tile = 64;
+const startX = Math.floor((camera.x - canvas.width/2)/tile)-1;
+const endX = Math.ceil((camera.x + canvas.width/2)/tile)+1;
+const startY = Math.floor((camera.y - canvas.height/2)/tile)-1;
+const endY = Math.ceil((camera.y + canvas.height/2)/tile)+1;
 
-    # Выход при нажатии клавиши 'q'
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
+ctx.fillStyle = '#222';
+ctx.fillRect(0,0,canvas.width,canvas.height);
 
-# --- Завершение работы ---
-cap.release()
-cv2.destroyAllWindows()
-print("Программа завершена.")
+for (let tx = startX; tx <= endX; tx++){
+  for (let ty = startY; ty <= endY; ty++){
+    const wx = tx*tile + tile/2;
+    const wy = ty*tile + tile/2;
+    if (wx < 0 || wy < 0 || wx > WORLD.width || wy > WORLD.height) continue;
+    const [sx,sy] = worldToScreen(wx,wy);
+    // subtle checkerboard
+    ctx.fillStyle = ((tx+ty)&1) ? '#1e1e1e' : '#202020';
+    ctx.fillRect(sx - tile/2, sy - tile/2, tile, tile);
+  }
+}
+
+// draw bullets
+ctx.fillStyle = '#ffb86b';
+for (let b of bullets){
+  if (!isOnScreen(b.x,b.y,32)) continue;
+  const [sx,sy] = worldToScreen(b.x,b.y);
+  ctx.beginPath(); ctx.arc(sx,sy,4,0,Math.PI*2); ctx.fill();
+}
+
+// draw enemies
+for (let e of enemies){
+  if (!isOnScreen(e.x,e.y,64)) continue;
+  const [sx,sy] = worldToScreen(e.x,e.y);
+  // shadow
+  ctx.beginPath(); ctx.ellipse(sx, sy + e.radius*0.6, e.radius*1.1, e.radius*0.6, 0, 0, Math.PI*2); ctx.fillStyle = 'rgba(0,0,0,0.35)'; ctx.fill();
+  // body (red)
+  ctx.beginPath(); ctx.arc(sx,sy,e.radius,0,Math.PI*2); ctx.fillStyle = '#b33'; ctx.fill();
+  // health bar
+  const w = e.radius*2; const hp = clamp(e.health/60,0,1);
+  ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(sx - w/2, sy - e.radius - 8, w, 5);
+  ctx.fillStyle = 'lime'; ctx.fillRect(sx - w/2, sy - e.radius - 8, w*hp, 5);
+  // optional label
+  if (isOnScreen(e.x,e.y,0)){
+    ctx.font = '12px Arial'; ctx.textAlign='center'; ctx.textBaseline='bottom';
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    const label = enemyLabelIsFurry ? 'FURRY' : 'MONSTER';
+    ctx.fillText(label, sx, sy - e.radius - 12);
+  }
+}
+
+// draw player
+const [psx, psy] = worldToScreen(player.x, player.y);
+// player shadow
+ctx.beginPath(); ctx.ellipse(psx, psy + player.radius*0.6, player.radius*1.3, player.radius*0.6, 0, 0, Math.PI*2); ctx.fillStyle = 'rgba(0,0,0,0.4)'; ctx.fill();
+// triangle
+ctx.save(); ctx.translate(psx, psy); ctx.rotate(player.rot);
+ctx.beginPath(); ctx.moveTo(18,0); ctx.lineTo(-10,10); ctx.lineTo(-10,-10); ctx.closePath(); ctx.fillStyle = '#fff'; ctx.fill();
+ctx.restore();
+
+// particles (draw with small fill)
+for (let p of particles){
+  if (!isOnScreen(p.x,p.y,8)) continue;
+  const [sx,sy] = worldToScreen(p.x,p.y);
+  ctx.beginPath(); ctx.arc(sx,sy,p.size,0,Math.PI*2); ctx.fillStyle = 'rgba(200,40,60,0.9)'; ctx.fill();
+}
+
+// HUD
+ctx.fillStyle = 'rgba(0,0,0,0.4)'; ctx.fillRect(12, canvas.height-56, 220, 44);
+ctx.fillStyle = '#fff'; ctx.font = '14px Arial'; ctx.textAlign='left'; ctx.fillText('Health: ' + Math.round(player.health), 22, canvas.height-32);
+
+// minimap
+drawMinimap();
+
+}
+
+function drawMinimap(){ const mw = minimap.width; const mh = minimap.height; mctx.clearRect(0,0,mw,mh); mctx.fillStyle = '#081018'; mctx.fillRect(0,0,mw,mh); // world rect scaled const sx = (player.x / WORLD.width) * mw; const sy = (player.y / WORLD.height) * mh; // draw enemies as tiny dots (cull to limit draws for perf) const drawCap = 800; let drawn = 0; mctx.fillStyle = '#b33'; for (let i = 0; i < enemies.length; i++){ if (drawn > drawCap) break; // limiting minimap points const e = enemies[i]; const ex = (e.x / WORLD.width) * mw; const ey = (e.y / WORLD.height) * mh; mctx.fillRect(ex, ey, 1.5, 1.5); drawn++; } // player marker mctx.fillStyle = '#fff'; mctx.fillRect(sx-2, sy-2, 4, 4);
+
+// viewport rectangle
+const vw = (canvas.width / WORLD.width) * mw;
+const vh = (canvas.height / WORLD.height) * mh;
+const vx = ((camera.x - canvas.width/2) / WORLD.width) * mw;
+const vy = ((camera.y - canvas.height/2) / WORLD.height) * mh;
+mctx.strokeStyle = 'rgba(255,255,255,0.6)'; mctx.strokeRect(vx,vy,vw,vh);
+
+}
+
+// initial start requestAnimationFrame(update);
+
+// small safety: prevent accidental targeting of real people // allow user to toggle enemy label; default is 'FURRY' as requested but can be changed via UI
+
+})(); </script>
+
+</body>
+</html>
