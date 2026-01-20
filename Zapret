@@ -1,686 +1,167 @@
-# engine.py
-"""
-Улучшённый движок деобфускации.
-Multi-pass pipeline:
-  - static heuristics / string extraction
-  - runtime tracing (sandbox with bit/bit32 polyfill + hooks)
-  - aggressive decoding (backslash numbers, base64, hex, single-byte XOR)
-  - attempt runtime tracing AGAIN on decoded candidates
-  - unluac runs last on all byte-candidates
+import cv2
+import mediapipe as mp
+import numpy as np
+import time
 
-Выдаёт основной текстовый дамп и сохраняет extracted_blocks.lua (local mel_1 = ...)
-"""
-import os
-import re
-import io
-import uuid
-import json
-import base64
-import binascii
-import logging
-import tempfile
-import subprocess
-from collections import OrderedDict
+# Настройки
+CAM_ID = 0                # индекс камеры
+DRAW_COLOR = (255, 255, 255)  # белая линия (BGR)
+THICKNESS = 6
+SMOOTHING = 0.2           # для сглаживания движения (0..1, меньше = сильнее сглаживание)
+CLEAR_HOLD_TIME = 0.6     # сек, сколько держать жест "открытая ладонь", чтобы очистить
 
-# try import lupa
-try:
-    from lupa import LuaRuntime
-except Exception:
-    LuaRuntime = None
+mp_hands = mp.solutions.hands
+mp_draw = mp.solutions.drawing_utils
 
-from vm_detector import VMDetector
+def fingers_up(hand_landmarks, hand_label):
+    """
+    Возвращает список булевских значений для [thumb, index, middle, ring, pinky]
+    hand_label: "Left" или "Right" (от MediaPipe)
+    """
+    lm = hand_landmarks.landmark
+    fingers = []
 
-logger = logging.getLogger("DeobfuscatorEngine")
-logger.addHandler(logging.NullHandler())
+    # Thumb: сравниваем x координаты (для правой/левой руки нужно по-разному)
+    # tip = 4, ip = 3, mcp = 2
+    if hand_label == "Right":
+        fingers.append(lm[4].x < lm[3].x)  # для правой руки палец "вправо" -> x меньше
+    else:
+        fingers.append(lm[4].x > lm[3].x)
 
+    # Для остальных пальцев сравниваем y: tip выше pip значит палец поднят
+    tips_ids = [8, 12, 16, 20]
+    pip_ids  = [6, 10, 14, 18]
+    for t, p in zip(tips_ids, pip_ids):
+        fingers.append(lm[t].y < lm[p].y)
 
-class DeobfuscatorEngine:
-    def __init__(self, unluac_filename="unluac.jar"):
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        self.unluac_path = os.path.join(base_dir, unluac_filename)
-        self.vm_detector = VMDetector()
-        self._last_extracted_path = None
-        logger.info(f"DeobfuscatorEngine init. Working dir: {base_dir}")
+    return fingers  # [thumb, index, middle, ring, pinky]
 
-    # ---------- Public API ----------
-    def process(self, content, status_callback=None):
-        def update_status(msg):
-            if status_callback:
-                try:
-                    status_callback(msg)
-                except Exception:
-                    pass
-            logger.info(f"[STATUS] {msg}")
+def norm_to_pixel(norm_x, norm_y, frame_w, frame_h):
+    x = int(norm_x * frame_w)
+    y = int(norm_y * frame_h)
+    return x, y
 
-        # normalize sample text
-        raw_bytes = content if isinstance(content, (bytes, bytearray)) else None
-        try:
-            sample = raw_bytes[:20000].decode('latin-1', 'ignore') if raw_bytes is not None else str(content)
-        except Exception:
-            sample = str(content)
+def main():
+    cap = cv2.VideoCapture(CAM_ID)
+    if not cap.isOpened():
+        print("Не удалось открыть камеру.")
+        return
 
-        update_status("🔎 Static heuristics...")
-        try:
-            vm_info = self.vm_detector.analyze(sample)
-        except Exception:
-            vm_info = {'is_vm': False, 'reasons': []}
+    with mp_hands.Hands(
+        model_complexity=1,
+        max_num_hands=1,
+        min_detection_confidence=0.6,
+        min_tracking_confidence=0.6
+    ) as hands:
 
-        # if clear VM markers — do static-only path to avoid executing dangerous code
-        if vm_info.get('is_vm'):
-            update_status("⚠️ VM/protector detected (static path). Extracting strings and blobs.")
-            strings = self.vm_detector.extract_strings(sample)
-            backslash = self.vm_detector.extract_backslash_numbers(sample)
-            all_strings = list(OrderedDict.fromkeys(strings + backslash))
-            return self._finalize_output(content, all_strings, vm_info.get('reasons', []), [], update_status)
+        # Получим размеры кадра (будут известны после первого кадра)
+        ret, frame = cap.read()
+        if not ret:
+            print("Нет кадра с камеры.")
+            return
+        frame_h, frame_w = frame.shape[:2]
+        canvas = np.zeros_like(frame)  # холст для рисования
 
-        # require LuaRuntime for tracing path
-        if LuaRuntime is None:
-            return b"-- [FATAL] lupa (LuaRuntime) missing. Install lupa to enable runtime tracing."
+        prev_x, prev_y = None, None
+        smoothed_x, smoothed_y = None, None
 
-        # runtime tracing: initial pass
-        try:
-            update_status("🧠 Starting sandboxed Lua (initial trace)...")
-            lua = LuaRuntime(unpack_returned_tuples=True, encoding=None)
-            env = lua.execute(self._sandbox_code())
-            runner = lua.eval("""
-                function(code, env)
-                    local f, err = load(code, "chunk", "bt", env)
-                    if not f then return false, err end
-                    local ok, res = pcall(f)
-                    pcall(_G.dump_globals)
-                    return ok, res
-                end
-            """)
-            ok, _ = runner(content, env)
-            # collect results
-            detected_strings = self._lua_table_to_list(lua.globals().DETECTED_STRINGS)
-            globals_dump = self._lua_table_to_list(lua.globals().FINAL_GLOBALS)
-            action_log = self._lua_table_to_list(lua.globals().ACTION_LOG)
-            chunks = lua.globals().CAPTURED_CHUNKS or []
-            best_chunk = self._pick_best_chunk(chunks)
-            # target for next passes
-            target = best_chunk if best_chunk is not None else content
-        except Exception as e:
-            logger.exception("Runtime initial pass failed: %s", e)
-            # fallback to static-only
-            return self._finalize_output(content, [], [], [f"runtime error: {e}"], update_status)
+        clear_start_time = None
 
-        # multi-pass decode on collected strings + code: produce decoded candidates
-        update_status("🔁 Decoding collected strings and generating candidates...")
-        candidates = []
-        # include raw bytes candidate if bytes
-        if isinstance(target, (bytes, bytearray)):
-            candidates.append(bytes(target))
-        else:
-            try:
-                candidates.append(str(target).encode('latin-1', 'ignore'))
-            except:
-                pass
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
 
-        # decode collected strings
-        decoded_candidates = []
-        for s in detected_strings:
-            s_clean = self._clean_string(s)
-            decs = self._try_common_decodings(s_clean)
-            # add original string as candidate if looks big
-            if len(s_clean) > 200:
-                try:
-                    decoded_candidates.append(s_clean.encode('latin-1', 'ignore'))
-                except:
-                    pass
-            # add explicit decodings
-            for kind, res in decs:
-                if kind == 'backslash':
-                    if isinstance(res, str):
-                        try:
-                            decoded_candidates.append(res.encode('latin-1', 'ignore'))
-                        except:
-                            pass
-                elif kind in ('base64', 'base64_raw', 'hex', 'hex_raw'):
-                    # attempt to capture raw bytes
-                    try:
-                        if kind.startswith('base64'):
-                            b = base64.b64decode(s_clean, validate=False)
-                            decoded_candidates.append(b)
-                        else:
-                            hexcand = re.sub(r'[^0-9a-fA-F]', '', s_clean)
-                            if len(hexcand) % 2 == 0:
-                                b = binascii.unhexlify(hexcand)
-                                decoded_candidates.append(b)
-                    except Exception:
-                        pass
-                elif kind == 'xor_single' and isinstance(res, tuple):
-                    try:
-                        decoded_candidates.append(res[1].encode('latin-1', 'ignore'))
-                    except:
-                        pass
+            # Отзеркалим изображение, чтобы поведение было "зеркальным"
+            frame = cv2.flip(frame, 1)
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            results = hands.process(rgb)
 
-        # add any long backslash-blobs found in target text
-        try:
-            code_text = target.decode('latin-1', 'ignore') if isinstance(target, (bytes, bytearray)) else str(target)
-            backslash_blobs = self._extract_backslash_byte_blobs(code_text)
-            for b in backslash_blobs:
-                if len(b) > 32:
-                    decoded_candidates.append(b)
-        except Exception:
-            pass
+            draw_now = False
+            clear_now = False
 
-        # deduplicate candidates and append to main candidates list
-        def normalize_bytes(x):
-            return x if isinstance(x, (bytes, bytearray)) else str(x).encode('latin-1', 'ignore')
-        uniq = {}
-        for c in candidates + decoded_candidates:
-            try:
-                key = binascii.hexlify(normalize_bytes(c))[:200]
-            except:
-                key = str(c)[:200]
-            if key not in uniq:
-                uniq[key] = normalize_bytes(c)
-        candidates = list(uniq.values())
+            if results.multi_hand_landmarks and results.multi_handedness:
+                hand_landmarks = results.multi_hand_landmarks[0]
+                hand_label = results.multi_handedness[0].classification[0].label  # "Left" / "Right"
 
-        # second runtime pass: try to execute decoded candidate strings in sandbox (very cautious)
-        if LuaRuntime is not None:
-            try:
-                update_status("🌪️ Second sandbox pass on decoded candidates (cautious)...")
-                lua2 = LuaRuntime(unpack_returned_tuples=True, encoding=None)
-                env2 = lua2.execute(self._sandbox_code())
-                runner2 = lua2.eval("""
-                    function(code, env)
-                        local ok, res = pcall(function() local f, err = load(code, "chunk", "bt", env); if not f then return false, err end; return pcall(f) end)
-                        pcall(_G.dump_globals)
-                        return ok, res
-                    end
-                """)
-                # try only on a few largest candidates to save time
-                candidates_sorted = sorted(candidates, key=lambda b: len(b), reverse=True)[:6]
-                for idx, cand in enumerate(candidates_sorted):
-                    try:
-                        # treat as latin-1 string
-                        text = cand.decode('latin-1', 'ignore')
-                        ok, _ = runner2(text, env2)
-                        # collect newly captured chunks
-                        new_chunks = env2.CAPTURED_CHUNKS or []
-                        best_new = self._pick_best_chunk(new_chunks)
-                        if best_new:
-                            # prefer new captured chunk: add to head
-                            candidates.insert(0, best_new if isinstance(best_new, (bytes, bytearray)) else best_new.encode('latin-1', 'ignore'))
-                    except Exception:
-                        continue
-            except Exception:
-                logger.exception("Second runtime pass error (ignored)")
+                # Где кончик указательного пальца?
+                index_tip = hand_landmarks.landmark[8]  # normalized coords
 
-        # finally: unluac last — try all candidates until one decompiles
-        update_status("🧪 Running unluac on candidates (last step)...")
-        unluac_success = False
-        unluac_src = None
-        mapping = {}
-        for i, cand in enumerate(candidates):
-            try:
-                res = self._try_decompile(cand)
-                if res:
-                    unluac_success = True
-                    try:
-                        src = res.decode('utf-8', 'ignore')
-                    except:
-                        src = res.decode('latin-1', 'ignore')
-                    src = self._beautify_lua(src)
-                    renamed, mapping = self._rename_obfuscated_identifiers(src)
-                    unluac_src = renamed
-                    break
-            except Exception:
-                continue
+                ix, iy = norm_to_pixel(index_tip.x, index_tip.y, frame_w, frame_h)
 
-        # build final output
-        return self._compose_final_output(
-            target, detected_strings, globals_dump, action_log, candidates,
-            unluac_success, unluac_src, mapping, update_status
-        )
-
-    # ---------- sandbox code (hooks + bit polyfill) ----------
-    def _sandbox_code(self):
-        # robust bit/bit32 polyfill
-        bit_polyfill = """
-        local bit = {}
-        function bit.tobit(x) x = x % 4294967296; if x >= 2147483648 then x = x - 4294967296 end; return x end
-        function bit.bnot(x) return 4294967295 - x % 4294967296 end
-        function bit._binop(a,b,f)
-            local r=0;m=1
-            while a>0 or b>0 do
-                local aa=a%2; local bb=b%2
-                if f(aa,bb) then r=r+m end
-                a=(a-aa)/2; b=(b-bb)/2; m=m*2
-            end
-            return r
-        end
-        function bit.band(a,b) return bit._binop(a,b,function(x,y) return x==1 and y==1 end) end
-        function bit.bor(a,b) return bit._binop(a,b,function(x,y) return x==1 or y==1 end) end
-        function bit.bxor(a,b) return bit._binop(a,b,function(x,y) return x~=y end) end
-        function bit.lshift(a,b) return (a * 2^b) % 4294967296 end
-        function bit.rshift(a,b) return math.floor(a / 2^b) % 4294967296 end
-        function bit.arshift(a,b)
-            local z = math.floor(a / 2^b) % 4294967296
-            if a >= 2147483648 then z = z + 4294967296 - 2^(32-b) end
-            return z
-        end
-        package.loaded.bit = bit; _G.bit = bit; _G.bit32 = bit
-        """
-
-        sandbox = bit_polyfill + """
-        _G.CAPTURED_CHUNKS = {}
-        _G.DETECTED_STRINGS = {}
-        _G.ACTION_LOG = {}
-        _G.FINAL_GLOBALS = {}
-
-        local function log_action(msg)
-            if #_G.ACTION_LOG < 1000 then
-                table.insert(_G.ACTION_LOG, tostring(msg))
-            end
-        end
-
-        local function capture_str(s)
-            if type(s) == "string" and #s > 3 then
-                if not s:find("stack begin") and not s:find("upvalue") then
-                    _G.DETECTED_STRINGS[s] = true
-                end
-            end
-            return s
-        end
-
-        -- Hook string.char
-        local real_char = string.char
-        string.char = function(...)
-            local ok, res = pcall(real_char, ...)
-            if ok then capture_str(res) end
-            return res
-        end
-
-        -- Hook table.concat
-        local real_concat = table.concat
-        table.concat = function(t, sep, i, j)
-            local ok, res = pcall(real_concat, t, sep, i, j)
-            if ok then capture_str(res) end
-            return res
-        end
-
-        -- Hook load / loadstring
-        local real_load = load
-        local function hooked_load(chunk, name, mode, env)
-            if type(chunk) == "string" and #chunk > 50 then
-                table.insert(_G.CAPTURED_CHUNKS, {data = chunk, size = #chunk, type = "string"})
-            end
-            return real_load(chunk, name, mode, env)
-        end
-
-        function _G.dump_globals()
-            local ok, g = pcall(function() return getfenv and getfenv() or _G end)
-            if not ok then return end
-            local ignore = {string=1, math=1, table=1, bit=1, bit32=1, pairs=1, ipairs=1, next=1, _G=1, sandbox_env=1, package=1}
-            for k, v in pairs(g) do
-                if not ignore[k] then
-                    if type(v) == "string" or type(v) == "number" or type(v) == "boolean" then
-                        table.insert(_G.FINAL_GLOBALS, tostring(k) .. " = " .. tostring(v))
-                    end
-                end
-            end
-        end
-
-        -- Proxy for Roblox APIs
-        local function create_proxy(name)
-            local proxy = {}
-            local meta = {}
-            meta.__index = function(t, k)
-                local key = tostring(k)
-                if key == "PlaceId" then return 123456 end
-                if key == "UserId" then return 1001 end
-                if key == "HttpGet" or key == "HttpGetAsync" then
-                    return function(u) log_action("HTTP GET: "..tostring(u)); return "ProxyResponse" end
-                end
-                return create_proxy(name .. "." .. key)
-            end
-            meta.__newindex = function(t, k, v)
-                log_action("Write: " .. name .. "." .. tostring(k) .. " = " .. tostring(v))
-            end
-            meta.__call = function(t, ...) return create_proxy(name) end
-            meta.__tostring = function() return name end
-            setmetatable(proxy, meta)
-            return proxy
-        end
-
-        local env = {
-            loadstring = hooked_load, load = hooked_load,
-            print = function(...) local a={...}; log_action("Print: "..tostring(a[1])); end,
-            warn = function(...) local a={...}; log_action("Warn: "..tostring(a[1])); end,
-            error = function(...) log_action("Error suppressed"); end,
-            string = string, math = math, table = table,
-            bit = bit, bit32 = bit, pairs = pairs, ipairs = ipairs, next = next,
-            type = type, tostring = tostring, tonumber = tonumber, pcall = pcall, xpcall = xpcall,
-            select = select, unpack = unpack or table.unpack,
-            setmetatable = setmetatable, getmetatable = getmetatable,
-            game = create_proxy("game"),
-            workspace = create_proxy("workspace"),
-            script = create_proxy("script"),
-            getgenv = function() return {} end,
-        }
-        env._G = env
-        _G.sandbox_env = env
-        return env
-        """
-
-        return sandbox
-
-    # ---------- helpers ----------
-    def _lua_table_to_list(self, tbl):
-        try:
-            if tbl is None:
-                return []
-            # lupa table behaves like dict-like; converting via list() may give keys.
-            try:
-                return list(tbl)
-            except Exception:
-                # fallback: iterate integer indices
-                out = []
-                i = 1
-                while True:
-                    try:
-                        v = tbl[i]
-                        out.append(v)
-                        i += 1
-                    except Exception:
-                        break
-                return out
-        except Exception:
-            return []
-
-    def _pick_best_chunk(self, chunks):
-        try:
-            if not chunks:
-                return None
-            max_size = 0
-            best = None
-            # try both table style and list style
-            try:
-                for i in range(1, len(chunks) + 1):
-                    c = chunks[i]
-                    if getattr(c, 'size', 0) > max_size:
-                        max_size = c.size
-                        best = c.data
-            except Exception:
-                for c in chunks:
-                    try:
-                        s = getattr(c, 'size', 0)
-                        if s > max_size:
-                            max_size = s
-                            best = getattr(c, 'data', None)
-                    except Exception:
-                        continue
-            return best
-        except Exception:
-            return None
-
-    def _extract_backslash_byte_blobs(self, text):
-        out = []
-        if not text:
-            return out
-        for group in re.findall(r'(?:\\\d{1,3}){8,}', text):
-            try:
-                nums = re.findall(r'\\(\d{1,3})', group)
-                b = bytes(int(n) for n in nums)
-                out.append(b)
-            except Exception:
-                continue
-        return out
-
-    def _check_java(self):
-        try:
-            res = subprocess.run(["java", "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            return res.returncode == 0
-        except Exception:
-            return False
-
-    def _try_decompile(self, byteblob):
-        if not os.path.exists(self.unluac_path):
-            return None
-        try:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".lua", mode='wb') as tmp:
-                if isinstance(byteblob, (bytes, bytearray)):
-                    tmp.write(byteblob)
+                # Сглаживание позиции
+                if smoothed_x is None:
+                    smoothed_x, smoothed_y = ix, iy
                 else:
-                    tmp.write(str(byteblob).encode('latin-1', 'ignore'))
-                path = tmp.name
-            res = subprocess.run(
-                ["java", "-Xmx2G", "-jar", self.unluac_path, path],
-                capture_output=True,
-                timeout=30
-            )
-            try:
-                os.remove(path)
-            except:
-                pass
-            if res.returncode == 0 and res.stdout:
-                return res.stdout
-            return None
-        except Exception:
-            return None
+                    smoothed_x = int(smoothed_x * (1 - SMOOTHING) + ix * SMOOTHING)
+                    smoothed_y = int(smoothed_y * (1 - SMOOTHING) + iy * SMOOTHING)
 
-    def _clean_string(self, s):
-        if isinstance(s, (bytes, bytearray)):
-            try: return s.decode('utf-8')
-            except: 
-                try: return s.decode('latin-1', 'ignore')
-                except: return str(s)
-        return str(s)
+                # Решаем рисовать или нет: есть ли поднятый указательный палец и НЕ подняты другие?
+                fingers = fingers_up(hand_landmarks, hand_label)
+                # fingers = [thumb, index, middle, ring, pinky]
+                index_is_up = fingers[1]
+                others = fingers[0] or fingers[2] or fingers[3] or fingers[4]
 
-    # beautify (simple)
-    def _beautify_lua(self, source_code):
-        try:
-            source_code = re.sub(r'(\s)(local|return|if|for|while|repeat|function)(\s)', r'\n\2 ', source_code)
-            replacements = {" then ": " then\n", " do ": " do\n", " end ": "\nend\n", " repeat ": "\nrepeat\n", " until ": "\nuntil ", ";": ";\n"}
-            for k, v in replacements.items():
-                source_code = source_code.replace(k, v)
-            lines = source_code.splitlines()
-            formatted, indent = [], 0
-            for line in lines:
-                line = line.rstrip()
-                if not line.strip(): continue
-                stripped = line.strip()
-                if stripped.startswith("--"):
-                    formatted.append("\t"*indent + stripped); continue
-                if stripped.startswith(("end", "until")):
-                    indent = max(0, indent - 1)
-                formatted.append("\t"*indent + stripped)
-                if stripped.endswith(("then", "do", "repeat")) or (stripped.startswith("function") and not stripped.endswith("end")):
-                    indent += 1
-            return "\n".join(formatted)
-        except Exception:
-            return source_code
+                # Вариант: рисовать, когда индекс поднят (независимо от других):
+                # draw_now = index_is_up
+                # Но чтобы не рисовать при "открытой ладони" (очистка), проверим жест ✋:
+                all_up = all(fingers)
 
-    # rename short obfuscated identifiers -> mel_N
-    def _rename_obfuscated_identifiers(self, src, max_len=8):
-        keywords = set("""and break do else elseif end false for function if in local nil not or repeat return then true until while
-                        string table math pairs ipairs next coroutine package io os debug load loadfile require pcall xpcall""".split())
-        common_globals = set(["game","workspace","script","Instance","Vector3","CFrame","wait","warn","print","require","tick","DateTime"])
-        protected = keywords.union(common_globals)
-        ident_pattern = re.compile(r'\b([A-Za-z_][A-Za-z0-9_]*)\b')
-        counts = {}
-        for m in ident_pattern.finditer(src):
-            name = m.group(1)
-            if name in protected: continue
-            if len(name) <= max_len:
-                counts[name] = counts.get(name, 0) + 1
-        candidates = [n for n,c in counts.items() if c >= 1]
-        candidates = sorted(candidates, key=lambda x:(len(x), x))[:800]
-        mapping = {}
-        i = 1
-        for name in candidates:
-            mapping[name] = f"mel_{i}"; i += 1
-        def repl(m):
-            n = m.group(1); return mapping.get(n, n)
-        new_src = ident_pattern.sub(repl, src)
-        return new_src, mapping
-
-    # try common decodings on a string
-    def _try_common_decodings(self, s):
-        results = []
-        if not s or len(s) < 4: return results
-        # backslash numbers
-        ds = self._decode_backslash_numbers(s)
-        if ds != s: results.append(('backslash', ds))
-        # base64
-        try:
-            b = base64.b64decode(s, validate=False)
-            printable = sum(32 <= c < 127 for c in b); ratio = printable / max(1, len(b))
-            if (ratio > 0.5 and len(b) > 4) or len(b) > 32:
-                results.append(('base64', b.decode('latin-1', 'ignore')))
-            else:
-                results.append(('base64_raw', binascii.hexlify(b).decode()[:200]))
-        except Exception:
-            pass
-        # hex
-        hexcand = re.sub(r'[^0-9a-fA-F]', '', s)
-        if len(hexcand) >= 8 and len(hexcand) % 2 == 0:
-            try:
-                b = binascii.unhexlify(hexcand)
-                printable = sum(32 <= c < 127 for c in b); ratio = printable / max(1, len(b))
-                if ratio > 0.5:
-                    results.append(('hex', b.decode('latin-1', 'ignore')))
-                else:
-                    results.append(('hex_raw', binascii.hexlify(b).decode()[:200]))
-            except Exception:
-                pass
-        # single-byte XOR brute
-        try:
-            raw = s.encode('latin-1', 'ignore')
-            for key in range(1, 256):
-                b = bytes([c ^ key for c in raw])
-                printable = sum(32 <= c < 127 for c in b); ratio = printable / max(1, len(b))
-                if ratio > 0.85:
-                    results.append(('xor_single', (key, b.decode('latin-1', 'ignore'))))
-                    break
-        except Exception:
-            pass
-        return results
-
-    def _decode_backslash_numbers(self, s):
-        nums = re.findall(r'\\(\d{1,3})', s)
-        if not nums: return s
-        try:
-            b = bytes(int(n) for n in nums)
-            try:
-                return b.decode('utf-8')
-            except:
-                return b.decode('latin-1', 'ignore')
-        except:
-            return s
-
-    # compose final output and save extracted_blocks.lua
-    def _compose_final_output(self, target_code, detected_strings, globals_dump, action_log, candidates,
-                              unluac_ok, unluac_src, mapping, callback):
-        if callback: callback("💾 Generating final report...")
-        parts = []
-        parts.append("-- [[ DUMPED STRINGS (DECRYPTED / STATIC) ]] --\n")
-        parts.append("-- Assets, Keys, and Messages found during analysis:\n\n")
-        sorted_strings = sorted(set(detected_strings or []), key=lambda x: len(str(x)), reverse=True)
-        seen = set()
-        for s in sorted_strings:
-            clean = self._clean_string(s).replace('\n', ' ').replace('\r', '')
-            if clean not in seen and len(clean) > 3:
-                parts.append(f'-- "{clean}"\n'); seen.add(clean)
-                decs = self._try_common_decodings(clean)
-                for t, r in decs[:2]:
-                    if t == 'xor_single':
-                        parts.append(f'--   [xor key={r[0]}] {r[1][:200]}\n')
+                if all_up:
+                    # Начинаем/продолжаем отсчет для очистки
+                    if clear_start_time is None:
+                        clear_start_time = time.time()
                     else:
-                        parts.append(f'--   [{t}] {str(r)[:200]}\n')
+                        if time.time() - clear_start_time >= CLEAR_HOLD_TIME:
+                            clear_now = True
+                else:
+                    clear_start_time = None
+                    # Рисуем если индекс поднят (и не открытая ладонь)
+                    if index_is_up:
+                        draw_now = True
+                    else:
+                        prev_x, prev_y = None, None  # сброс точки при поднятии пальца нет
 
-        if globals_dump:
-            parts.append("\n" + "="*50 + "\n")
-            parts.append("-- [[ GLOBAL VARIABLES DUMP ]] --\n\n")
-            for g in globals_dump:
-                parts.append(f"-- {self._clean_string(g)}\n")
+                # Рисуем контур/точку указателя на экране (для удобства пользователю)
+                cv2.circle(frame, (smoothed_x, smoothed_y), 8, (0, 255, 255), -1)
 
-        parts.append("\n" + "="*50 + "\n\n")
-        # add decompiled source or preview
-        if unluac_ok and unluac_src:
-            parts.append("-- [[ DECOMPILED SOURCE (unluac) ]] --\n\n")
-            parts.append(unluac_src)
-            parts.append("\n\n-- [[ Identifier mapping ]] --\n")
-            for k, v in list(mapping.items())[:500]:
-                parts.append(f"-- {k} -> {v}\n")
-        else:
-            parts.append("-- [WARNING] unluac failed on candidates (file may be VM-protected or nonstandard bytecode).\n")
-            parts.append("-- Keep extracted_blocks.lua and captured previews for manual inspection.\n\n")
-            try:
-                txt_preview = target_code.decode('latin-1', 'ignore') if isinstance(target_code, (bytes, bytearray)) else str(target_code)
-                parts.append("-- RAW / CAPTURED SCRIPT PREVIEW (truncated)\n")
-                parts.append(txt_preview[:4000] + ("\n-- ...(truncated)\n" if len(txt_preview) > 4000 else "\n"))
-            except Exception:
-                pass
+                # (опционально) отрисуем landmarks для отладки
+                # mp_draw.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
 
-        parts.append("\n" + "="*50 + "\n")
-        parts.append("-- [[ ACTION LOG ]] --\n\n")
-        for l in (action_log or [])[-500:]:
-            parts.append(f"-- {self._clean_string(l)}\n")
-
-        # generate extracted_blocks.lua (mel_N)
-        try:
-            code_text = target_code.decode('latin-1', 'ignore') if isinstance(target_code, (bytes, bytearray)) else str(target_code)
-            mel_text = self._generate_mel_wrappers(code_text)
-            mel_path = os.path.join(tempfile.gettempdir(), f"extracted_blocks_{uuid.uuid4().hex[:8]}.lua")
-            with open(mel_path, 'w', encoding='utf-8') as mf:
-                mf.write(mel_text)
-            self._last_extracted_path = mel_path
-            parts.append(f"\n-- extracted_blocks.lua saved: {mel_path}\n")
-        except Exception:
-            self._last_extracted_path = None
-
-        return ''.join(parts).encode('utf-8')
-
-    def _generate_mel_wrappers(self, text_blob, min_string_len=60):
-        fragments = []
-        qpat = re.compile(r'("(?:(?:\\\\\d{1,3})|[^"\\\\]){'+str(min_string_len)+r',}"|\'(?:(?:\\\\\d{1,3})|[^\'\\\\]){'+str(min_string_len)+r',}\')', re.S)
-        for m in qpat.finditer(text_blob):
-            fragments.append(m.group(0))
-        fpat = re.compile(r'(function[\s\S]{200,}?end)', re.I)
-        for m in fpat.finditer(text_blob):
-            fragments.append(m.group(0))
-        if not fragments:
-            for i in range(0, len(text_blob or ""), 10000):
-                frag = (text_blob or "")[i:i+10000]
-                if len(frag) > 200:
-                    fragments.append(frag)
-        uniq = []
-        seen = set()
-        for f in fragments:
-            key = f[:200]
-            if key in seen: continue
-            seen.add(key)
-            uniq.append(f)
-        out = ["-- extracted_blocks.lua  (auto-generated)\n\n"]
-        for i, b in enumerate(uniq, start=1):
-            raw = b
-            if (raw.startswith('"') and raw.endswith('"')) or (raw.startswith("'") and raw.endswith("'")):
-                inner = raw[1:-1]
-                decoded = self._decode_backslash_numbers(inner)
-                lua_literal = self._to_lua_long_bracket(decoded)
-                preview = decoded[:500].replace('\n', '\\n')
-                out.append(f'-- fragment #{i} (decoded preview): {preview}\n')
-                out.append(f'local mel_{i} = {lua_literal}\n\n')
             else:
-                preview = raw[:200].replace('\n', '\\n')
-                out.append(f'-- fragment #{i} (raw blob length {len(raw)}): {preview}\n')
-                lua_literal = self._to_lua_long_bracket(raw)
-                out.append(f'local mel_{i} = {lua_literal}\n\n')
-        if not uniq:
-            out.append('-- No significant fragments detected.\n')
-        return ''.join(out)
+                clear_start_time = None
+                prev_x, prev_y = None, None
 
-    def _to_lua_long_bracket(self, s: str):
-        if s is None:
-            s = ""
-        for n in range(0, 8):
-            eq = '=' * n
-            close = ']' + eq + ']'
-            if close not in s:
-                return f'[{eq}[\n{s}\n]{eq}]'
-        esc = s.replace('\\', '\\\\').replace('"', '\\"')
-        return '"' + esc + '"'
+            # Выполняем рисование на холсте
+            if draw_now:
+                if prev_x is None:
+                    prev_x, prev_y = smoothed_x, smoothed_y
+                # рисуем линию между предыдущей и текущей позициями
+                cv2.line(canvas, (prev_x, prev_y), (smoothed_x, smoothed_y), DRAW_COLOR, THICKNESS, cv2.LINE_AA)
+                prev_x, prev_y = smoothed_x, smoothed_y
+
+            if clear_now:
+                canvas[:] = 0  # очистка холста
+                clear_start_time = None
+                prev_x, prev_y = None, None
+                # краткий визуальный индикатор очистки
+                cv2.putText(frame, "CLEARED", (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
+
+            # Наложим холст поверх кадра
+            img = cv2.add(frame, canvas)
+
+            # UI подсказки
+            cv2.putText(img, "Index finger to draw. Open palm (hold) to clear. Esc to exit.", (10, frame_h - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+
+            cv2.imshow("Draw by Finger", img)
+
+            key = cv2.waitKey(1) & 0xFF
+            if key == 27:  # ESC
+                break
+
+    cap.release()
+    cv2.destroyAllWindows()
+
+if __name__ == "__main__":
+    main()
