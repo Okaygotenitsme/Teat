@@ -1,47 +1,39 @@
-version "4.10" // Версия GZDoom
-
-// ФАЗА 1: Слабый монстр
-class Phase1Zombie : Zombieman // Наследуем свойства обычного зомби
+class AdminPistol : Weapon
 {
     Default
     {
-        Health 50;
-        Tag "Зараженный (Фаза 1)";
+        // Характеристики оружия
+        Weapon.SelectionOrder 100;
+        Weapon.AmmoUse 0;            // Не тратит патроны
+        Weapon.SlotNumber 2;         // Будет в слоте "2"
+        Inventory.PickupMessage "Вы получили Админ-Пушку. Повелевайте!";
+        Tag "Уничтожитель";
     }
 
     States
     {
-    Death:
-        // Когда здоровье падает до 0, проигрывается эта анимация
-        POSS M 5;
-        POSS N 5;
-        // Ключевой момент: спавним Фазу 2 на месте смерти Фазы 1
-        TNT1 A 0 A_SpawnItemEx("Phase2Zombie", 0, 0, 0, 0, 0, 0, 0, SXF_TRANSFERPOINTERS);
-        Stop; // Исчезаем, уступая место второй фазе
-    }
-}
-
-// ФАЗА 2: Сильный монстр
-class Phase2Zombie : Zombieman
-{
-    Default
-    {
-        Health 200; // Намного больше здоровья
-        Speed 15;   // Бегает быстрее
-        Scale 1.2;  // Чуть больше в размерах
-        Translation "112:127=176:191"; // Перекрасим его в красный цвет
-        Tag "Кровавый зомби (Фаза 2)";
-    }
-
-    States
-    {
-    // Здесь он просто ведет себя как обычный зомби, но он сильнее
-    Death:
-        POSS H 5;
-        POSS I 5;
-        POSS J 5;
-        POSS K 5;
-        POSS L -1; // Просто падает и остается лежать
-        Stop;
+    Ready:
+        PISG A 1 A_WeaponReady; // Оружие готово к стрельбе
+        Loop;
+    Deselect:
+        PISG A 1 A_Lower;      // Анимация убирания оружия
+        Loop;
+    Select:
+        PISG A 1 A_Raise;      // Анимация доставания оружия
+        Loop;
+    Fire:
+        PISG A 4;
+        // Функция выстрела: 
+        // 0, 0 - разброс пуль (идеально точно)
+        // 1 - количество пуль
+        // 1000000 - УРОН (хватит для любого босса)
+        PISG B 0 A_FireBullets(0, 0, 1, 1000000, "BulletPuff");
+        PISG B 6 A_StartSound("weapons/pistol", CHAN_WEAPON);
+        PISG C 4;
+        PISG B 5 A_ReFire;     // Позволяет зажать кнопку для автострельбы
+        Goto Ready;
+    Flash:
+        PISF A 7 Bright A_Light1;
+        Goto LightDone;
     }
 }
