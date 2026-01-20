@@ -1,50 +1,59 @@
-// Определяем нашего персонажа
-ACTOR CoolFriend 15000 // 15000 - это номер ID для редактора карт
+ACTOR CoolFriend 15000
 {
-  Health 5000          // Очень много здоровья
+  Health 5000
   Radius 20
   Height 56
-  Speed 15             // Быстро бегает
+  Speed 10              // Сделал чуть медленнее, чтобы не пугал скоростью
+  Scale 0.2             // <--- ЭТО УМЕНЬШИТ ЕГО (0.2 = 20% от размера фото)
   Monster
-  +FLOORCLIP           // Чтобы не проваливался в пол
-  SeeSound "friend/see"     // Можно добавить свои звуки
-  PainSound "friend/pain"
-  DeathSound "friend/death"
-  Obituary "%o был уничтожен своим же другом."
-
+  +FLOORCLIP
+  
+  // Чтобы он не дергался лишний раз
+  MinMissileChance 0    
+  
   States
   {
   Spawn:
-    FRND AB 10 A_Look  // Просто стоит и ждет
+    FRND A 10 A_Look
     Loop
 
   See:
-    FRND AABBCCDD 3 A_Chase // Просто бегает за игроком, но не атакует
+    // null, null означает: "Никогда не переходи в атаку" и "Никогда не переходи в ближний бой"
+    FRND AABBCCDD 4 A_Chase(null, null) 
     Loop
 
   Pain:
-    // Когда ударили, он переходит в режим ярости
-    TNT1 A 0 A_Say("Сейчас ты получишь!") // (Опционально)
-    ANGR A 105 A_Pain     // Замирает на 105 тиков (3 секунды) со злым фото
-    TNT1 A 0 A_SpawnItemEx("CoolFriendClone", 32, 32, 0, 0, 0, 0, 0, SXF_SETMASTER) // Спавн 4 клонов вокруг
-    TNT1 A 0 A_SpawnItemEx("CoolFriendClone", -32, 32, 0, 0, 0, 0, 0, SXF_SETMASTER)
-    TNT1 A 0 A_SpawnItemEx("CoolFriendClone", 32, -32, 0, 0, 0, 0, 0, SXF_SETMASTER)
-    TNT1 A 0 A_SpawnItemEx("CoolFriendClone", -32, -32, 0, 0, 0, 0, 0, SXF_SETMASTER)
-    Goto AngrySee         // Переход в режим атаки
+    // Сюда код попадает ТОЛЬКО если ты в него выстрелил
+    TNT1 A 0 A_ChangeFlag("MISSILEMORE", 1) // Включаем агрессию
+    TNT1 A 0 A_ChangeFlag("MISSILEEVENMORE", 1)
+    
+    ANGR A 105 A_Pain   // Замирает на 3 секунды со злым лицом
+    
+    // Призыв клонов
+    TNT1 A 0 A_SpawnItemEx("CoolFriendClone", 40, 40, 0, 0, 0, 0, 0, SXF_SETMASTER)
+    TNT1 A 0 A_SpawnItemEx("CoolFriendClone", -40, 40, 0, 0, 0, 0, 0, SXF_SETMASTER)
+    TNT1 A 0 A_SpawnItemEx("CoolFriendClone", 40, -40, 0, 0, 0, 0, 0, SXF_SETMASTER)
+    TNT1 A 0 A_SpawnItemEx("CoolFriendClone", -40, -40, 0, 0, 0, 0, 0, SXF_SETMASTER)
+    
+    Goto AngrySee       // Идем в злой режим
 
   AngrySee:
-    ANGR AABBCCDD 3 A_Chase // Теперь бегает злой
+    // Теперь он ведет себя как обычный монстр и ищет момент для атаки (Missile)
+    ANGR AABBCCDD 3 A_Chase
     Loop
 
   Missile:
-    // Шанс вызвать клонов снова (примерно 20%) или выстрелить огнем
-    TNT1 A 0 A_Jump(50, "SummonClones") 
+    // Этот блок теперь работает ТОЛЬКО после того, как сработал Pain и мы перешли в AngrySee
+    TNT1 A 0 A_Jump(60, "SummonMore") // Шанс призвать еще клонов
+    
     ANGR E 8 A_FaceTarget
-    ANGR F 8 BRIGHT A_CustomMissile("FatShot", 32, 0, 0) // Стреляет огнем (как Манкубус)
+    ANGR F 8 BRIGHT A_CustomMissile("FatShot", 32, 0, 0) // Огонь
+    ANGR E 8
     Goto AngrySee
 
-  SummonClones:
-    ANGR A 20 A_SpawnItemEx("CoolFriendClone", 40, 0, 0, 0, 0, 0, 0, SXF_SETMASTER)
+  SummonMore:
+    ANGR A 10 A_FaceTarget
+    TNT1 A 0 A_SpawnItemEx("CoolFriendClone", 50, 0, 0, 0, 0, 0, 0, SXF_SETMASTER)
     Goto AngrySee
 
   Death:
@@ -55,13 +64,14 @@ ACTOR CoolFriend 15000 // 15000 - это номер ID для редактора
   }
 }
 
-// Упрощенный клон (чтобы не нагружать игру)
+// Клон (тоже уменьшен)
 ACTOR CoolFriendClone
 {
   Health 100
   Speed 12
   Radius 20
   Height 56
+  Scale 0.2             // <--- У клонов тоже уменьшаем размер
   Monster
   +FLOORCLIP
   States
@@ -74,7 +84,7 @@ ACTOR CoolFriendClone
     Loop
   Missile:
     FRND E 8 A_FaceTarget
-    FRND F 8 A_CustomMissile("DoomImpBall", 32, 0, 0) // Клоны стреляют как импы
+    FRND F 8 BRIGHT A_CustomMissile("DoomImpBall", 32, 0, 0)
     Goto See
   Death:
     FRND H 5 A_Scream
