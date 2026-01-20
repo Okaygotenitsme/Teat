@@ -4,34 +4,29 @@ ACTOR CoolFriend 15000
   Radius 20
   Height 56
   Speed 12
-  
-  // РАЗМЕР: Я поставил 0.05 (это в 20 раз меньше оригинала). 
-  // Если будет СЛИШКОМ маленький, поменяй на 0.1
   Scale 0.05 
-  
   Monster
   +FLOORCLIP
-  +LOOKALLAROUND // Чтобы он сразу тебя видел
+  +NOTARGET        // Другие монстры его не трогают, пока он добрый
   
-  // Создаем переменную-переключатель (0 - добрый, 1 - злой)
-  var int user_angry;
-
   States
   {
   Spawn:
-    FRND A 10 A_Look
+    FRNDA 10 A_Look
     Loop
 
   See:
-    TNT1 A 0 A_JumpIf(user_angry == 1, "AngrySee") // Если злой - идем воевать
-    FRND AABBCCDD 3 A_Chase(0, 0) // Если нет - просто бегаем
+    // Он просто ходит за тобой. A_Chase без параметров позволяет ему 
+    // ходить, но мы не дадим ему стрелять, пока не будет команды.
+    FRND A 3 A_Chase
     Loop
 
   Pain:
-    TNT1 A 0 { user_angry = 1; } // ВКЛЮЧАЕМ РЕЖИМ ЗЛОСТИ
-    ANGR A 105 A_Pain // Замирает на 3 секунды со злым фото
+    // Когда ты попал в него:
+    TNT1 A 0 A_ChangeFlag("NOTARGET", 0) // Теперь он цель для всех
+    ANGR B 105 A_Pain                   // Показываем злую фотку 3 секунды
     
-    // Призыв клонов
+    // Вызываем клонов
     TNT1 A 0 A_SpawnItemEx("CoolFriendClone", 40, 40, 0, 0, 0, 0, 0, SXF_SETMASTER)
     TNT1 A 0 A_SpawnItemEx("CoolFriendClone", -40, 40, 0, 0, 0, 0, 0, SXF_SETMASTER)
     TNT1 A 0 A_SpawnItemEx("CoolFriendClone", 40, -40, 0, 0, 0, 0, 0, SXF_SETMASTER)
@@ -39,32 +34,30 @@ ACTOR CoolFriend 15000
     Goto AngrySee
 
   AngrySee:
-    ANGR AABBCCDD 3 A_Chase // Теперь бегает и атакует по-настоящему
+    // Постоянно бегает со злой фоткой
+    ANGR B 3 A_Chase
     Loop
 
   Missile:
-    // Шанс призвать еще клонов во время боя
+    // Если он в этом состоянии — он уже злой.
+    // Раз в несколько секунд может снова вызвать клона
     TNT1 A 0 A_Jump(64, "SummonMore") 
-    
-    ANGR E 8 A_FaceTarget
-    ANGR F 8 BRIGHT A_CustomMissile("FatShot", 32, 0, 0)
-    ANGR E 8
+    ANGR B 8 A_FaceTarget
+    ANGR B 8 BRIGHT A_CustomMissile("FatShot", 32, 0, 0)
     Goto AngrySee
 
   SummonMore:
-    ANGR A 10 A_FaceTarget
+    ANGR B 10 A_FaceTarget
     TNT1 A 0 A_SpawnItemEx("CoolFriendClone", 50, 0, 0, 0, 0, 0, 0, SXF_SETMASTER)
     Goto AngrySee
 
   Death:
-    ANGR H 10 A_Scream
-    ANGR I 10 A_NoBlocking
-    ANGR JKLM 10
+    // При смерти просто исчезает
+    TNT1 A 0 A_NoBlocking
     Stop
   }
 }
 
-// Клон (тоже очень маленький)
 ACTOR CoolFriendClone
 {
   Health 100
@@ -80,15 +73,14 @@ ACTOR CoolFriendClone
     FRND A 10 A_Look
     Loop
   See:
-    FRND AABBCCDD 3 A_Chase
+    FRND A 3 A_Chase
     Loop
   Missile:
-    FRND E 8 A_FaceTarget
-    FRND F 8 BRIGHT A_CustomMissile("DoomImpBall", 32, 0, 0)
+    FRND A 8 A_FaceTarget
+    FRND A 8 BRIGHT A_CustomMissile("DoomImpBall", 32, 0, 0)
     Goto See
   Death:
-    FRND H 5 A_Scream
-    FRND I 5 A_NoBlocking
+    TNT1 A 0 A_NoBlocking
     Stop
   }
 }
