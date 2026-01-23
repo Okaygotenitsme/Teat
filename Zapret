@@ -24,17 +24,16 @@ class DeobfuscatorEngine:
         if not self._check_java():
             return b"-- [FATAL] Java is missing. Install Java to use unluac."
 
-        update_status("🧠 Инициализация среды Roblox (Emulation V4)...")
+        update_status("🧹 Подготовка фильтров и эмуляции...")
 
         # --- НАСТРОЙКА LUA VM ---
-        # Включаем unpack_returned_tuples для удобства
         try:
             lua = LuaRuntime(unpack_returned_tuples=True, encoding=None)
         except Exception as e:
             return f"-- [FATAL] Lua start error: {e}".encode('utf-8')
 
         # ==========================================
-        # 1. ПОЛИФИЛЛЫ (BITWISE)
+        # 1. ПОЛИФИЛЛЫ (Оптимизировано)
         # ==========================================
         bit_polyfill = """
         local bit = {}
@@ -50,19 +49,14 @@ class DeobfuscatorEngine:
         function bit.bxor(a, b) return bit_oper(a, b, 3) end
         function bit.lshift(a, b) return (a * 2^b) % 4294967296 end
         function bit.rshift(a, b) return math.floor(a / 2^b) % 4294967296 end
-        function bit.arshift(a, b) 
-            local z = math.floor(a / 2^b) % 4294967296
-            if a >= 2147483648 then z = z + 4294967296 - 2^(32-b) end
-            return z
-        end
         package.loaded.bit = bit; _G.bit = bit; _G.bit32 = bit 
         """
 
         # ==========================================
-        # 2. ROBLOX API EMULATION (Pure Lua)
+        # 2. ROBLOX API (Динамическая генерация)
         # ==========================================
         roblox_emu = """
-        -- :: EVENTS ::
+        -- :: SIGNAL ::
         local function CreateSignal()
             local sig = {}
             local callbacks = {}
@@ -71,16 +65,17 @@ class DeobfuscatorEngine:
                 return { Disconnect = function() end }
             end
             function sig:Fire(...)
-                for _, f in ipairs(callbacks) do 
-                    pcall(f, ...) 
-                end
+                for _, f in ipairs(callbacks) do pcall(f, ...) end
             end
             function sig:Wait() return 0 end
             return sig
         end
 
-        -- :: INSTANCE ::
+        -- :: INSTANCE GENERATOR ::
         _G.Instance = {}
+        -- Кэш созданных сервисов, чтобы не плодить дубликаты
+        local services_cache = {}
+        
         function _G.Instance.new(className, parent)
             local obj = {}
             obj.ClassName = className or "Folder"
@@ -90,7 +85,6 @@ class DeobfuscatorEngine:
             obj.Changed = CreateSignal()
             obj.ChildAdded = CreateSignal()
             
-            -- Методы
             function obj:Destroy() end
             function obj:Clone() return self end
             function obj:ClearAllChildren() end
@@ -98,134 +92,90 @@ class DeobfuscatorEngine:
             function obj:WaitForChild(name, time) return _G.Instance.new("Folder", obj) end
             function obj:GetChildren() return {} end
             function obj:GetDescendants() return {} end
-            function obj:GetService(name) 
-                -- Добавляем больше сервисов, чтобы скрипт не падал
-                if name == "Players" then return _G.game.Players end
-                if name == "RunService" then return _G.game.RunService end
-                if name == "HttpService" then return _G.game.HttpService end
-                if name == "UserInputService" then return _G.game.UserInputService end
-                if name == "TweenService" then return _G.game.TweenService end
-                if name == "StarterGui" then return _G.game.StarterGui end
-                return _G.Instance.new(name) 
+            
+            -- Умный GetService: создает любой сервис по требованию
+            function obj:GetService(name)
+                if services_cache[name] then return services_cache[name] end
+                
+                local srv = _G.Instance.new(name, _G.game)
+                -- Специфичные методы для важных сервисов
+                if name == "HttpService" then
+                    srv.JSONDecode = function(s, str) return {} end
+                    srv.JSONEncode = function(s, tbl) return "{}" end
+                elseif name == "Players" then
+                    srv.LocalPlayer = _G.Instance.new("Player")
+                    srv.LocalPlayer.Name = "User"
+                    srv.LocalPlayer.UserId = 1
+                end
+                
+                services_cache[name] = srv
+                return srv
             end
             
-            -- Metatable для свойств
             local mt = {
-                __index = function(t, k)
-                    if k == "Value" then return "MockValue" end
-                    return rawget(t, k)
-                end,
-                __newindex = function(t, k, v)
-                    rawset(t, k, v)
-                end,
+                __index = function(t, k) return rawget(t, k) end,
+                __newindex = function(t, k, v) rawset(t, k, v) end,
                 __tostring = function(t) return t.Name end
             }
             setmetatable(obj, mt)
             return obj
         end
 
-        -- :: VECTOR3 ::
-        _G.Vector3 = {}
-        _G.Vector3.__index = _G.Vector3
-        function _G.Vector3.new(x, y, z)
-            local self = setmetatable({}, _G.Vector3)
-            self.X = x or 0; self.Y = y or 0; self.Z = z or 0
-            return self
-        end
-        _G.Vector3.zero = _G.Vector3.new(0,0,0)
-        _G.Vector3.one = _G.Vector3.new(1,1,1)
-        function _G.Vector3.__add(a, b) return _G.Vector3.new(a.X+b.X, a.Y+b.Y, a.Z+b.Z) end
-        function _G.Vector3.__sub(a, b) return _G.Vector3.new(a.X-b.X, a.Y-b.Y, a.Z-b.Z) end
-        function _G.Vector3.__mul(a, b) 
-            if type(b) == "number" then return _G.Vector3.new(a.X*b, a.Y*b, a.Z*b) end
-            return _G.Vector3.new(a.X*b.X, a.Y*b.Y, a.Z*b.Z) 
-        end
-
-        -- :: CFRAME ::
-        _G.CFrame = {}
-        _G.CFrame.__index = _G.CFrame
-        function _G.CFrame.new(...) return setmetatable({}, _G.CFrame) end
-        _G.CFrame.Angles = function(...) return _G.CFrame.new(...) end
-        function _G.CFrame:GetComponents() return 0,0,0,1,0,0,0,1,0,0,0,1 end
-        function _G.CFrame.__mul(a, b) return a end
-
-        -- :: BASIC TYPES ::
+        -- :: TYPES MOCK ::
+        _G.Vector3 = { new = function(...) return {X=0,Y=0,Z=0} end, zero={X=0,Y=0,Z=0} }
+        _G.CFrame = { new = function(...) return {p={X=0,Y=0,Z=0}} end, Angles=function() return {} end }
         _G.UDim2 = { new = function(...) return {} end }
         _G.Color3 = { new = function(...) return {} end, fromRGB = function(...) return {} end }
         _G.Enum = setmetatable({}, { __index = function() return setmetatable({}, {__index=function() return 1 end}) end })
         
-        -- :: TASK / WAIT ::
-        _G.task = {
-            wait = function(t) return t or 0 end,
-            spawn = function(f) pcall(f) end,
-            delay = function(t, f) pcall(f) end,
-            defer = function(f) pcall(f) end
-        }
-        _G.wait = _G.task.wait
-        _G.spawn = _G.task.spawn
-        _G.delay = _G.task.delay
-
-        -- :: GAME STRUCTURE ::
+        -- :: TASK ::
+        _G.task = { wait = function() end, spawn = function(f) pcall(f) end, delay = function(t, f) pcall(f) end }
+        _G.wait = _G.task.wait; _G.spawn = _G.task.spawn
+        
+        -- :: ENVIRONMENT ::
         _G.game = _G.Instance.new("DataModel")
-        _G.game.Players = _G.Instance.new("Players", _G.game)
-        _G.game.Players.LocalPlayer = _G.Instance.new("Player", _G.game.Players)
-        _G.game.Players.LocalPlayer.Name = "DeobfuscatorUser"
-        _G.game.Players.LocalPlayer.UserId = 123456
-        
-        _G.game.RunService = _G.Instance.new("RunService", _G.game)
-        _G.game.RunService.RenderStepped = CreateSignal()
-        _G.game.RunService.Heartbeat = CreateSignal()
-        _G.game.RunService.Stepped = CreateSignal()
-        
-        _G.game.UserInputService = _G.Instance.new("UserInputService", _G.game)
-        _G.game.TweenService = _G.Instance.new("TweenService", _G.game)
-        _G.game.StarterGui = _G.Instance.new("StarterGui", _G.game)
-        
-        _G.game.HttpService = _G.Instance.new("HttpService", _G.game)
-        _G.game.HttpService.JSONDecode = function(self, s) return {} end
-        _G.game.HttpService.JSONEncode = function(self, t) return "{}" end
-
         _G.workspace = _G.Instance.new("Workspace", _G.game)
         _G.script = _G.Instance.new("Script", _G.game.workspace)
         
-        -- :: ENVIRONMENT FUNCTIONS ::
+        -- Заглушки функций защиты
         _G.getgenv = function() return _G end
         _G.getrenv = function() return _G end
         _G.getreg = function() return {} end
-        _G.getgc = function() return {} end
         _G.checkcaller = function() return true end
         _G.islclosure = function() return true end
         _G.newcclosure = function(f) return f end
-        _G.setreadonly = function(t, v) end
-        _G.isreadonly = function(t) return false end
         """
 
         # ==========================================
-        # 3. SPYWARE HOOKS (УЛУЧШЕННЫЕ)
+        # 3. SPYWARE (С фильтрацией мусора)
         # ==========================================
         spyware = """
-        _G.CAPTURED_CHUNKS = {}
         _G.DETECTED_STRINGS = {}
         _G.ACTION_LOG = {}
-        _G.FINAL_GLOBALS = {}
         
+        -- Список того, что МЫ НЕ ХОТИМ видеть в логах (Blacklist)
+        local IGNORE_LIST = {
+            ["ClassName"]=1, ["Parent"]=1, ["Name"]=1, ["Folder"]=1, ["Script"]=1, 
+            ["Workspace"]=1, ["game"]=1, ["Instance"]=1, ["Value"]=1, ["__index"]=1
+        }
+
         local function log_action(msg) 
-            if #_G.ACTION_LOG < 500 then 
+            if #_G.ACTION_LOG < 100 then -- Уменьшил лимит логов для экономии места
                 table.insert(_G.ACTION_LOG, msg) 
             end
         end
 
         local function capture_str(s) 
-            if type(s) == "string" and #s > 3 then 
-                -- Фильтр: игнорируем системный мусор
-                if not s:find("stack begin") and not s:find("upvalue") and not s:find("Deobf") then
+            if type(s) == "string" and #s > 3 and not IGNORE_LIST[s] then 
+                -- Отсеиваем системный Lua мусор
+                if not s:find("stack") and not s:find("upvalue") then
                     _G.DETECTED_STRINGS[s] = true 
                 end
             end 
             return s
         end
 
-        -- Хук на string.char (дешифровка ASCII)
+        -- Хуки
         local real_char = string.char
         string.char = function(...)
             local res = real_char(...)
@@ -233,7 +183,6 @@ class DeobfuscatorEngine:
             return res
         end
         
-        -- Хук на table.concat (сборка строк)
         local real_concat = table.concat
         table.concat = function(t, sep, i, j)
             local res = real_concat(t, sep, i, j)
@@ -241,135 +190,66 @@ class DeobfuscatorEngine:
             return res
         end
 
-        -- Хук на load/loadstring (захват распакованных скриптов)
-        local real_load = load
-        local function hooked_load(chunk, name, mode, env)
-            if type(chunk) == "string" then
-                capture_str(chunk) -- Также сохраняем как строку
-                if #chunk > 50 then
-                    table.insert(_G.CAPTURED_CHUNKS, {data = chunk, size = #chunk, type = "string"})
-                    log_action("🔥 Captured Chunk Size: " .. #chunk)
-                end
-            end
-            return real_load(chunk, name, mode, env)
-        end
-        
-        _G.load = hooked_load
-        _G.loadstring = hooked_load
-        
-        -- Http Spy
+        -- HTTP Spy
         _G.game.HttpGet = function(self, url) 
-            log_action("🌍 HTTP GET: " .. tostring(url)) 
             capture_str(url)
-            return "<html>ProxyResponse</html>" 
+            return "ProxyResponse" 
         end
         _G.game.HttpPost = function(self, url, data)
-            log_action("🌍 HTTP POST: " .. tostring(url))
-            capture_str(url)
-            capture_str(data)
+            capture_str(url); capture_str(data)
             return "ProxyResponse"
         end
 
-        -- == DEEP SCANNER (Новая функция для поиска строк в памяти) ==
+        -- Deep Scan (Оптимизированный, без рекурсивного ада)
         local scanned_tables = {}
         function _G.deep_scan(tbl, level)
-            if level > 4 then return end -- Защита от переполнения стека
+            if level > 3 then return end -- Снизил глубину до 3 (было 4)
             if scanned_tables[tbl] then return end
             scanned_tables[tbl] = true
             
             for k, v in pairs(tbl) do
                 if type(k) == "string" then capture_str(k) end
                 if type(v) == "string" then capture_str(v) end
-                
-                if type(v) == "table" and not scanned_tables[v] then
-                     -- Не сканим глобалки Lua и свои же таблицы
-                    if v ~= _G and v ~= package and v ~= _G.DETECTED_STRINGS then
-                        _G.deep_scan(v, level + 1)
-                    end
-                end
-            end
-        end
-
-        function _G.dump_globals()
-            -- Запускаем сканер
-            pcall(_G.deep_scan, _G, 1)
-            
-            local ignore = {
-                string=1, math=1, table=1, bit=1, bit32=1, pairs=1, ipairs=1, next=1, _G=1, 
-                package=1, os=1, io=1, Instance=1, Vector3=1, CFrame=1, UDim2=1, Color3=1,
-                Enum=1, task=1, wait=1, spawn=1, delay=1, defer=1, game=1, workspace=1,
-                script=1, getgenv=1, getrenv=1, getreg=1, getgc=1, checkcaller=1,
-                islclosure=1, newcclosure=1, load=1, loadstring=1, print=1, warn=1, error=1,
-                tostring=1, tonumber=1, type=1, pcall=1, xpcall=1, select=1, unpack=1,
-                setmetatable=1, getmetatable=1, require=1, DETECTED_STRINGS=1, CAPTURED_CHUNKS=1
-            }
-            for k, v in pairs(getfenv()) do
-                if not ignore[k] then
-                    if type(v) == "string" or type(v) == "number" or type(v) == "boolean" then
-                        table.insert(_G.FINAL_GLOBALS, tostring(k) .. " = " .. tostring(v))
-                    end
+                if type(v) == "table" and v ~= _G and v ~= package then
+                    _G.deep_scan(v, level + 1)
                 end
             end
         end
         """
 
-        # Собираем всё вместе
         full_setup = bit_polyfill + "\n" + roblox_emu + "\n" + spyware
 
         try:
-            update_status("🌪️ Запуск скрипта с трассировкой...")
-            
-            # Загружаем среду
+            update_status("🌪️ Запуск эмуляции...")
             lua.execute(full_setup)
             
-            # Раннер
+            # Раннер с защитой
             runner = lua.eval("""
                 function(code)
-                    -- Оборачиваем в pcall
                     local status, err = pcall(function()
                         local f, load_err = load(code, "script", "t", _G)
                         if not f then error(load_err) end
                         f()
                     end)
-                    
-                    if not status then
-                        table.insert(_G.ACTION_LOG, "❌ Script Error: " .. tostring(err))
-                    end
-                    
-                    -- Пробуем сдампить
-                    pcall(_G.dump_globals)
+                    -- Сканируем память после выполнения
+                    pcall(_G.deep_scan, _G, 1)
                     return true
                 end
             """)
             
             runner(content)
 
-            # --- СБОР РЕЗУЛЬТАТОВ ---
+            # --- СБОР ---
             strings_tbl = lua.globals().DETECTED_STRINGS
             detected_strings = list(strings_tbl)
-            global_dump = list(lua.globals().FINAL_GLOBALS)
             action_log = list(lua.globals().ACTION_LOG)
-            chunks = lua.globals().CAPTURED_CHUNKS
             
-            # Поиск лучшего чанка (распакованного скрипта)
-            best_chunk = None
-            max_size = 0
-            if len(chunks) > 0:
-                for i in range(1, len(chunks) + 1):
-                    c = chunks[i]
-                    if c.size > max_size:
-                        max_size = c.size
-                        best_chunk = c.data
-            
-            # Если нашли распакованный чанк - используем его, иначе оригинал
-            target_code = best_chunk if best_chunk else content
-            
-            return self._finalize_output(target_code, detected_strings, global_dump, action_log, update_status)
+            return self._finalize_output(content, detected_strings, action_log, update_status)
 
         except Exception as e:
-            logger.error(f"Engine Crash: {e}")
-            # Пытаемся вернуть хоть что-то даже при краше
-            return self._finalize_output(content, [], [], [f"CRASH: {str(e)}"], None)
+            logger.error(f"Engine Error: {e}")
+            # Возвращаем хоть что-то
+            return self._finalize_output(content, [], [f"Error: {e}"], None)
 
     def _check_java(self):
         try:
@@ -377,85 +257,109 @@ class DeobfuscatorEngine:
             return True
         except: return False
 
-    def _clean_string(self, s):
-        if isinstance(s, bytes):
-            try: return s.decode('utf-8')
-            except: return str(s)
-        return str(s)
+    # === УМНЫЙ ФИЛЬТР МУСОРА ===
+    def _is_garbage(self, s):
+        """Возвращает True, если строка - точный мусор."""
+        s = s.strip()
+        if len(s) < 4: return True # Слишком короткая
+        if len(s) > 1000: return True # Слишком длинная (часто это просто дамп памяти)
+        
+        # 1. Проверка на обфусцированные имена (IlIlIl, ____, l1l1)
+        if re.match(r'^[Il1o0_]+$', s): return True
+        
+        # 2. Проверка на мусор из спецсимволов (только символы, нет букв)
+        if re.match(r'^[^a-zA-Z0-9]+$', s): return True
+        
+        # 3. Проверка на стандартные Lua/Roblox типы (черный список)
+        blacklist = {
+            "Instance", "CFrame", "Vector3", "UDim2", "Color3", "table", "string", 
+            "math", "next", "pairs", "ipairs", "getmetatable", "setmetatable",
+            "return", "local", "function", "end", "then", "else", "elseif",
+            "MockValue", "Folder", "Script", "Workspace", "game"
+        }
+        if s in blacklist: return True
+        
+        # 4. Проверка на "битые" байты внутри
+        if "\\x" in repr(s) and len(s) < 10: return True # Если короткая и содержит непечатные символы
 
-    # Функция для извлечения строк из бинарника (Python fallback)
+        return False
+
     def _extract_strings_from_binary(self, data):
-        """Вытаскивает ASCII и UTF-8 строки из любого бинарного мусора"""
+        """Извлекает ASCII строки с жесткой фильтрацией."""
         try:
-            # Ищем последовательности печатных символов (от 4 штук)
+            # Ищем последовательности от 4 символов
             pat = re.compile(rb'[\x20-\x7E]{4,}')
             found = pat.findall(data)
-            return [f.decode('utf-8', 'ignore') for f in found]
-        except:
-            return []
+            decoded = []
+            for f in found:
+                try:
+                    s = f.decode('utf-8')
+                    if not self._is_garbage(s):
+                        decoded.append(s)
+                except: pass
+            return decoded
+        except: return []
 
-    def _finalize_output(self, code_bytes, strings, globals_dump, logs, callback):
-        if callback: callback("🧬 Декомпиляция и анализ...")
+    def _finalize_output(self, code_bytes, strings, logs, callback):
+        if callback: callback("🧬 Фильтрация и сборка...")
         
+        # 1. Декомпиляция
         decompiled = self._try_decompile(code_bytes)
         
-        # Если unluac не справился, попробуем вытащить строки "силой"
-        force_extracted_strings = []
-        if not decompiled:
-            force_extracted_strings = self._extract_strings_from_binary(code_bytes)
-
-        # Объединяем найденные строки (из Lua хуков и Python экстрактора)
+        # 2. Сбор строк (Lua + Python Fallback)
+        raw_extracted = self._extract_strings_from_binary(code_bytes)
+        
+        # Объединяем множества
         all_strings = set()
         for s in strings: all_strings.add(str(s))
-        for s in force_extracted_strings: all_strings.add(s)
+        for s in raw_extracted: all_strings.add(s)
 
+        # 3. Фильтрация и сортировка
+        clean_strings = []
+        for s in all_strings:
+            clean = str(s).replace('\n', ' ').replace('\r', '').strip()
+            if not self._is_garbage(clean):
+                clean_strings.append(clean)
+        
+        # Сортируем: сначала длинные (вероятно ссылки или ключи), потом короткие
+        clean_strings.sort(key=len, reverse=True)
+
+        # === ФОРМИРОВАНИЕ ФАЙЛА ===
         final_text = ""
-        final_text += "-- [[ MEL DUMPED DATA ]] --\n"
-        final_text += "-- Auto-generated names: mel_1, mel_2...\n\n"
         
-        sorted_strings = sorted(list(all_strings), key=len, reverse=True)
-        
-        # === ВАЖНО: Форматирование под mel_X ===
-        mel_counter = 1
-        seen = set()
-        
-        for s in sorted_strings:
-            clean = self._clean_string(s).replace('\n', ' ').replace('\r', '').strip()
-            # Фильтруем совсем короткий мусор
-            if clean not in seen and len(clean) > 4:
-                # Экранируем кавычки для корректного Lua синтаксиса
-                safe_str = clean.replace('"', '\\"').replace('\\', '\\\\')
-                final_text += f'local mel_{mel_counter} = "{safe_str}"\n'
-                seen.add(clean)
-                mel_counter += 1
+        # Блок переменных mel_X
+        if clean_strings:
+            final_text += "-- [[ MEL EXTRACTED DATA ]] --\n"
+            final_text += f"-- Found {len(clean_strings)} valid strings (garbage removed)\n\n"
+            
+            for i, s in enumerate(clean_strings, 1):
+                safe_str = s.replace('"', '\\"').replace('\\', '\\\\')
+                final_text += f'local mel_{i} = "{safe_str}"\n'
+            final_text += "\n" + "="*40 + "\n\n"
 
-        if globals_dump:
-            final_text += "\n" + "="*30 + "\n-- [[ GLOBALS ]] --\n"
-            for g in globals_dump:
-                final_text += f"-- {self._clean_string(g)}\n"
-
+        # Логи (только если есть что-то важное)
         if logs:
-             final_text += "\n" + "="*30 + "\n-- [[ LOGS ]] --\n"
-             for l in logs[-30:]: # Показываем больше логов
-                 final_text += f"-- {self._clean_string(l)}\n"
+            final_text += "-- [[ EMULATION LOGS ]] --\n"
+            for l in logs:
+                final_text += f"-- {str(l)}\n"
+            final_text += "\n" + "="*40 + "\n\n"
 
-        final_text += "\n" + "="*50 + "\n\n"
-        
+        # Исходный код
+        final_text += "-- [[ SOURCE CODE / BYTECODE ]] --\n"
         if decompiled:
             try: src = decompiled.decode('utf-8', 'ignore')
             except: src = decompiled.decode('latin-1', 'ignore')
             final_text += self._beautify_lua(src)
         else:
-            final_text += "-- [WARNING] Unluac failed to decompile logic.\n"
-            final_text += "-- [INFO] Below is the Raw Bytecode View or Extracted Content:\n\n"
-            # Если совсем беда, выводим HEX вид или текст, если это текст
-            try: 
-                final_text += code_bytes.decode('utf-8')
-            except: 
-                # Красивый вывод байтов, если это бинарник
-                hex_view = binascii.hexlify(code_bytes).decode('utf-8')
-                final_text += f"-- Binary Blob Size: {len(code_bytes)} bytes\n"
-                final_text += f"local bytecode = \"{hex_view[:500]}... (truncated)\""
+            final_text += "-- [WARNING] Unluac failed.\n"
+            if clean_strings:
+                final_text += "-- Code is hidden/obfuscated. Use the 'mel' variables above.\n"
+                final_text += "-- Raw bytecode is hidden to save space (Security measure)."
+            else:
+                # Если ВООБЩЕ ничего не нашли, тогда выводим байты
+                final_text += "-- [INFO] No strings found. Dumping raw content:\n"
+                try: final_text += code_bytes.decode('utf-8')
+                except: final_text += str(binascii.hexlify(code_bytes[:1000])) + "..."
 
         return final_text.encode('utf-8')
 
@@ -466,21 +370,16 @@ class DeobfuscatorEngine:
                 tmp.write(bytecode)
                 path = tmp.name
             
-            # Запускаем unluac
             res = subprocess.run(
-                ["java", "-Xmx1G", "-jar", self.unluac_path, path], 
-                capture_output=True, timeout=15 # Даем чуть больше времени
+                ["java", "-Xmx512M", "-jar", self.unluac_path, path], # Меньше памяти Java
+                capture_output=True, timeout=10
             )
             os.remove(path)
-            
-            # Проверяем не только код возврата, но и содержание
-            if res.returncode == 0 and len(res.stdout) > 10: 
-                return res.stdout
+            if res.returncode == 0 and len(res.stdout) > 10: return res.stdout
             return None
         except: return None
 
     def _beautify_lua(self, source_code):
-        # Простая "красивость"
         source_code = re.sub(r'(\s)(local|return|if|for|while|repeat|function)(\s)', r'\n\2 ', source_code)
         replacements = {
             " then ": " then\n", " do ": " do\n", " end ": "\nend\n",
