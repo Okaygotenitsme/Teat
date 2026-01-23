@@ -24,10 +24,11 @@ class DeobfuscatorEngine:
         if not self._check_java():
             return b"-- [FATAL] Java is missing. Install Java to use unluac."
 
-        update_status("🧠 Инициализация среды Roblox (Emulation V3)...")
+        update_status("🧠 Инициализация среды Roblox (Emulation V4)...")
 
         # --- НАСТРОЙКА LUA VM ---
         try:
+            # Снимаем ограничения на память, если возможно, или ставим большие
             lua = LuaRuntime(unpack_returned_tuples=True, encoding=None)
         except Exception as e:
             return f"-- [FATAL] Lua start error: {e}".encode('utf-8')
@@ -35,7 +36,6 @@ class DeobfuscatorEngine:
         # ==========================================
         # 1. ПОЛИФИЛЛЫ (BITWISE)
         # ==========================================
-        # Критически важно для MoonSec/IronBrew
         bit_polyfill = """
         local bit = {}
         function bit.tobit(x) x = x % 4294967296; if x >= 2147483648 then x = x - 4294967296 end; return x end
@@ -55,15 +55,21 @@ class DeobfuscatorEngine:
             if a >= 2147483648 then z = z + 4294967296 - 2^(32-b) end
             return z
         end
+        function bit.bswap(x)
+            local a = x % 256; x = math.floor(x / 256)
+            local b = x % 256; x = math.floor(x / 256)
+            local c = x % 256; x = math.floor(x / 256)
+            local d = x % 256
+            return a * 16777216 + b * 65536 + c * 256 + d
+        end
         package.loaded.bit = bit; _G.bit = bit; _G.bit32 = bit 
         """
 
         # ==========================================
         # 2. ROBLOX API EMULATION (Pure Lua)
         # ==========================================
-        # Мы пишем это на Lua, чтобы работало быстрее и точнее
         roblox_emu = """
-        -- :: EVENTS ::
+        -- :: SIGNAL MOCK ::
         local function CreateSignal()
             local sig = {}
             local callbacks = {}
@@ -71,16 +77,12 @@ class DeobfuscatorEngine:
                 table.insert(callbacks, func)
                 return { Disconnect = function() end }
             end
-            function sig:Fire(...)
-                for _, f in ipairs(callbacks) do 
-                    pcall(f, ...) 
-                end
-            end
+            function sig:Fire(...) for _, f in ipairs(callbacks) do pcall(f, ...) end end
             function sig:Wait() return 0 end
             return sig
         end
 
-        -- :: INSTANCE ::
+        -- :: INSTANCE MOCK ::
         _G.Instance = {}
         function _G.Instance.new(className, parent)
             local obj = {}
@@ -89,24 +91,27 @@ class DeobfuscatorEngine:
             obj.Parent = parent
             obj.Archivable = true
             obj.Changed = CreateSignal()
-            obj.ChildAdded = CreateSignal()
             
-            -- Методы
+            local children = {}
+
             function obj:Destroy() end
             function obj:Clone() return self end
-            function obj:ClearAllChildren() end
-            function obj:FindFirstChild(name) return nil end
-            function obj:WaitForChild(name, time) return _G.Instance.new("Folder", obj) end
+            function obj:ClearAllChildren() children = {} end
+            function obj:FindFirstChild(name) return children[name] end
+            function obj:WaitForChild(name, time) return children[name] or _G.Instance.new("Folder", obj) end
             function obj:GetChildren() return {} end
             function obj:GetDescendants() return {} end
-            function obj:GetService(name) 
+            function obj:GetService(name)
+                -- Возвращаем существующие сервисы или создаем новые
                 if name == "Players" then return _G.game.Players end
                 if name == "RunService" then return _G.game.RunService end
                 if name == "HttpService" then return _G.game.HttpService end
-                return _G.Instance.new(name) 
+                if name == "ReplicatedStorage" then return _G.game.ReplicatedStorage end
+                if name == "CoreGui" then return _G.game.CoreGui end
+                return _G.Instance.new(name, _G.game) 
             end
+            function obj:IsA(cls) return cls == obj.ClassName end
             
-            -- Metatable для свойств
             local mt = {
                 __index = function(t, k)
                     if k == "Value" then return "MockValue" end
@@ -115,73 +120,45 @@ class DeobfuscatorEngine:
                 __newindex = function(t, k, v)
                     rawset(t, k, v)
                 end,
-                __tostring = function(t) return t.Name end
+                __tostring = function(t) return t.Name end,
+                __metatable = "The metatable is locked" -- Anti-tamper mock
             }
             setmetatable(obj, mt)
             return obj
         end
 
-        -- :: VECTOR3 ::
-        _G.Vector3 = {}
-        _G.Vector3.__index = _G.Vector3
-        function _G.Vector3.new(x, y, z)
-            local self = setmetatable({}, _G.Vector3)
-            self.X = x or 0; self.Y = y or 0; self.Z = z or 0
-            return self
-        end
-        _G.Vector3.zero = _G.Vector3.new(0,0,0)
-        _G.Vector3.one = _G.Vector3.new(1,1,1)
-        function _G.Vector3.__add(a, b) return _G.Vector3.new(a.X+b.X, a.Y+b.Y, a.Z+b.Z) end
-        function _G.Vector3.__sub(a, b) return _G.Vector3.new(a.X-b.X, a.Y-b.Y, a.Z-b.Z) end
-        function _G.Vector3.__mul(a, b) 
-            if type(b) == "number" then return _G.Vector3.new(a.X*b, a.Y*b, a.Z*b) end
-            return _G.Vector3.new(a.X*b.X, a.Y*b.Y, a.Z*b.Z) 
-        end
-
-        -- :: CFRAME ::
-        _G.CFrame = {}
-        _G.CFrame.__index = _G.CFrame
-        function _G.CFrame.new(...) return setmetatable({}, _G.CFrame) end
-        _G.CFrame.Angles = function(...) return _G.CFrame.new(...) end
-        function _G.CFrame:GetComponents() return 0,0,0,1,0,0,0,1,0,0,0,1 end
-        function _G.CFrame.__mul(a, b) return a end
-
-        -- :: BASIC TYPES ::
-        _G.UDim2 = { new = function(...) return {} end }
-        _G.Color3 = { new = function(...) return {} end, fromRGB = function(...) return {} end }
+        -- :: TYPES ::
+        _G.Vector3 = { new = function(...) return {X=0,Y=0,Z=0} end, zero={X=0,Y=0,Z=0} }
+        _G.CFrame = { new = function(...) return {p=_G.Vector3.new()} end, Angles=function() return {} end }
+        _G.UDim2 = { new = function(...) return {} end, fromScale=function() return {} end}
+        _G.Color3 = { new = function(...) return {} end, fromRGB = function(...) return {} end, fromHSV=function() return {} end }
         _G.Enum = setmetatable({}, { __index = function() return setmetatable({}, {__index=function() return 1 end}) end })
         
-        -- :: TASK / WAIT ::
+        -- :: TASK ::
         _G.task = {
             wait = function(t) return t or 0 end,
             spawn = function(f) pcall(f) end,
             delay = function(t, f) pcall(f) end,
             defer = function(f) pcall(f) end
         }
-        _G.wait = _G.task.wait
-        _G.spawn = _G.task.spawn
-        _G.delay = _G.task.delay
+        _G.wait = _G.task.wait; _G.spawn = _G.task.spawn; _G.delay = _G.task.delay
 
-        -- :: GAME STRUCTURE ::
+        -- :: GAME TREE ::
         _G.game = _G.Instance.new("DataModel")
         _G.game.Players = _G.Instance.new("Players", _G.game)
         _G.game.Players.LocalPlayer = _G.Instance.new("Player", _G.game.Players)
-        _G.game.Players.LocalPlayer.Name = "DeobfuscatorUser"
-        _G.game.Players.LocalPlayer.UserId = 123456
-        
+        _G.game.Players.LocalPlayer.Name = "Player1"
+        _G.game.Players.LocalPlayer.UserId = 12345678
+        _G.game.ReplicatedStorage = _G.Instance.new("ReplicatedStorage", _G.game)
+        _G.game.CoreGui = _G.Instance.new("CoreGui", _G.game)
         _G.game.RunService = _G.Instance.new("RunService", _G.game)
-        _G.game.RunService.RenderStepped = CreateSignal()
-        _G.game.RunService.Heartbeat = CreateSignal()
-        _G.game.RunService.Stepped = CreateSignal()
-        
         _G.game.HttpService = _G.Instance.new("HttpService", _G.game)
         _G.game.HttpService.JSONDecode = function(self, s) return {} end
         _G.game.HttpService.JSONEncode = function(self, t) return "{}" end
-
         _G.workspace = _G.Instance.new("Workspace", _G.game)
         _G.script = _G.Instance.new("Script", _G.game.workspace)
-        
-        -- :: ENVIRONMENT FUNCTIONS ::
+
+        -- :: ENVIRONMENT MOCKS ::
         _G.getgenv = function() return _G end
         _G.getrenv = function() return _G end
         _G.getreg = function() return {} end
@@ -189,10 +166,11 @@ class DeobfuscatorEngine:
         _G.checkcaller = function() return true end
         _G.islclosure = function() return true end
         _G.newcclosure = function(f) return f end
+        _G.is_synapse_function = function() return false end
         """
 
         # ==========================================
-        # 3. SPYWARE HOOKS (Логирование)
+        # 3. ADVANCED SPYWARE (Hooks & Debug)
         # ==========================================
         spyware = """
         _G.CAPTURED_CHUNKS = {}
@@ -201,14 +179,12 @@ class DeobfuscatorEngine:
         _G.FINAL_GLOBALS = {}
         
         local function log_action(msg) 
-            if #_G.ACTION_LOG < 500 then 
-                table.insert(_G.ACTION_LOG, msg) 
-            end
+            if #_G.ACTION_LOG < 1000 then table.insert(_G.ACTION_LOG, msg) end
         end
 
         local function capture_str(s) 
-            if type(s) == "string" and #s > 3 then 
-                -- Игнорируем технические строки Lua
+            if type(s) == "string" and #s > 2 then 
+                -- Фильтруем системный мусор Lua/Lupa
                 if not s:find("stack begin") and not s:find("upvalue") then
                     _G.DETECTED_STRINGS[s] = true 
                 end
@@ -216,7 +192,21 @@ class DeobfuscatorEngine:
             return s
         end
 
-        -- Хук на string.char (дешифровка)
+        -- [[ DEBUG LIBRARY MOCK ]] --
+        -- Критически важно для MoonSec/IronBrew. Они используют debug для проверки анти-тамперов.
+        _G.debug = {}
+        _G.debug.getinfo = function(f) return { source = "=[C]", what = "C", short_src = "[C]", currentline = -1, name = "function" } end
+        _G.debug.getupvalue = function(f, i) return "mock_upval", true end
+        _G.debug.setupvalue = function(f, i, v) return "mock_upval" end
+        _G.debug.getconstants = function(f) return {} end
+        _G.debug.getproto = function(f, i) return function() end end
+        _G.debug.setmetatable = function(t, mt) return setmetatable(t, mt) end
+        _G.debug.getmetatable = function(t) return getmetatable(t) end
+        _G.debug.traceback = function() return "Stack Traceback" end
+        _G.debug.profilebegin = function() end
+        _G.debug.profileend = function() end
+
+        -- [[ STRING HOOKS - FULL SUITE ]] --
         local real_char = string.char
         string.char = function(...)
             local res = real_char(...)
@@ -224,7 +214,6 @@ class DeobfuscatorEngine:
             return res
         end
         
-        -- Хук на table.concat
         local real_concat = table.concat
         table.concat = function(t, sep, i, j)
             local res = real_concat(t, sep, i, j)
@@ -232,90 +221,131 @@ class DeobfuscatorEngine:
             return res
         end
 
-        -- Хук на load/loadstring
+        -- Хук на sub (обфускаторы часто режут строки)
+        local real_sub = string.sub
+        string.sub = function(s, i, j)
+            capture_str(s)
+            local res = real_sub(s, i, j)
+            if res then capture_str(res) end
+            return res
+        end
+
+        -- Хук на gsub (замена символов при дешифровке)
+        local real_gsub = string.gsub
+        string.gsub = function(s, p, r)
+            capture_str(s)
+            local res = real_gsub(s, p, r)
+            capture_str(res)
+            return res
+        end
+        
+        local real_reverse = string.reverse
+        string.reverse = function(s) capture_str(s); return real_reverse(s) end
+
+        -- [[ EXECUTION HOOKS ]] --
         local real_load = load
         local function hooked_load(chunk, name, mode, env)
-            if type(chunk) == "string" and #chunk > 50 then
+            if type(chunk) == "string" and #chunk > 30 then
                 table.insert(_G.CAPTURED_CHUNKS, {data = chunk, size = #chunk, type = "string"})
-                log_action("🔥 Captured Chunk Size: " .. #chunk)
+                log_action("🔥 Captured Chunk via load(): " .. #chunk .. " bytes")
             end
             return real_load(chunk, name, mode, env)
         end
-        
-        -- Переопределяем load/loadstring в среде
         _G.load = hooked_load
         _G.loadstring = hooked_load
-        
-        -- Http Spy
+
+        -- Фейковый getfenv, чтобы скрипт не боялся
+        local real_getfenv = getfenv
+        _G.getfenv = function(f)
+            -- Всегда возвращаем глобальную среду, чтобы скрипт думал, что он в руте
+            return _G 
+        end
+
+        -- HTTP Spy
         _G.game.HttpGet = function(self, url) 
             log_action("🌍 HTTP GET: " .. tostring(url)) 
+            capture_str(tostring(url))
             return "<html>ProxyResponse</html>" 
         end
         _G.game.HttpPost = function(self, url, data)
-            log_action("🌍 HTTP POST: " .. tostring(url))
+            log_action("🌍 HTTP POST: " .. tostring(url) .. " | Data: " .. tostring(data))
+            capture_str(tostring(data))
             return "ProxyResponse"
         end
+        _G.request = function(req)
+             if req and req.Url then
+                log_action("🌍 HTTP REQUEST: " .. tostring(req.Url))
+             end
+             return {Body="Proxy", StatusCode=200}
+        end
 
-        -- Функция дампа
-        function _G.dump_globals()
+        -- Функция финального дампа
+        function _G.dump_all_the_things()
             local ignore = {
                 string=1, math=1, table=1, bit=1, bit32=1, pairs=1, ipairs=1, next=1, _G=1, 
-                package=1, os=1, io=1, Instance=1, Vector3=1, CFrame=1, UDim2=1, Color3=1,
-                Enum=1, task=1, wait=1, spawn=1, delay=1, defer=1, game=1, workspace=1,
-                script=1, getgenv=1, getrenv=1, getreg=1, getgc=1, checkcaller=1,
-                islclosure=1, newcclosure=1, load=1, loadstring=1, print=1, warn=1, error=1,
+                package=1, os=1, io=1, debug=1, coroutine=1, utf8=1,
+                Instance=1, Vector3=1, CFrame=1, UDim2=1, Color3=1, Enum=1, task=1, 
+                wait=1, spawn=1, delay=1, defer=1, game=1, workspace=1, script=1, 
+                getgenv=1, getrenv=1, getreg=1, getgc=1, checkcaller=1, islclosure=1, 
+                newcclosure=1, load=1, loadstring=1, print=1, warn=1, error=1,
                 tostring=1, tonumber=1, type=1, pcall=1, xpcall=1, select=1, unpack=1,
-                setmetatable=1, getmetatable=1, require=1
+                setmetatable=1, getmetatable=1, require=1, getfenv=1, setfenv=1,
+                rawequal=1, rawget=1, rawset=1, assert=1, collectgarbage=1, dofile=1
             }
-            for k, v in pairs(getfenv()) do
-                if not ignore[k] then
+            
+            -- Дамп глобалов
+            for k, v in pairs(_G) do
+                if not ignore[k] and not _G.DETECTED_STRINGS[k] then
                     if type(v) == "string" or type(v) == "number" or type(v) == "boolean" then
-                        table.insert(_G.FINAL_GLOBALS, tostring(k) .. " = " .. tostring(v))
+                         table.insert(_G.FINAL_GLOBALS, tostring(k) .. " = " .. tostring(v))
                     end
                 end
             end
         end
         """
 
-        # Собираем всё вместе
         full_setup = bit_polyfill + "\n" + roblox_emu + "\n" + spyware
 
         try:
-            update_status("🌪️ Запуск скрипта с трассировкой...")
+            update_status("🌪️ Запуск скрипта (Tracing Mode)...")
             
-            # Загружаем среду
+            # Инициализация
             lua.execute(full_setup)
             
-            # Раннер
+            # Создаем Runner
             runner = lua.eval("""
                 function(code)
-                    -- Оборачиваем в pcall, чтобы не упало от случайной ошибки в логике скрипта
                     local status, err = pcall(function()
-                        local f, load_err = load(code, "script", "t", _G)
+                        -- Используем loadstring для совместимости
+                        local f, load_err = loadstring(code)
                         if not f then error(load_err) end
                         f()
                     end)
                     
                     if not status then
-                        table.insert(_G.ACTION_LOG, "❌ Script Error: " .. tostring(err))
+                        table.insert(_G.ACTION_LOG, "❌ Script Crash: " .. tostring(err))
                     end
                     
-                    -- Пробуем сдампить
-                    pcall(_G.dump_globals)
+                    pcall(_G.dump_all_the_things)
                     return true
                 end
             """)
             
             runner(content)
 
-            # --- СБОР РЕЗУЛЬТАТОВ ---
+            # --- ИЗВЛЕЧЕНИЕ ДАННЫХ ---
+            # Конвертируем Lua Table в Python List/Dict
             strings_tbl = lua.globals().DETECTED_STRINGS
-            detected_strings = list(strings_tbl)
+            # Lua table -> list of keys (потому что мы использовали set structure: tbl[str] = true)
+            detected_strings = []
+            for k in strings_tbl:
+                detected_strings.append(k)
+
             global_dump = list(lua.globals().FINAL_GLOBALS)
             action_log = list(lua.globals().ACTION_LOG)
             chunks = lua.globals().CAPTURED_CHUNKS
             
-            # Поиск лучшего чанка (распакованного скрипта)
+            # Ищем лучший чанк для декомпиляции
             best_chunk = None
             max_size = 0
             if len(chunks) > 0:
@@ -341,57 +371,75 @@ class DeobfuscatorEngine:
 
     def _clean_string(self, s):
         if isinstance(s, bytes):
-            try: return s.decode('utf-8')
+            try: return s.decode('utf-8', errors='ignore')
             except: return str(s)
         return str(s)
 
     def _finalize_output(self, code_bytes, strings, globals_dump, logs, callback):
-        if callback: callback("🧬 Декомпиляция...")
+        if callback: callback("🧬 Сборка результатов...")
+        
+        # Попытка декомпиляции
         decompiled = self._try_decompile(code_bytes)
         
         final_text = ""
-        final_text += "-- [[ DUMPED STRINGS ]] --\n"
+        final_text += "-- [[ MEL VARIABLES (STRINGS) ]] --\n"
+        
+        # Сортируем строки по длине (длинные часто интереснее)
         sorted_strings = sorted(strings, key=lambda x: len(str(x)), reverse=True)
         seen = set()
+        
+        mel_counter = 1
+        
         for s in sorted_strings:
-            clean = self._clean_string(s).replace('\n', ' ').replace('\r', '')
-            if clean not in seen and len(clean) > 3:
-                final_text += f'-- "{clean}"\n'
+            clean = self._clean_string(s).replace('\r', '')
+            # Фильтр совсем коротких или мусорных строк
+            if clean not in seen and len(clean) > 2:
+                # Экранирование кавычек для валидного Lua синтаксиса
+                safe_str = clean.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n')
+                
+                final_text += f'local mel_{mel_counter} = "{safe_str}"\n'
+                
                 seen.add(clean)
+                mel_counter += 1
 
         if globals_dump:
-            final_text += "\n" + "="*30 + "\n-- [[ GLOBALS ]] --\n"
+            final_text += "\n" + "="*30 + "\n-- [[ DETECTED GLOBALS ]] --\n"
             for g in globals_dump:
                 final_text += f"-- {self._clean_string(g)}\n"
 
         if logs:
-             final_text += "\n" + "="*30 + "\n-- [[ LOGS ]] --\n"
-             for l in logs[-20:]:
+             final_text += "\n" + "="*30 + "\n-- [[ EXECUTION LOG ]] --\n"
+             for l in logs: # Выводим больше логов
                  final_text += f"-- {self._clean_string(l)}\n"
 
         final_text += "\n" + "="*50 + "\n\n"
         
         if decompiled:
+            final_text += "-- [[ DECOMPILED SOURCE ]] --\n"
             try: src = decompiled.decode('utf-8', 'ignore')
             except: src = decompiled.decode('latin-1', 'ignore')
             final_text += self._beautify_lua(src)
         else:
-            final_text += "-- [WARNING] Unluac failed.\n"
-            try: final_text += code_bytes.decode('utf-8')
+            final_text += "-- [WARNING] Unluac failed or script was plain text.\n"
+            try: final_text += code_bytes.decode('utf-8', 'ignore')
             except: final_text += str(binascii.hexlify(code_bytes[:200]))
 
         return final_text.encode('utf-8')
 
     def _try_decompile(self, bytecode):
         if not os.path.exists(self.unluac_path): return None
+        # Проверяем, похоже ли это на байткод Lua (начинается с ESC Lua)
+        if not (bytecode.startswith(b'\x1bLua') or bytecode.startswith(b'\x1b\x4c\x75\x61')):
+            return None
+
         try:
             with tempfile.NamedTemporaryFile(delete=False, suffix=".lua", mode='wb') as tmp:
                 tmp.write(bytecode)
                 path = tmp.name
             
             res = subprocess.run(
-                ["java", "-Xmx1G", "-jar", self.unluac_path, path], 
-                capture_output=True, timeout=10
+                ["java", "-jar", self.unluac_path, path], 
+                capture_output=True, timeout=15
             )
             os.remove(path)
             if res.returncode == 0 and len(res.stdout) > 0: return res.stdout
@@ -399,6 +447,7 @@ class DeobfuscatorEngine:
         except: return None
 
     def _beautify_lua(self, source_code):
+        # Простой бьютифайер
         source_code = re.sub(r'(\s)(local|return|if|for|while|repeat|function)(\s)', r'\n\2 ', source_code)
         replacements = {
             " then ": " then\n", " do ": " do\n", " end ": "\nend\n",
