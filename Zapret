@@ -2,6 +2,7 @@ import re
 import random
 import string
 import base64
+import zlib
 from typing import List, Dict
 
 class MelotenObfuscator:
@@ -13,211 +14,171 @@ class MelotenObfuscator:
 http://t.me/Meloten_Obfuscatorbot ]]
 
 """
-        # Lua ключевые слова, которые нельзя переименовывать
+        # Lua ключевые слова
         self.keywords = {
             'and', 'break', 'do', 'else', 'elseif', 'end', 'false', 
             'for', 'function', 'if', 'in', 'local', 'nil', 'not', 
             'or', 'repeat', 'return', 'then', 'true', 'until', 'while',
             'game', 'workspace', 'script', 'print', 'warn', 'wait',
-            'pairs', 'ipairs', 'next', 'type', 'tostring', 'tonumber'
+            'pairs', 'ipairs', 'next', 'type', 'tostring', 'tonumber',
+            'table', 'string', 'math', 'require', 'loadstring'
         }
         
         self.var_mapping = {}
-        self.string_table = []
+        self.instructions = []
+        self.constants = []
+        self.protos = []
         
-    def generate_random_name(self, length=12):
+    def generate_random_name(self, length=8, prefix=''):
         """Генерация случайного имени переменной"""
-        chars = string.ascii_letters + '_'
-        name = random.choice(string.ascii_letters) + ''.join(
-            random.choices(chars + string.digits, k=length-1)
-        )
-        return f"_{name}_"
+        chars = string.ascii_letters + string.digits
+        if not prefix:
+            prefix = random.choice(['_', '__', '___'])
+        name = prefix + ''.join(random.choices(chars, k=length))
+        return name
     
-    def extract_strings(self, code: str) -> str:
-        """Извлечение и шифрование строк"""
-        self.string_table = []
-        
-        def replace_string(match):
-            string_content = match.group(0)
-            self.string_table.append(string_content)
-            return f"__STR_{len(self.string_table)-1}__"
-        
-        # Извлечение строк в двойных кавычках
-        code = re.sub(r'"(?:[^"\\]|\\.)*"', replace_string, code)
-        # Извлечение строк в одинарных кавычках
-        code = re.sub(r"'(?:[^'\\]|\\.)*'", replace_string, code)
-        
-        return code
+    def encode_string(self, s):
+        """Кодирование строки в байты"""
+        result = []
+        for char in s:
+            # XOR кодирование с рандомным ключом
+            encoded = ord(char) ^ random.randint(1, 255)
+            result.append(str(encoded))
+        return ','.join(result)
     
-    def create_string_decoder(self) -> str:
-        """Создание декодера строк"""
-        if not self.string_table:
-            return ""
+    def create_char_array(self, text):
+        """Создание массива символов из текста"""
+        return ','.join([str(ord(c)) for c in text])
+    
+    def compress_bytecode(self, code):
+        """Сжатие кода в псевдо-байткод"""
+        # Преобразование в числовой формат
+        compressed = []
+        for i, char in enumerate(code):
+            val = ord(char)
+            # Добавляем шум
+            if random.random() < 0.3:
+                compressed.append(str(val + random.randint(-10, 10)))
+            else:
+                compressed.append(str(val))
         
-        # Создание массива зашифрованных строк
-        encoded_strings = []
-        for s in self.string_table:
-            # Удаляем кавычки и кодируем
-            content = s[1:-1]  # Убираем кавычки
-            # Простое XOR шифрование
-            encoded = ''.join([str(ord(c) ^ 123) for c in content])
-            encoded_strings.append(encoded)
+        return ''.join([
+            random.choice(['<', '>', ':', ';', '=', '@', '[', ']']) + 
+            compressed[i] if i < len(compressed) else ''
+            for i in range(0, len(compressed), 2)
+        ])
+    
+    def create_vm_wrapper(self, code):
+        """Создание обертки виртуальной машины"""
+        # Переменные для VM
+        vm_vars = {
+            'table': self.generate_random_name(1, ''),
+            'string': self.generate_random_name(1, ''),
+            'bit': self.generate_random_name(1, ''),
+            'byte': self.generate_random_name(1, ''),
+            'char': self.generate_random_name(1, ''),
+            'sub': self.generate_random_name(1, ''),
+            'concat': self.generate_random_name(1, ''),
+            'insert': self.generate_random_name(1, ''),
+            'ldexp': self.generate_random_name(1, ''),
+            'getfenv': self.generate_random_name(1, ''),
+            'setmetatable': self.generate_random_name(1, ''),
+            'select': self.generate_random_name(1, ''),
+            'unpack': self.generate_random_name(1, ''),
+            'tonumber': self.generate_random_name(1, ''),
+            'bytecode': self.generate_random_name(1, ''),
+        }
         
-        decoder_name = self.generate_random_name(15)
-        table_name = self.generate_random_name(15)
+        # Кодирование исходного кода
+        encoded_code = self.compress_bytecode(code)
         
-        decoder = f"""local {table_name} = {{"""
-        for i, enc in enumerate(encoded_strings):
-            decoder += f'[{i}]="{enc}",'
-        decoder += "}\n"
+        # Создание декодера байткода
+        decoder_func = self.generate_random_name(1, '')
         
-        decoder += f"""local {decoder_name} = function(idx)
-    local enc = {table_name}[idx]
-    if not enc then return "" end
-    local result = ""
-    local i = 1
-    while i <= #enc do
-        local num_str = ""
-        while i <= #enc and enc:sub(i,i):match("%d") do
-            num_str = num_str .. enc:sub(i,i)
-            i = i + 1
-        end
-        if num_str ~= "" then
-            result = result .. string.char(tonumber(num_str) ~ 123)
+        vm_template = f"""return(function(...)
+local {vm_vars['table']},{vm_vars['string']},{vm_vars['bit']}=table,string,bit or {{}}
+local {vm_vars['byte']},{vm_vars['char']},{vm_vars['sub']},{vm_vars['concat']},{vm_vars['insert']}={vm_vars['string']}.byte,{vm_vars['string']}.char,{vm_vars['string']}.sub,{vm_vars['table']}.concat,{vm_vars['table']}.insert
+local {vm_vars['ldexp']},{vm_vars['getfenv']},{vm_vars['setmetatable']},{vm_vars['select']},{vm_vars['unpack']},{vm_vars['tonumber']}=math.ldexp,getfenv and getfenv()or _ENV,setmetatable,select,unpack or {vm_vars['table']}.unpack,tonumber
+local {vm_vars['bytecode']}="{encoded_code}"
+
+local function {decoder_func}(data)
+    local result,index,value="",1,0
+    local function read()
+        local ch={vm_vars['sub']}(data,index,index)
+        index=index+1
+        return ch
+    end
+    
+    while index<=#data do
+        local ch=read()
+        if ch:match("[%d]") then
+            value=value*10+{vm_vars['tonumber']}(ch)
+        else
+            if value>0 then
+                result=result..{vm_vars['char']}(value)
+                value=0
+            end
         end
     end
+    
+    if value>0 then result=result..{vm_vars['char']}(value) end
     return result
 end
-"""
-        return decoder, decoder_name
-    
-    def rename_variables(self, code: str) -> str:
-        """Переименование переменных"""
-        # Поиск локальных переменных
-        local_pattern = r'\blocal\s+([a-zA-Z_][a-zA-Z0-9_]*)'
+
+local decoded={decoder_func}({vm_vars['bytecode']})
+local exec=loadstring(decoded)
+if exec then return exec(...) end
+end)(...)"""
         
-        def replace_var(match):
+        return vm_template
+    
+    def add_control_flow_obfuscation(self, code):
+        """Продвинутая обфускация контроля потока"""
+        lines = code.split('\n')
+        result = []
+        
+        for line in lines:
+            stripped = line.strip()
+            if not stripped or stripped.startswith('--'):
+                result.append(line)
+                continue
+            
+            # Случайное добавление dead code
+            if random.random() < 0.2:
+                junk = [
+                    f"if {random.randint(1,5)}>{random.randint(10,100)} then return end",
+                    f"local _={random.randint(1,1000)}",
+                    f"do end",
+                ]
+                result.append(random.choice(junk))
+            
+            result.append(line)
+        
+        return '\n'.join(result)
+    
+    def rename_variables(self, code):
+        """Переименование всех переменных"""
+        # Поиск всех локальных переменных
+        pattern = r'\blocal\s+([a-zA-Z_][a-zA-Z0-9_]*)'
+        
+        for match in re.finditer(pattern, code):
             var_name = match.group(1)
             if var_name not in self.keywords and var_name not in self.var_mapping:
-                self.var_mapping[var_name] = self.generate_random_name(10)
-            return f"local {self.var_mapping.get(var_name, var_name)}"
+                new_name = self.generate_random_name(random.randint(6, 12))
+                self.var_mapping[var_name] = new_name
         
-        code = re.sub(local_pattern, replace_var, code)
-        
-        # Замена использований переменных
+        # Замена переменных
         for original, obfuscated in self.var_mapping.items():
-            code = re.sub(r'\b' + original + r'\b', obfuscated, code)
+            code = re.sub(r'\b' + re.escape(original) + r'\b', obfuscated, code)
         
         return code
     
-    def add_junk_code(self, code: str) -> str:
-        """Добавление мусорного кода"""
-        junk_lines = [
-            f"local {self.generate_random_name(8)} = {random.randint(1, 1000)}",
-            f"local {self.generate_random_name(8)} = '{self.generate_random_name(15)}'",
-            f"local {self.generate_random_name(8)} = function() return nil end",
-            f"if {random.randint(1,10)} > {random.randint(100,1000)} then return end",
-        ]
-        
-        lines = code.split('\n')
-        result = []
-        
-        for line in lines:
-            result.append(line)
-            if random.random() < 0.15 and line.strip() and not line.strip().startswith('--'):
-                result.append(random.choice(junk_lines))
-        
-        return '\n'.join(result)
-    
-    def obfuscate_control_flow(self, code: str) -> str:
-        """Обфускация контроля потока"""
-        # Обертывание в do-end блоки
-        lines = code.split('\n')
-        result = []
-        
-        for line in lines:
-            if line.strip() and not line.strip().startswith('--'):
-                if random.random() < 0.1:
-                    indent = len(line) - len(line.lstrip())
-                    result.append(' ' * indent + 'do')
-                    result.append(line)
-                    result.append(' ' * indent + 'end')
-                else:
-                    result.append(line)
-            else:
-                result.append(line)
-        
-        return '\n'.join(result)
-    
-    def compress_code(self, code: str) -> str:
-        """Минификация кода (удаление лишних пробелов)"""
+    def minify_code(self, code):
+        """Минификация кода"""
         # Удаление комментариев
         code = re.sub(r'--[^\n]*', '', code)
-        # Удаление множественных пробелов
+        # Удаление лишних пробелов
         code = re.sub(r'[ \t]+', ' ', code)
         # Удаление пустых строк
-        code = re.sub(r'\n\s*\n', '\n', code)
-        
-        return code
-    
-    def wrap_in_decoder(self, code: str, decoder_name: str) -> str:
-        """Обертывание строковых замещений в вызовы декодера"""
-        # Замена всех __STR_X__ на вызовы декодера
-        code = re.sub(r'__STR_(\d+)__', lambda m: f'{decoder_name}({m.group(1)})', code)
-        return code
-    
-    def add_vm_layer(self, code: str) -> str:
-        """Добавление слоя виртуальной машины"""
-        vm_name = self.generate_random_name(12)
-        wrapped_code = code.replace("'", "\\'").replace('"', '\\"').replace('\n', '\\n')
-        
-        vm = f"""local {vm_name} = function()
-    local code = "{wrapped_code}"
-    local func = loadstring(code)
-    if func then
-        func()
-    end
-end
-{vm_name}()
-"""
-        return vm
-    
-    def obfuscate(self, lua_code: str) -> str:
-        """Главный метод обфускации"""
-        try:
-            # 1. Извлечение строк
-            code = self.extract_strings(lua_code)
-            
-            # 2. Удаление комментариев
-            code = self.compress_code(code)
-            
-            # 3. Переименование переменных
-            code = self.rename_variables(code)
-            
-            # 4. Добавление мусорного кода
-            code = self.add_junk_code(code)
-            
-            # 5. Обфускация контроля потока
-            code = self.obfuscate_control_flow(code)
-            
-            # 6. Создание декодера строк
-            decoder, decoder_name = self.create_string_decoder()
-            
-            # 7. Замена строковых плейсхолдеров
-            code = self.wrap_in_decoder(code, decoder_name)
-            
-            # 8. Объединение всего
-            final_code = self.header + decoder + '\n' + code
-            
-            # 9. Финальная минификация (опционально)
-            # final_code = final_code.replace('\n\n', '\n')
-            
-            return final_code
-            
-        except Exception as e:
-            raise Exception(f"Ошибка обфускации: {str(e)}")
-    
-    def reset(self):
-        """Сброс внутреннего состояния"""
-        self.var_mapping = {}
-        self.string_table = [] 
+        code = re.sub(r'\n\s*\n+', '\n', code)
+        return code.strip()
