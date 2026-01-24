@@ -1,134 +1,175 @@
-import logging
-import os
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from obfus import MelotenObfuscator
+import random
+import string
+import re
+import base64
+import hashlib
 
-# Настройка логирования
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
-
-# Токен бота (замените на свой)
-BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"
-
-# Директория для временных файлов
-TEMP_DIR = "temp_files"
-os.makedirs(TEMP_DIR, exist_ok=True)
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик команды /start"""
-    welcome_message = (
-        "🔒 *Meloten Obfuscator v0.1*\n\n"
-        "Мощный обфускатор для Roblox Lua скриптов!\n\n"
-        "📤 Отправьте мне .lua или .txt файл со скриптом\n"
-        "⚡ Я обфусцирую его и верну защищённую версию\n\n"
-        "🔗 Канал: @Meloten_Obfuscatorbot"
-    )
-    await update.message.reply_text(welcome_message, parse_mode='Markdown')
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик команды /help"""
-    help_text = (
-        "📖 *Как использовать:*\n\n"
-        "1️⃣ Отправьте .lua или .txt файл\n"
-        "2️⃣ Дождитесь обработки\n"
-        "3️⃣ Получите обфусцированный файл\n\n"
-        "⚠️ Максимальный размер: 20 MB\n"
-        "🔐 Поддерживаются только Lua скрипты"
-    )
-    await update.message.reply_text(help_text, parse_mode='Markdown')
-
-async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик загруженных файлов"""
-    document = update.message.document
+class MelotenObfuscator:
+    """Мощный обфускатор для Roblox Lua скриптов - Meloten v0.1"""
     
-    # Проверка расширения файла
-    if not (document.file_name.endswith('.lua') or document.file_name.endswith('.txt')):
-        await update.message.reply_text(
-            "❌ Пожалуйста, отправьте файл с расширением .lua или .txt"
-        )
-        return
+    def __init__(self):
+        self.var_counter = 0
+        self.string_pool = []
+        self.var_mapping = {}
+        
+    def generate_name(self, prefix=""):
+        """Генерация случайного имени переменной"""
+        chars = string.ascii_letters + '_'
+        length = random.randint(20, 40)
+        name = prefix + ''.join(random.choice(chars) for _ in range(length))
+        return name
     
-    # Проверка размера файла (20 MB)
-    if document.file_size > 20 * 1024 * 1024:
-        await update.message.reply_text(
-            "❌ Файл слишком большой! Максимальный размер: 20 MB"
-        )
-        return
+    def generate_junk_code(self):
+        """Генерация мусорного кода"""
+        junk_patterns = [
+            f"local {self.generate_name()} = {random.randint(1, 99999)}",
+            f"local {self.generate_name()} = '{self.generate_name()}'",
+            f"local {self.generate_name()} = function() return {random.randint(1, 99999)} end",
+            f"if {random.randint(1, 99999)} > {random.randint(1, 99999)} then end",
+        ]
+        return random.choice(junk_patterns)
     
-    await update.message.reply_text("⏳ Обрабатываю файл...")
+    def obfuscate_strings(self, code):
+        """Обфускация строк с использованием base64 и XOR"""
+        def replace_string(match):
+            original = match.group(1)
+            
+            # Генерация XOR ключа
+            xor_key = random.randint(1, 255)
+            
+            # XOR шифрование
+            encrypted = ''.join(chr(ord(c) ^ xor_key) for c in original)
+            encrypted_b64 = base64.b64encode(encrypted.encode()).decode()
+            
+            # Создание декодера
+            decoder_var = self.generate_name('str_')
+            decoder = f"(function() local {decoder_var}='{encrypted_b64}';local k={xor_key};local r='';for c in {decoder_var}:gmatch'.'do r=r..string.char(c:byte()~k)end;return(r:gsub('(.)(.)(.)(.)%=?%=?',function(a,b,c,d)local n=(a:byte()-string.byte'A')*0x40000+(b:byte()-string.byte'A')*0x1000+(c=='='and 0 or(c:byte()-string.byte'A')*0x40)+(d=='='and 0 or(d:byte()-string.byte'A'))return string.char(n/0x10000%0x100,n/0x100%0x100,n%0x100):sub(1,2-(c=='='and 2 or 0)-(d=='='and 1 or 0))end))end)()"
+            
+            return decoder
+        
+        # Замена всех строк в кавычках
+        code = re.sub(r'"([^"]*)"', replace_string, code)
+        code = re.sub(r"'([^']*)'", replace_string, code)
+        
+        return code
     
-    try:
-        # Скачивание файла
-        file = await context.bot.get_file(document.file_id)
-        input_path = os.path.join(TEMP_DIR, f"input_{update.message.chat_id}_{document.file_name}")
-        await file.download_to_drive(input_path)
+    def obfuscate_numbers(self, code):
+        """Обфускация чисел"""
+        def replace_number(match):
+            num = match.group(0)
+            try:
+                value = int(num)
+                # Разбиваем число на операции
+                a = random.randint(1, 1000)
+                b = value - a
+                operations = [
+                    f"({a}+{b})",
+                    f"({value}*1)",
+                    f"({a}-{-b})",
+                ]
+                return random.choice(operations)
+            except:
+                return num
         
-        # Чтение содержимого
-        with open(input_path, 'r', encoding='utf-8') as f:
-            lua_code = f.read()
+        # Замена чисел (избегаем замены внутри идентификаторов)
+        code = re.sub(r'\b(\d+)\b', replace_number, code)
+        return code
+    
+    def rename_variables(self, code):
+        """Переименование переменных"""
+        # Находим все объявления переменных
+        var_pattern = r'\blocal\s+([a-zA-Z_][a-zA-Z0-9_]*)'
         
-        # Обфускация
-        obfuscator = MelotenObfuscator()
-        obfuscated_code = obfuscator.obfuscate(lua_code)
+        variables = re.findall(var_pattern, code)
         
-        # Сохранение обфусцированного файла
-        output_filename = f"obfuscated_{document.file_name}"
-        output_path = os.path.join(TEMP_DIR, f"output_{update.message.chat_id}_{output_filename}")
+        for var in set(variables):
+            if var not in ['print', 'game', 'workspace', 'script', 'wait', 'spawn', 'delay']:
+                new_name = self.generate_name('var_')
+                self.var_mapping[var] = new_name
+                code = re.sub(r'\b' + var + r'\b', new_name, code)
         
-        with open(output_path, 'w', encoding='utf-8') as f:
-            f.write(obfuscated_code)
+        return code
+    
+    def add_control_flow_obfuscation(self, code):
+        """Добавление обфускации потока управления"""
+        lines = code.split('\n')
+        obfuscated_lines = []
         
-        # Отправка обфусцированного файла
-        await update.message.reply_document(
-            document=open(output_path, 'rb'),
-            filename=output_filename,
-            caption="✅ *Файл успешно обфусцирован!*\n\n🔗 @Meloten_Obfuscatorbot",
-            parse_mode='Markdown'
-        )
+        for line in lines:
+            # Добавляем случайный мусорный код
+            if random.random() > 0.7 and line.strip():
+                obfuscated_lines.append(self.generate_junk_code())
+            obfuscated_lines.append(line)
         
-        # Удаление временных файлов
-        os.remove(input_path)
-        os.remove(output_path)
+        return '\n'.join(obfuscated_lines)
+    
+    def wrap_in_vm(self, code):
+        """Обёртка кода в виртуальную машину"""
+        vm_loader = self.generate_name('vm_')
+        exec_func = self.generate_name('exec_')
         
-        logger.info(f"Обработан файл от пользователя {update.message.chat_id}: {document.file_name}")
+        # Конвертируем код в байткод-подобную структуру
+        encoded = base64.b64encode(code.encode()).decode()
         
-    except Exception as e:
-        logger.error(f"Ошибка при обработке файла: {e}")
-        await update.message.reply_text(
-            "❌ Произошла ошибка при обработке файла. Убедитесь, что это корректный Lua скрипт."
-        )
+        vm_wrapper = f"""
+local {vm_loader} = function()
+    local {exec_func} = '{encoded}'
+    local decoded = ''
+    for i = 1, #{exec_func} do
+        decoded = decoded .. string.char({exec_func}:byte(i))
+    end
+    decoded = decoded:gsub('(.)(.)(.)(.)%%=?%%=?', function(a,b,c,d)
+        local n = (a:byte()-65)*0x40000 + (b:byte()-65)*0x1000 + (c=='=' and 0 or (c:byte()-65)*0x40) + (d=='=' and 0 or (d:byte()-65))
+        return string.char(n/0x10000%0x100, n/0x100%0x100, n%0x100):sub(1, 2-(c=='=' and 2 or 0)-(d=='=' and 1 or 0))
+    end)
+    return loadstring(decoded)()
+end
+{vm_loader}()
+"""
+        return vm_wrapper
+    
+    def add_anti_debug(self):
+        """Добавление анти-дебаг проверок"""
+        anti_debug = f"""
+-- Anti-Debug Protection
+local {self.generate_name('check_')} = function()
+    if not game or not game.GetService then
+        while true do end
+    end
+end
+{self.generate_name('check_')}()
+"""
+        return anti_debug
+    
+    def obfuscate(self, lua_code):
+        """Главная функция обфускации"""
         
-        # Удаление файлов в случае ошибки
-        if os.path.exists(input_path):
-            os.remove(input_path)
-        if 'output_path' in locals() and os.path.exists(output_path):
-            os.remove(output_path)
+        # Заголовок
+        header = """--[[ This file was protected with using Meloten:
 
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик текстовых сообщений"""
-    await update.message.reply_text(
-        "📄 Отправьте мне .lua или .txt файл для обфускации\n"
-        "Используйте /help для получения инструкций"
-    )
+http://t.me/Meloten_Obfuscatorbot ]]
 
-def main():
-    """Запуск бота"""
-    # Создание приложения
-    application = Application.builder().token(BOT_TOKEN).build()
-    
-    # Регистрация обработчиков
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    
-    # Запуск бота
-    logger.info("Бот Meloten Obfuscator запущен!")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
-
-if __name__ == '__main__':
-    main()
+"""
+        
+        # Шаг 1: Обфускация строк
+        code = self.obfuscate_strings(lua_code)
+        
+        # Шаг 2: Обфускация чисел
+        code = self.obfuscate_numbers(code)
+        
+        # Шаг 3: Переименование переменных
+        code = self.rename_variables(code)
+        
+        # Шаг 4: Добавление мусорного кода и обфускация потока
+        code = self.add_control_flow_obfuscation(code)
+        
+        # Шаг 5: Добавление анти-дебаг
+        anti_debug = self.add_anti_debug()
+        
+        # Шаг 6: Обёртка в VM (самый мощный слой)
+        code = self.wrap_in_vm(code)
+        
+        # Финальная сборка
+        final_code = header + anti_debug + '\n' + code
+        
+        return final_code
