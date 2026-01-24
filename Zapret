@@ -1,155 +1,223 @@
-import os
-import logging
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from obfus import MelotenObfuscator
+import re
+import random
+import string
+import base64
+from typing import List, Dict
 
-# Настройка логирования
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
+class MelotenObfuscator:
+    """Мощный обфускатор для Roblox Lua - Meloten v0.1"""
+    
+    def __init__(self):
+        self.header = """--[[ This file was protected with using Meloten:
 
-# Токен бота (замените на свой)
-BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"
+http://t.me/Meloten_Obfuscatorbot ]]
 
-# Инициализация обфускатора
-obfuscator = MelotenObfuscator()
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик команды /start"""
-    welcome_message = """
-🔒 **Meloten Obfuscator v0.1**
-
-Добро пожаловать в самый мощный обфускатор для Roblox Lua!
-
-📝 **Как использовать:**
-1. Отправьте .lua или .txt файл с вашим скриптом
-2. Получите обфусцированный файл обратно
-3. Скачанный файл автоматически удалится с сервера
-
-⚡ **Возможности:**
-• Многослойное шифрование
-• Контроль потока выполнения
-• Переименование переменных
-• Удаление комментариев и форматирования
-• Вставка мусорного кода
-• Защита строк
-
-Отправьте файл для начала работы!
-    """
-    await update.message.reply_text(welcome_message, parse_mode='Markdown')
-
-async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик файлов"""
-    try:
-        document = update.message.document
-        file_name = document.file_name
+"""
+        # Lua ключевые слова, которые нельзя переименовывать
+        self.keywords = {
+            'and', 'break', 'do', 'else', 'elseif', 'end', 'false', 
+            'for', 'function', 'if', 'in', 'local', 'nil', 'not', 
+            'or', 'repeat', 'return', 'then', 'true', 'until', 'while',
+            'game', 'workspace', 'script', 'print', 'warn', 'wait',
+            'pairs', 'ipairs', 'next', 'type', 'tostring', 'tonumber'
+        }
         
-        # Проверка расширения файла
-        if not (file_name.endswith('.lua') or file_name.endswith('.txt')):
-            await update.message.reply_text(
-                "❌ Пожалуйста, отправьте файл с расширением .lua или .txt"
-            )
-            return
+        self.var_mapping = {}
+        self.string_table = []
         
-        # Отправка статуса
-        status_msg = await update.message.reply_text("⏳ Обработка файла...")
-        
-        # Скачивание файла
-        file = await context.bot.get_file(document.file_id)
-        input_path = f"temp_{update.effective_user.id}_{file_name}"
-        await file.download_to_drive(input_path)
-        
-        # Чтение содержимого
-        with open(input_path, 'r', encoding='utf-8') as f:
-            lua_code = f.read()
-        
-        # Обфускация
-        await status_msg.edit_text("🔒 Обфускация кода...")
-        obfuscated_code = obfuscator.obfuscate(lua_code)
-        
-        # Создание выходного файла
-        output_name = f"obfuscated_{file_name}"
-        output_path = f"temp_out_{update.effective_user.id}_{output_name}"
-        
-        with open(output_path, 'w', encoding='utf-8') as f:
-            f.write(obfuscated_code)
-        
-        # Отправка файла
-        await status_msg.edit_text("📤 Отправка результата...")
-        with open(output_path, 'rb') as f:
-            await update.message.reply_document(
-                document=f,
-                filename=output_name,
-                caption="✅ Обфускация завершена!\n🔒 Ваш код защищен Meloten v0.1"
-            )
-        
-        # Удаление временных файлов
-        if os.path.exists(input_path):
-            os.remove(input_path)
-        if os.path.exists(output_path):
-            os.remove(output_path)
-        
-        await status_msg.delete()
-        
-        logger.info(f"Файл обфусцирован для пользователя {update.effective_user.id}")
-        
-    except Exception as e:
-        logger.error(f"Ошибка при обработке файла: {e}")
-        await update.message.reply_text(
-            f"❌ Произошла ошибка при обработке файла:\n{str(e)}"
+    def generate_random_name(self, length=12):
+        """Генерация случайного имени переменной"""
+        chars = string.ascii_letters + '_'
+        name = random.choice(string.ascii_letters) + ''.join(
+            random.choices(chars + string.digits, k=length-1)
         )
+        return f"_{name}_"
+    
+    def extract_strings(self, code: str) -> str:
+        """Извлечение и шифрование строк"""
+        self.string_table = []
         
-        # Очистка в случае ошибки
+        def replace_string(match):
+            string_content = match.group(0)
+            self.string_table.append(string_content)
+            return f"__STR_{len(self.string_table)-1}__"
+        
+        # Извлечение строк в двойных кавычках
+        code = re.sub(r'"(?:[^"\\]|\\.)*"', replace_string, code)
+        # Извлечение строк в одинарных кавычках
+        code = re.sub(r"'(?:[^'\\]|\\.)*'", replace_string, code)
+        
+        return code
+    
+    def create_string_decoder(self) -> str:
+        """Создание декодера строк"""
+        if not self.string_table:
+            return ""
+        
+        # Создание массива зашифрованных строк
+        encoded_strings = []
+        for s in self.string_table:
+            # Удаляем кавычки и кодируем
+            content = s[1:-1]  # Убираем кавычки
+            # Простое XOR шифрование
+            encoded = ''.join([str(ord(c) ^ 123) for c in content])
+            encoded_strings.append(encoded)
+        
+        decoder_name = self.generate_random_name(15)
+        table_name = self.generate_random_name(15)
+        
+        decoder = f"""local {table_name} = {{"""
+        for i, enc in enumerate(encoded_strings):
+            decoder += f'[{i}]="{enc}",'
+        decoder += "}\n"
+        
+        decoder += f"""local {decoder_name} = function(idx)
+    local enc = {table_name}[idx]
+    if not enc then return "" end
+    local result = ""
+    local i = 1
+    while i <= #enc do
+        local num_str = ""
+        while i <= #enc and enc:sub(i,i):match("%d") do
+            num_str = num_str .. enc:sub(i,i)
+            i = i + 1
+        end
+        if num_str ~= "" then
+            result = result .. string.char(tonumber(num_str) ~ 123)
+        end
+    end
+    return result
+end
+"""
+        return decoder, decoder_name
+    
+    def rename_variables(self, code: str) -> str:
+        """Переименование переменных"""
+        # Поиск локальных переменных
+        local_pattern = r'\blocal\s+([a-zA-Z_][a-zA-Z0-9_]*)'
+        
+        def replace_var(match):
+            var_name = match.group(1)
+            if var_name not in self.keywords and var_name not in self.var_mapping:
+                self.var_mapping[var_name] = self.generate_random_name(10)
+            return f"local {self.var_mapping.get(var_name, var_name)}"
+        
+        code = re.sub(local_pattern, replace_var, code)
+        
+        # Замена использований переменных
+        for original, obfuscated in self.var_mapping.items():
+            code = re.sub(r'\b' + original + r'\b', obfuscated, code)
+        
+        return code
+    
+    def add_junk_code(self, code: str) -> str:
+        """Добавление мусорного кода"""
+        junk_lines = [
+            f"local {self.generate_random_name(8)} = {random.randint(1, 1000)}",
+            f"local {self.generate_random_name(8)} = '{self.generate_random_name(15)}'",
+            f"local {self.generate_random_name(8)} = function() return nil end",
+            f"if {random.randint(1,10)} > {random.randint(100,1000)} then return end",
+        ]
+        
+        lines = code.split('\n')
+        result = []
+        
+        for line in lines:
+            result.append(line)
+            if random.random() < 0.15 and line.strip() and not line.strip().startswith('--'):
+                result.append(random.choice(junk_lines))
+        
+        return '\n'.join(result)
+    
+    def obfuscate_control_flow(self, code: str) -> str:
+        """Обфускация контроля потока"""
+        # Обертывание в do-end блоки
+        lines = code.split('\n')
+        result = []
+        
+        for line in lines:
+            if line.strip() and not line.strip().startswith('--'):
+                if random.random() < 0.1:
+                    indent = len(line) - len(line.lstrip())
+                    result.append(' ' * indent + 'do')
+                    result.append(line)
+                    result.append(' ' * indent + 'end')
+                else:
+                    result.append(line)
+            else:
+                result.append(line)
+        
+        return '\n'.join(result)
+    
+    def compress_code(self, code: str) -> str:
+        """Минификация кода (удаление лишних пробелов)"""
+        # Удаление комментариев
+        code = re.sub(r'--[^\n]*', '', code)
+        # Удаление множественных пробелов
+        code = re.sub(r'[ \t]+', ' ', code)
+        # Удаление пустых строк
+        code = re.sub(r'\n\s*\n', '\n', code)
+        
+        return code
+    
+    def wrap_in_decoder(self, code: str, decoder_name: str) -> str:
+        """Обертывание строковых замещений в вызовы декодера"""
+        # Замена всех __STR_X__ на вызовы декодера
+        code = re.sub(r'__STR_(\d+)__', lambda m: f'{decoder_name}({m.group(1)})', code)
+        return code
+    
+    def add_vm_layer(self, code: str) -> str:
+        """Добавление слоя виртуальной машины"""
+        vm_name = self.generate_random_name(12)
+        wrapped_code = code.replace("'", "\\'").replace('"', '\\"').replace('\n', '\\n')
+        
+        vm = f"""local {vm_name} = function()
+    local code = "{wrapped_code}"
+    local func = loadstring(code)
+    if func then
+        func()
+    end
+end
+{vm_name}()
+"""
+        return vm
+    
+    def obfuscate(self, lua_code: str) -> str:
+        """Главный метод обфускации"""
         try:
-            if os.path.exists(input_path):
-                os.remove(input_path)
-            if os.path.exists(output_path):
-                os.remove(output_path)
-        except:
-            pass
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик команды /help"""
-    help_text = """
-🔒 **Meloten Obfuscator v0.1 - Помощь**
-
-**Команды:**
-/start - Начать работу
-/help - Показать эту справку
-
-**Поддерживаемые форматы:**
-• .lua
-• .txt
-
-**Методы обфускации:**
-1. Шифрование строк
-2. Переименование переменных
-3. Контроль потока
-4. Мусорный код
-5. Удаление пробелов
-6. Скремблирование логики
-
-**Примечание:** 
-Обфусцированный код может быть медленнее оригинала из-за дополнительных слоев защиты.
-    """
-    await update.message.reply_text(help_text, parse_mode='Markdown')
-
-def main():
-    """Запуск бота"""
-    # Создание приложения
-    application = Application.builder().token(BOT_TOKEN).build()
+            # 1. Извлечение строк
+            code = self.extract_strings(lua_code)
+            
+            # 2. Удаление комментариев
+            code = self.compress_code(code)
+            
+            # 3. Переименование переменных
+            code = self.rename_variables(code)
+            
+            # 4. Добавление мусорного кода
+            code = self.add_junk_code(code)
+            
+            # 5. Обфускация контроля потока
+            code = self.obfuscate_control_flow(code)
+            
+            # 6. Создание декодера строк
+            decoder, decoder_name = self.create_string_decoder()
+            
+            # 7. Замена строковых плейсхолдеров
+            code = self.wrap_in_decoder(code, decoder_name)
+            
+            # 8. Объединение всего
+            final_code = self.header + decoder + '\n' + code
+            
+            # 9. Финальная минификация (опционально)
+            # final_code = final_code.replace('\n\n', '\n')
+            
+            return final_code
+            
+        except Exception as e:
+            raise Exception(f"Ошибка обфускации: {str(e)}")
     
-    # Регистрация обработчиков
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
-    
-    # Запуск бота
-    logger.info("Бот Meloten запущен!")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
-
-if __name__ == '__main__':
-    main()
+    def reset(self):
+        """Сброс внутреннего состояния"""
+        self.var_mapping = {}
+        self.string_table = [] 
