@@ -1,284 +1,822 @@
-import asyncio
-import os
+import lupa
+from lupa import LuaRuntime
 import logging
-import uuid
-from datetime import datetime
-from aiogram import Bot, Dispatcher, F, types
-from aiogram.types import FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.filters import Command
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from engine import DeobfuscatorEngine
+import subprocess
+import os
+import tempfile
+import re
+import binascii
+import base64
+import threading
+from contextlib import contextmanager
 
-# === НАСТРОЙКИ ===
-API_TOKEN = 'ВАШ_ТОКЕН_ЗДЕСЬ'  # Замените на свой токен
+logger = logging.getLogger("DeobfuscatorEngine")
 
-# Логирование
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
-logger = logging.getLogger("DeobfBot")
+class TimeoutException(Exception): 
+    pass
 
-# Инициализация
-bot = Bot(token=API_TOKEN)
-dp = Dispatcher()
-engine = DeobfuscatorEngine()
-
-# Состояния (для будущих улучшений)
-class DeobfStates(StatesGroup):
-    waiting_file = State()
-
-# === КОМАНДЫ ===
-
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message):
-    """Стартовое сообщение"""
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📖 Гайд", callback_data="help")],
-        [InlineKeyboardButton(text="ℹ️ О боте", callback_data="about")]
-    ])
+@contextmanager
+def time_limit(seconds):
+    """Защита от зависаний (Windows-совместимая)"""
+    timer = None
+    is_timeout = [False]
     
-    await message.answer(
-        "🤖 **Roblox Deobfuscator V3**\n\n"
-        "**Возможности:**\n"
-        "✅ Детектор обфускаторов (PSU, MoonSec, IronBrew, Luraph)\n"
-        "✅ RemoteSpy (перехват сетевых вызовов)\n"
-        "✅ Извлечение скрытых строк\n"
-        "✅ Декомпиляция Lua bytecode\n"
-        "✅ Анализ глобальных переменных\n\n"
-        "📎 **Просто отправь `.lua` или `.txt` файл!**",
-        parse_mode="Markdown",
-        reply_markup=keyboard
-    )
-
-@dp.callback_query(F.data == "help")
-async def show_help(callback: types.CallbackQuery):
-    """Показать помощь"""
-    await callback.message.edit_text(
-        "📖 **Как пользоваться:**\n\n"
-        "1️⃣ Скинь файл с обфусцированным скриптом\n"
-        "2️⃣ Дождись анализа (до 2 минут)\n"
-        "3️⃣ Получи отчет с:\n"
-        "   • Типом обфускатора\n"
-        "   • RemoteSpy логами\n"
-        "   • Извлеченными строками\n"
-        "   • Декомпилированным кодом\n\n"
-        "**Поддерживаемые форматы:**\n"
-        "`.lua`, `.txt`, `.luac`\n\n"
-        "**Лимиты:**\n"
-        "• Макс размер: 20 МБ\n"
-        "• Таймаут: 120 секунд",
-        parse_mode="Markdown"
-    )
-
-@dp.callback_query(F.data == "about")
-async def show_about(callback: types.CallbackQuery):
-    """О боте"""
-    await callback.message.edit_text(
-        "ℹ️ **О проекте**\n\n"
-        "**Deobfuscator V3**\n"
-        "Версия: 3.0\n"
-        "Движок: Lupa + unluac\n\n"
-        "**Детектируемые обфускаторы:**\n"
-        "• PSU Obfuscator\n"
-        "• MoonSec V2/V3\n"
-        "• IronBrew\n"
-        "• Luraph\n"
-        "• Prometheus\n\n"
-        "Создано для образовательных целей 📚",
-        parse_mode="Markdown"
-    )
-
-@dp.message(Command("stats"))
-async def cmd_stats(message: types.Message):
-    """Статистика бота"""
-    # Здесь можно добавить подсчет обработанных файлов из БД
-    await message.answer(
-        "📊 **Статистика:**\n\n"
-        "Бот работает в активном режиме.\n"
-        "Для расширенной статистики требуется подключение БД.",
-        parse_mode="Markdown"
-    )
-
-# === ОБРАБОТКА ФАЙЛОВ ===
-
-@dp.message(F.document)
-async def handle_document(message: types.Message):
-    """Главная обработка файлов"""
-    user_id = message.from_user.id
-    username = message.from_user.username or "unknown"
-    unique_id = uuid.uuid4().hex[:8]
-    file_name = message.document.file_name or "script.lua"
+    def timeout_handler():
+        is_timeout[0] = True
     
-    # Проверка расширения
-    if not file_name.lower().endswith(('.lua', '.txt', '.luac')):
-        await message.answer(
-            "⚠️ Неподдерживаемый формат.\n"
-            "Принимаются только: `.lua`, `.txt`, `.luac`"
-        )
-        return
-
-    # Проверка размера (20 МБ)
-    if message.document.file_size > 20 * 1024 * 1024:
-        await message.answer("⚠️ Файл слишком большой! Макс: 20 МБ")
-        return
-
-    input_path = f"temp_{user_id}_{unique_id}.lua"
-    output_path = f"Deobf_{unique_id}_{file_name}.txt"
-
-    # Логирование
-    logger.info(f"Processing file from @{username} (ID:{user_id}): {file_name}")
-
-    status_msg = await message.answer(
-        "⏳ **Загрузка файла...**",
-        parse_mode="Markdown"
-    )
+    timer = threading.Timer(seconds, timeout_handler)
+    timer.start()
     
-    loop = asyncio.get_running_loop()
-    last_status = [""]
-    
-    def sync_status_updater(text):
-        """Обновление статуса из синхронного кода"""
-        if text == last_status[0]:
-            return
-        last_status[0] = text
-        
-        async def edit_coro():
-            try:
-                await status_msg.edit_text(
-                    f"⚙️ **{text}**",
-                    parse_mode="Markdown"
-                )
-            except Exception as e:
-                logger.debug(f"Status update error: {e}")
-        
-        if not loop.is_closed():
-            asyncio.run_coroutine_threadsafe(edit_coro(), loop)
-
     try:
-        # 1. Скачивание
-        file = await bot.get_file(message.document.file_id)
-        await bot.download_file(file.file_path, input_path)
-
-        with open(input_path, "rb") as f:
-            content = f.read()
-
-        # 2. Обработка (с таймаутом)
-        result_data = await asyncio.wait_for(
-            loop.run_in_executor(None, engine.process, content, sync_status_updater),
-            timeout=120.0
-        )
-
-        # 3. Сохранение
-        with open(output_path, "wb") as f:
-            f.write(result_data)
-
-        # 4. Анализ результата
-        result_text = result_data.decode('utf-8', errors='ignore')
-        
-        caption = "✅ **Анализ завершен!**\n\n"
-        
-        # Определяем обфускатор
-        if "Obfuscator: " in result_text:
-            obf_match = result_text.split("Obfuscator: ")[1].split("\n")[0]
-            caption += f"🔍 Обфускатор: `{obf_match}`\n"
-        
-        # Проверяем наличие данных
-        if "REMOTE SPY" in result_text:
-            caption += "📡 RemoteSpy: найдены вызовы\n"
-        if "EXTRACTED STRINGS" in result_text:
-            caption += "🔤 Строки: извлечены\n"
-        if "DECOMPILED SOURCE" in result_text:
-            caption += "📜 Код: декомпилирован\n"
-        
-        caption += f"\n📊 Размер отчета: {len(result_data) // 1024} КБ"
-
-        out_file = FSInputFile(output_path)
-        await message.answer_document(
-            out_file,
-            caption=caption,
-            parse_mode="Markdown"
-        )
-        
-        # Удаляем статусное сообщение
-        try:
-            await status_msg.delete()
-        except:
-            pass
-
-        logger.info(f"✅ Successfully processed: {file_name}")
-
-    except asyncio.TimeoutError:
-        await status_msg.edit_text(
-            "❌ **Ошибка:** Таймаут (>120 сек)\n\n"
-            "Скрипт слишком сложный или зациклился.",
-            parse_mode="Markdown"
-        )
-        logger.warning(f"Timeout for {file_name}")
-
-    except Exception as e:
-        logger.error(f"Error processing {file_name}: {e}", exc_info=True)
-        try:
-            await status_msg.edit_text(
-                "❌ **Внутренняя ошибка**\n\n"
-                "Попробуйте другой файл или обратитесь к администратору.",
-                parse_mode="Markdown"
-            )
-        except:
-            pass
-
+        yield
+        if is_timeout[0]:
+            raise TimeoutException("Execution timeout")
     finally:
-        # Очистка
-        for p in [input_path, output_path]:
-            if os.path.exists(p):
-                try:
-                    os.remove(p)
-                except Exception as e:
-                    logger.warning(f"Failed to delete {p}: {e}")
+        timer.cancel()
 
-# === ОБРАБОТКА ТЕКСТА ===
+class DeobfuscatorEngine:
+    def __init__(self):
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        self.unluac_path = os.path.join(base_dir, "unluac.jar")
+        logger.info(f"📁 Working Dir: {base_dir}")
+        
+        # Расширенные паттерны обфускаторов
+        self.obfuscator_patterns = {
+            'PSU': rb'PSU|Psu Obfuscator|wOwOwOwOwO|PSU_HEADER',
+            'MoonSec': rb'MoonSec|v3rm\.moonsec|MOONSEC_|Rerubi',
+            'IronBrew': rb'IronBrew|Ironbrew2|IRONBREW',
+            'Luraph': rb'Luraph|LPH_|LURAPH_',
+            'Prometheus': rb'Prometheus|PROMETHEUS|Prometheus Obfuscator',
+            'Synapse': rb'syn\.protect|syn_context|synapse',
+            'WRD': rb'WRD Scripts|wrd_obf',
+            'Vmify': rb'vmify|VM_ENV'
+        }
 
-@dp.message(F.text & ~F.text.startswith('/'))
-async def handle_text(message: types.Message):
-    """Обработка прямого кода"""
-    if len(message.text) < 100:
-        await message.answer(
-            "💡 Отправьте файл `.lua` или `.txt` для анализа.\n"
-            "Используйте /start для помощи."
-        )
-        return
-    
-    # Создаем временный файл
-    unique_id = uuid.uuid4().hex[:8]
-    temp_file = f"temp_text_{unique_id}.lua"
-    
-    with open(temp_file, "w", encoding="utf-8") as f:
-        f.write(message.text)
-    
-    # Отправляем как документ для обработки
-    doc = FSInputFile(temp_file, filename="code.lua")
-    await message.answer_document(doc)
-    
-    os.remove(temp_file)
+    def detect_obfuscator(self, content):
+        """Определяет тип обфускатора с улучшенной эвристикой"""
+        if isinstance(content, str):
+            content = content.encode('utf-8', errors='ignore')
+        
+        # Прямое совпадение по паттернам
+        for name, pattern in self.obfuscator_patterns.items():
+            if re.search(pattern, content, re.IGNORECASE):
+                logger.info(f"🎯 Detected by pattern: {name}")
+                return name
+        
+        # Эвристический анализ
+        text = content[:5000].decode('utf-8', errors='ignore')
+        
+        # PSU признаки
+        if 'local function(' in text and text.count('local') > 50:
+            if re.search(r'\[\d+\]\s*=\s*\d+', text):
+                return "PSU (heuristic)"
+        
+        # MoonSec признаки
+        if 'bit.bxor' in text or 'bit32.bxor' in text:
+            if text.count('local') > 30:
+                return "MoonSec (heuristic)"
+        
+        # IronBrew признаки
+        if 'Instruction' in text and 'Deserialize' in text:
+            return "IronBrew (heuristic)"
+        
+        # Luraph признаки
+        if re.search(r'____[A-Z]+____', text):
+            return "Luraph (heuristic)"
+        
+        return "Unknown"
 
-# === MAIN ===
+    def process(self, content, status_callback=None):
+        def update_status(msg):
+            if status_callback: 
+                status_callback(msg)
+            logger.info(f"[STATUS] {msg}")
 
-async def main():
-    logger.info("🚀 Bot starting...")
-    logger.info(f"Engine initialized with unluac at: {engine.unluac_path}")
-    
-    await bot.delete_webhook(drop_pending_updates=True)
-    
-    try:
-        await dp.start_polling(bot, allowed_updates=["message", "callback_query"])
-    except Exception as e:
-        logger.error(f"Fatal error: {e}", exc_info=True)
+        if not self._check_java():
+            return b"-- [FATAL] Java is missing. Install Java to use unluac."
 
-if __name__ == "__main__":
-    try:
-        if os.name == 'nt':
-            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("Bot stopped by user")
+        # Детект обфускатора
+        obf_type = self.detect_obfuscator(content)
+        update_status(f"🔍 Detected: {obf_type}")
+
+        # Предобработка
+        content = self._preprocess_code(content)
+
+        update_status("🧠 Initializing Enhanced Roblox VM...")
+
+        try:
+            lua = LuaRuntime(unpack_returned_tuples=True, encoding=None)
+        except Exception as e:
+            return f"-- [FATAL] Lua init error: {e}".encode('utf-8')
+
+        # ==========================================
+        # МАКСИМАЛЬНО ПОЛНАЯ ROBLOX СРЕДА
+        # ==========================================
+        full_setup = self._build_ultra_environment()
+
+        try:
+            update_status("🌪️ Running script with advanced hooks...")
+            
+            lua.execute(full_setup)
+            
+            # Безопасный раннер
+            runner = lua.eval("""
+                function(code)
+                    _G.EXECUTION_STARTED = true
+                    _G.EXEC_TIME_START = os.clock()
+                    
+                    local status, err = pcall(function()
+                        -- Пытаемся разные режимы загрузки
+                        local f, load_err
+                        
+                        -- Режим 1: Обычный load
+                        f, load_err = load(code, "=script", "bt", _G)
+                        
+                        -- Режим 2: Если не удалось, пробуем через loadstring
+                        if not f then
+                            f, load_err = loadstring(code)
+                        end
+                        
+                        -- Режим 3: Оборачиваем в функцию (для некоторых обфускаторов)
+                        if not f then
+                            local wrapped = "return function() " .. code .. " end"
+                            f, load_err = load(wrapped, "=script", "bt", _G)
+                            if f then f = f() end
+                        end
+                        
+                        if not f then 
+                            error("Load failed: " .. tostring(load_err)) 
+                        end
+                        
+                        -- Выполняем
+                        local result = f()
+                        
+                        -- Если вернула функцию, выполняем её тоже
+                        if type(result) == "function" then
+                            result()
+                        end
+                    end)
+                    
+                    _G.EXEC_TIME_END = os.clock()
+                    _G.EXEC_TIME = _G.EXEC_TIME_END - _G.EXEC_TIME_START
+                    
+                    if not status then
+                        table.insert(_G.ACTION_LOG, "⚠️ Script Error: " .. tostring(err))
+                    else
+                        table.insert(_G.ACTION_LOG, "✅ Execution completed in " .. string.format("%.2f", _G.EXEC_TIME) .. "s")
+                    end
+                    
+                    pcall(_G.dump_globals)
+                    _G.EXECUTION_FINISHED = true
+                    return status
+                end
+            """)
+            
+            # Запуск с таймаутом (Windows-совместимый)
+            execution_success = False
+            try:
+                # Используем threading вместо signal для Windows
+                exec_thread = threading.Thread(target=lambda: runner(content))
+                exec_thread.daemon = True
+                exec_thread.start()
+                exec_thread.join(timeout=90)  # 90 секунд макс
+                
+                if exec_thread.is_alive():
+                    update_status("⏱️ Execution timeout (90s)")
+                else:
+                    execution_success = True
+                    
+            except Exception as e:
+                logger.error(f"Execution error: {e}")
+
+            # Сбор данных
+            strings_tbl = lua.globals().DETECTED_STRINGS
+            detected_strings = list(strings_tbl) if strings_tbl else []
+            
+            global_dump = list(lua.globals().FINAL_GLOBALS) if lua.globals().FINAL_GLOBALS else []
+            action_log = list(lua.globals().ACTION_LOG) if lua.globals().ACTION_LOG else []
+            
+            chunks = lua.globals().CAPTURED_CHUNKS
+            remotes = lua.globals().REMOTE_CALLS
+            http_calls = lua.globals().HTTP_CALLS
+            
+            # Анализ переменных окружения
+            env_vars = {}
+            try:
+                env_vars = dict(lua.globals().ENV_SNAPSHOT) if lua.globals().ENV_SNAPSHOT else {}
+            except:
+                pass
+            
+            # Поиск лучшего чанка
+            best_chunk = self._find_best_chunk(chunks)
+            target_code = best_chunk if best_chunk else content
+            
+            return self._finalize_output(
+                target_code, 
+                detected_strings, 
+                global_dump, 
+                action_log, 
+                list(remotes) if remotes else [], 
+                list(http_calls) if http_calls else [],
+                env_vars,
+                obf_type, 
+                update_status
+            )
+
+        except Exception as e:
+            logger.error(f"Engine Crash: {e}", exc_info=True)
+            return f"-- [CRASH ERROR]: {str(e)}\n-- Obfuscator: {obf_type}".encode('utf-8')
+
+    def _build_ultra_environment(self):
+        """МАКСИМАЛЬНО ПОЛНАЯ ЭМУЛЯЦИЯ ROBLOX"""
+        return """
+        -- ============================================
+        -- BITWISE LIBRARY (ULTRA COMPLETE)
+        -- ============================================
+        local bit = {}
+        local bit32 = {}
+        
+        function bit.tobit(x) 
+            x = x % 4294967296
+            if x >= 2147483648 then x = x - 4294967296 end
+            return x 
+        end
+        
+        function bit.tohex(x, n)
+            n = n or 8
+            local hex = string.format("%x", x)
+            return string.rep("0", n - #hex) .. hex
+        end
+        
+        function bit.bnot(x) return 4294967295 - x % 4294967296 end
+        
+        local function bit_oper(a, b, oper)
+            local r, m, s = 0, 2^31
+            repeat 
+                s, a, b = a + b + m, a % m, b % m
+                r, m = r + m * oper % (s - a - b), m / 2 
+            until m < 1
+            return r
+        end
+        
+        function bit.band(a, b) return bit_oper(a, b, 4) end
+        function bit.bor(a, b) return bit_oper(a, b, 1) end
+        function bit.bxor(a, b) return bit_oper(a, b, 3) end
+        
+        function bit.lshift(a, b) 
+            b = b % 32
+            return (a * 2^b) % 4294967296 
+        end
+        
+        function bit.rshift(a, b) 
+            b = b % 32
+            return math.floor(a / 2^b) % 4294967296 
+        end
+        
+        function bit.arshift(a, b) 
+            b = b % 32
+            local z = math.floor(a / 2^b) % 4294967296
+            if a >= 2147483648 then z = z + 4294967296 - 2^(32-b) end
+            return z
+        end
+        
+        function bit.rol(x, n) 
+            n = n % 32
+            return bit.bor(bit.lshift(x, n), bit.rshift(x, 32-n))
+        end
+        
+        function bit.ror(x, n) 
+            n = n % 32
+            return bit.bor(bit.rshift(x, n), bit.lshift(x, 32-n))
+        end
+        
+        function bit.bswap(x)
+            return bit.bor(
+                bit.lshift(bit.band(x, 0xFF), 24),
+                bit.lshift(bit.band(x, 0xFF00), 8),
+                bit.rshift(bit.band(x, 0xFF0000), 8),
+                bit.rshift(bit.band(x, 0xFF000000), 24)
+            )
+        end
+        
+        -- Копируем все в bit32
+        for k, v in pairs(bit) do bit32[k] = v end
+        
+        -- Публикуем
+        _G.bit = bit
+        _G.bit32 = bit32
+        package.loaded.bit = bit
+        package.loaded.bit32 = bit32
+
+        -- ============================================
+        -- STRING EXTENSIONS (для Luraph/PSU)
+        -- ============================================
+        local string_mt = getmetatable("")
+        local old_string_index = string_mt.__index
+        
+        string_mt.__index = function(str, key)
+            if key == "split" then
+                return function(s, delimiter)
+                    local result = {}
+                    local pattern = string.format("([^%s]+)", delimiter)
+                    for part in string.gmatch(s, pattern) do
+                        table.insert(result, part)
+                    end
+                    return result
+                end
+            end
+            return old_string_index[key]
+        end
+
+        -- ============================================
+        -- MATH EXTENSIONS
+        -- ============================================
+        math.clamp = function(x, min, max)
+            return math.max(min, math.min(max, x))
+        end
+        
+        math.sign = function(x)
+            if x > 0 then return 1
+            elseif x < 0 then return -1
+            else return 0 end
+        end
+        
+        math.round = function(x)
+            return math.floor(x + 0.5)
+        end
+
+        -- ============================================
+        -- TABLE EXTENSIONS
+        -- ============================================
+        table.create = function(count, value)
+            local t = {}
+            for i = 1, count do t[i] = value end
+            return t
+        end
+        
+        table.find = function(t, value)
+            for i, v in ipairs(t) do
+                if v == value then return i end
+            end
+            return nil
+        end
+        
+        table.clear = function(t)
+            for k in pairs(t) do t[k] = nil end
+        end
+        
+        table.freeze = function(t) return t end
+        table.isfrozen = function(t) return false end
+        
+        table.move = function(src, a, b, t, dst)
+            dst = dst or src
+            for i = 0, b - a do
+                dst[t + i] = src[a + i]
+            end
+            return dst
+        end
+
+        -- ============================================
+        -- ROBLOX DATATYPES (COMPLETE)
+        -- ============================================
+        
+        -- Signal/Event System
+        local function CreateSignal()
+            local sig = { _listeners = {}, _queue = {} }
+            
+            function sig:Connect(func)
+                local connection = {
+                    Connected = true,
+                    _func = func,
+                    _signal = sig
+                }
+                
+                function connection:Disconnect()
+                    self.Connected = false
+                    for i, conn in ipairs(sig._listeners) do
+                        if conn == self then
+                            table.remove(sig._listeners, i)
+                            break
+                        end
+                    end
+                end
+                
+                connection.disconnect = connection.Disconnect
+                
+                table.insert(sig._listeners, connection)
+                return connection
+            end
+            
+            function sig:Fire(...)
+                local args = {...}
+                for _, conn in ipairs(sig._listeners) do
+                    if conn.Connected then
+                        pcall(conn._func, unpack(args))
+                    end
+                end
+            end
+            
+            function sig:Wait()
+                local thread = coroutine.running()
+                local connection
+                connection = self:Connect(function(...)
+                    connection:Disconnect()
+                    coroutine.resume(thread, ...)
+                end)
+                return coroutine.yield()
+            end
+            
+            sig.connect = sig.Connect
+            return sig
+        end
+
+        -- Instance System
+        _G.Instance = {}
+        local InstanceRegistry = {}
+        
+        function _G.Instance.new(className, parent)
+            local obj = {
+                ClassName = className or "Part",
+                Name = className or "Part",
+                Parent = parent,
+                Archivable = true,
+                _children = {},
+                _signals = {}
+            }
+            
+            -- Signals
+            obj.Changed = CreateSignal()
+            obj.ChildAdded = CreateSignal()
+            obj.ChildRemoved = CreateSignal()
+            obj.AncestryChanged = CreateSignal()
+            obj.Destroying = CreateSignal()
+            
+            -- Methods
+            function obj:Destroy()
+                self.Destroying:Fire()
+                if self.Parent then
+                    for i, child in ipairs(self.Parent._children) do
+                        if child == self then
+                            table.remove(self.Parent._children, i)
+                            break
+                        end
+                    end
+                end
+                self.Parent = nil
+            end
+            
+            function obj:Clone()
+                return _G.Instance.new(self.ClassName, nil)
+            end
+            
+            function obj:ClearAllChildren()
+                for _, child in ipairs(self._children) do
+                    child:Destroy()
+                end
+                self._children = {}
+            end
+            
+            function obj:FindFirstChild(name, recursive)
+                for _, child in ipairs(self._children) do
+                    if child.Name == name then return child end
+                end
+                if recursive then
+                    for _, child in ipairs(self._children) do
+                        local found = child:FindFirstChild(name, true)
+                        if found then return found end
+                    end
+                end
+                return nil
+            end
+            
+            function obj:FindFirstChildOfClass(className, recursive)
+                for _, child in ipairs(self._children) do
+                    if child.ClassName == className then return child end
+                end
+                if recursive then
+                    for _, child in ipairs(self._children) do
+                        local found = child:FindFirstChildOfClass(className, true)
+                        if found then return found end
+                    end
+                end
+                return nil
+            end
+            
+            function obj:WaitForChild(name, timeout)
+                local child = self:FindFirstChild(name)
+                if child then return child end
+                return _G.Instance.new("Folder", self)
+            end
+            
+            function obj:GetChildren()
+                return self._children
+            end
+            
+            function obj:GetDescendants()
+                local desc = {}
+                for _, child in ipairs(self._children) do
+                    table.insert(desc, child)
+                    for _, d in ipairs(child:GetDescendants()) do
+                        table.insert(desc, d)
+                    end
+                end
+                return desc
+            end
+            
+            function obj:IsA(className)
+                return self.ClassName == className
+            end
+            
+            function obj:IsDescendantOf(ancestor)
+                local p = self.Parent
+                while p do
+                    if p == ancestor then return true end
+                    p = p.Parent
+                end
+                return false
+            end
+            
+            function obj:GetFullName()
+                local path = self.Name
+                local p = self.Parent
+                while p and p ~= _G.game do
+                    path = p.Name .. "." .. path
+                    p = p.Parent
+                end
+                return path
+            end
+            
+            function obj:GetService(name)
+                return _G.game:GetService(name)
+            end
+            
+            -- Properties específicas
+            if className == "RemoteEvent" or className == "RemoteFunction" then
+                obj.OnServerEvent = CreateSignal()
+                obj.OnClientEvent = CreateSignal()
+                
+                function obj:FireServer(...)
+                    local args = {...}
+                    local log_entry = "RemoteEvent:" .. self.Name .. ":FireServer(" .. table.concat(args, ", ") .. ")"
+                    table.insert(_G.REMOTE_CALLS, log_entry)
+                    table.insert(_G.ACTION_LOG, "📡 " .. log_entry)
+                    self.OnServerEvent:Fire(...)
+                end
+                
+                function obj:FireClient(player, ...)
+                    self.OnClientEvent:Fire(...)
+                end
+                
+                function obj:FireAllClients(...)
+                    self.OnClientEvent:Fire(...)
+                end
+                
+                function obj:InvokeServer(...)
+                    local args = {...}
+                    local log_entry = "RemoteFunction:" .. self.Name .. ":InvokeServer(" .. table.concat(args, ", ") .. ")"
+                    table.insert(_G.REMOTE_CALLS, log_entry)
+                    table.insert(_G.ACTION_LOG, "📡 " .. log_entry)
+                    return "MockServerResponse"
+                end
+            end
+            
+            -- Metatable
+            setmetatable(obj, {
+                __index = function(t, k)
+                    -- Свойства по умолчанию
+                    if k == "Value" then return "MockValue" end
+                    if k == "Text" then return "MockText" end
+                    if k == "Position" then return _G.Vector3.new(0,0,0) end
+                    if k == "Size" then return _G.Vector3.new(1,1,1) end
+                    if k == "CFrame" then return _G.CFrame.new() end
+                    if k == "Color" then return _G.Color3.new(1,1,1) end
+                    return rawget(t, k)
+                end,
+                __newindex = function(t, k, v)
+                    local old = rawget(t, k)
+                    rawset(t, k, v)
+                    if old ~= v then
+                        t.Changed:Fire(k)
+                    end
+                    if k == "Parent" and v then
+                        table.insert(v._children, t)
+                        v.ChildAdded:Fire(t)
+                    end
+                end,
+                __tostring = function(t) return t.Name end
+            })
+            
+            InstanceRegistry[obj] = true
+            return obj
+        end
+
+        -- Vector3
+        _G.Vector3 = {}
+        _G.Vector3.__index = _G.Vector3
+        
+        function _G.Vector3.new(x, y, z)
+            local self = setmetatable({}, _G.Vector3)
+            self.X = x or 0
+            self.Y = y or 0
+            self.Z = z or 0
+            self.x = self.X
+            self.y = self.Y
+            self.z = self.Z
+            return self
+        end
+        
+        _G.Vector3.zero = _G.Vector3.new(0, 0, 0)
+        _G.Vector3.one = _G.Vector3.new(1, 1, 1)
+        _G.Vector3.xAxis = _G.Vector3.new(1, 0, 0)
+        _G.Vector3.yAxis = _G.Vector3.new(0, 1, 0)
+        _G.Vector3.zAxis = _G.Vector3.new(0, 0, 1)
+        
+        function _G.Vector3:Dot(other)
+            return self.X * other.X + self.Y * other.Y + self.Z * other.Z
+        end
+        
+        function _G.Vector3:Cross(other)
+            return _G.Vector3.new(
+                self.Y * other.Z - self.Z * other.Y,
+                self.Z * other.X - self.X * other.Z,
+                self.X * other.Y - self.Y * other.X
+            )
+        end
+        
+        function _G.Vector3.__add(a, b)
+            return _G.Vector3.new(a.X + b.X, a.Y + b.Y, a.Z + b.Z)
+        end
+        
+        function _G.Vector3.__sub(a, b)
+            return _G.Vector3.new(a.X - b.X, a.Y - b.Y, a.Z - b.Z)
+        end
+        
+        function _G.Vector3.__mul(a, b)
+            if type(a) == "number" then
+                return _G.Vector3.new(a * b.X, a * b.Y, a * b.Z)
+            elseif type(b) == "number" then
+                return _G.Vector3.new(a.X * b, a.Y * b, a.Z * b)
+            else
+                return _G.Vector3.new(a.X * b.X, a.Y * b.Y, a.Z * b.Z)
+            end
+        end
+        
+        function _G.Vector3.__div(a, b)
+            if type(b) == "number" then
+                return _G.Vector3.new(a.X / b, a.Y / b, a.Z / b)
+            end
+            return _G.Vector3.new(a.X / b.X, a.Y / b.Y, a.Z / b.Z)
+        end
+        
+        function _G.Vector3.__unm(a)
+            return _G.Vector3.new(-a.X, -a.Y, -a.Z)
+        end
+        
+        function _G.Vector3.__eq(a, b)
+            return a.X == b.X and a.Y == b.Y and a.Z == b.Z
+        end
+        
+        function _G.Vector3.__tostring(a)
+            return string.format("%g, %g, %g", a.X, a.Y, a.Z)
+        end
+
+        -- Vector2
+        _G.Vector2 = {}
+        _G.Vector2.__index = _G.Vector2
+        
+        function _G.Vector2.new(x, y)
+            return setmetatable({X = x or 0, Y = y or 0}, _G.Vector2)
+        end
+        
+        _G.Vector2.zero = _G.Vector2.new(0, 0)
+        _G.Vector2.one = _G.Vector2.new(1, 1)
+
+        -- CFrame
+        _G.CFrame = {}
+        _G.CFrame.__index = _G.CFrame
+        
+        function _G.CFrame.new(...)
+            local args = {...}
+            local self = setmetatable({}, _G.CFrame)
+            
+            if #args == 0 then
+                self.X, self.Y, self.Z = 0, 0, 0
+            elseif #args == 3 then
+                self.X, self.Y, self.Z = args[1], args[2], args[3]
+            elseif #args == 6 then
+                self.X, self.Y, self.Z = args[1], args[2], args[3]
+            end
+            
+            self.Position = _G.Vector3.new(self.X or 0, self.Y or 0, self.Z or 0)
+            return self
+        end
+        
+        _G.CFrame.Angles = function(rx, ry, rz)
+            return _G.CFrame.new(0, 0, 0)
+        end
+        
+        _G.CFrame.fromEulerAnglesXYZ = _G.CFrame.Angles
+        _G.CFrame.fromAxisAngle = function(v, r) return _G.CFrame.new() end
+        
+        function _G.CFrame:Inverse()
+            return _G.CFrame.new(-self.X, -self.Y, -self.Z)
+        end
+        
+        function _G.CFrame:ToWorldSpace(cf)
+            return self
+        end
+        
+        function _G.CFrame:ToObjectSpace(cf)
+            return self
+        end
+        
+        function _G.CFrame:GetComponents()
+            return 0,0,0,1,0,0,0,1,0,0,0,1
+        end
+        
+        function _G.CFrame.__mul(a, b)
+            if type(b) == "table" and b.X then
+                return _G.Vector3.new(b.X, b.Y, b.Z)
+            end
+            return a
+        end
+        
+        function _G.CFrame.__add(a, b)
+            return _G.CFrame.new(a.X + b.X, a.Y + b.Y, a.Z + b.Z)
+        end
+        
+        function _G.CFrame.__sub(a, b)
+            return _G.CFrame.new(a.X - b.X, a.Y - b.Y, a.Z - b.Z)
+        end
+
+        -- UDim2
+        _G.UDim2 = {}
+        _G.UDim2.__index = _G.UDim2
+        
+        function _G.UDim2.new(xScale, xOffset, yScale, yOffset)
+            return setmetatable({
+                X = {Scale = xScale or 0, Offset = xOffset or 0},
+                Y = {Scale = yScale or 0, Offset = yOffset or 0}
+            }, _G.UDim2)
+        end
+        
+        _G.UDim2.fromScale = function(x, y) return _G.UDim2.new(x, 0, y, 0) end
+        _G.UDim2.fromOffset = function(x, y) return _G.UDim2.new(0, x, 0, y) end
+
+        -- Color3
+        _G.Color3 = {}
+        _G.Color3.__index = _G.Color3
+        
+        function _G.Color3.new(r, g, b)
+            return setmetatable({R = r or 0, G = g or 0, B = b or 0}, _G.Color3)
+        end
+        
+        function _G.Color3.fromRGB(r, g, b)
+            return _G.Color3.new(r/255, g/255, b/255)
+        end
+        
+        function _G.Color3.fromHSV(h, s, v)
+            return _G.Color3.new(1, 1, 1)
+        end
+
+        -- Enum
+        _G.Enum = setmetatable({}, {
+            __index = function(t, k)
+                return setmetatable({}, {
+                    __index = function(tt, kk)
+                        return {Name = kk, Value = 0, EnumType = k}
+                    end
+                })
+            end
+        })
+
+        -- ============================================
+        -- TASK LIBRARY
+        -- ============================================
+        _G.task = {
+            wait = function(duration)
+                return duration or 0
+            end,
+            
+            spawn = function(func, ...)
+                local args = {...}
+                pcall(function() func(unpack(args)) end)
+            end,
+            
+            defer = function(func, ...)
+                local args = {...}
+                pcall(function() func(unpack(args)) end)
+            end,
+            
+            delay = function(duration, func, ...)
+                local args = {...}
+                pcall(function() func(unpack(args)) end)
+            end,
+            
+            desynchronize = function() end,
+            synchronize = function() end,
+            cancel = function() end
+        }
+        
+        _G.wait = _G.task.wait
+        _G.spawn = _G.task.spawn 
