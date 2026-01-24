@@ -819,4 +819,411 @@ class DeobfuscatorEngine:
         }
         
         _G.wait = _G.task.wait
-        _G.spawn = _G.task.spawn 
+        _G.spawn = _G.task.spawn
+        _G.delay = _G.task.delay
+
+        -- ============================================
+        -- GAME STRUCTURE (ULTRA COMPLETE)
+        -- ============================================
+        _G.game = _G.Instance.new("DataModel")
+        _G.game.Name = "Game"
+        _G.game.JobId = "MockJobId_" .. tostring(math.random(100000, 999999))
+        _G.game.PlaceId = 123456789
+        _G.game.GameId = 123456
+        _G.game.PlaceVersion = 1
+        
+        local Services = {}
+        
+        function _G.game:GetService(serviceName)
+            if not Services[serviceName] then
+                Services[serviceName] = _G.Instance.new(serviceName, self)
+                Services[serviceName].Name = serviceName
+            end
+            return Services[serviceName]
+        end
+        
+        -- Players Service
+        local Players = _G.game:GetService("Players")
+        Players.LocalPlayer = _G.Instance.new("Player", Players)
+        Players.LocalPlayer.Name = "DeobfuscatorPlayer"
+        Players.LocalPlayer.UserId = 123456789
+        Players.LocalPlayer.AccountAge = 365
+        Players.LocalPlayer.CharacterAppearanceId = 123456789
+        
+        -- Character
+        Players.LocalPlayer.Character = _G.Instance.new("Model", _G.game:GetService("Workspace"))
+        Players.LocalPlayer.Character.Name = "DeobfuscatorPlayer"
+        
+        local Humanoid = _G.Instance.new("Humanoid", Players.LocalPlayer.Character)
+        Humanoid.Health = 100
+        Humanoid.MaxHealth = 100
+        Humanoid.WalkSpeed = 16
+        Humanoid.JumpPower = 50
+        
+        local HumanoidRootPart = _G.Instance.new("Part", Players.LocalPlayer.Character)
+        HumanoidRootPart.Name = "HumanoidRootPart"
+        HumanoidRootPart.Position = _G.Vector3.new(0, 5, 0)
+        HumanoidRootPart.CFrame = _G.CFrame.new(0, 5, 0)
+        
+        Players.LocalPlayer.Character.PrimaryPart = HumanoidRootPart
+        
+        -- Methods
+        function Players:GetPlayers()
+            return {self.LocalPlayer}
+        end
+        
+        function Players.LocalPlayer:Kick(message)
+            table.insert(_G.ACTION_LOG, "🚫 Player Kicked: " .. tostring(message))
+        end
+        
+        -- RunService
+        local RunService = _G.game:GetService("RunService")
+        RunService.RenderStepped = CreateSignal()
+        RunService.Heartbeat = CreateSignal()
+        RunService.Stepped = CreateSignal()
+        
+        function RunService:IsClient() return true end
+        function RunService:IsServer() return false end
+        function RunService:IsStudio() return false end
+        
+        -- HttpService
+        local HttpService = _G.game:GetService("HttpService")
+        HttpService.HttpEnabled = true
+        
+        function HttpService:JSONEncode(data)
+            return "{}"
+        end
+        
+        function HttpService:JSONDecode(json)
+            return {}
+        end
+        
+        function HttpService:GetAsync(url, nocache, headers)
+            table.insert(_G.HTTP_CALLS, "GET: " .. tostring(url))
+            table.insert(_G.ACTION_LOG, "🌍 HttpService:GetAsync(" .. tostring(url) .. ")")
+            return "<MockResponse>"
+        end
+        
+        function HttpService:PostAsync(url, data, content_type, compress, headers)
+            table.insert(_G.HTTP_CALLS, "POST: " .. tostring(url))
+            table.insert(_G.ACTION_LOG, "🌍 HttpService:PostAsync(" .. tostring(url) .. ")")
+            return "<MockResponse>"
+        end
+        
+        function HttpService:RequestAsync(options)
+            local url = options.Url or "unknown"
+            table.insert(_G.HTTP_CALLS, (options.Method or "GET") .. ": " .. url)
+            return {Success = true, StatusCode = 200, Body = "<MockResponse>"}
+        end
+        
+        -- UserInputService
+        local UserInputService = _G.game:GetService("UserInputService")
+        UserInputService.InputBegan = CreateSignal()
+        UserInputService.InputEnded = CreateSignal()
+        UserInputService.TouchEnabled = false
+        UserInputService.KeyboardEnabled = true
+        UserInputService.MouseEnabled = true
+        UserInputService.GamepadEnabled = false
+        
+        -- Workspace
+        _G.workspace = _G.game:GetService("Workspace")
+        _G.workspace.CurrentCamera = _G.Instance.new("Camera", _G.workspace)
+        _G.workspace.CurrentCamera.CFrame = _G.CFrame.new(0, 10, 20)
+        
+        -- ReplicatedStorage
+        local ReplicatedStorage = _G.game:GetService("ReplicatedStorage")
+        
+        -- StarterGui
+        local StarterGui = _G.game:GetService("StarterGui")
+        function StarterGui:SetCore(action, value)
+            table.insert(_G.ACTION_LOG, "🎮 SetCore(" .. tostring(action) .. ")")
+        end
+        
+        -- TeleportService
+        local TeleportService = _G.game:GetService("TeleportService")
+        function TeleportService:Teleport(placeId, player)
+            table.insert(_G.ACTION_LOG, "🚀 Teleport to PlaceId: " .. tostring(placeId))
+        end
+        
+        -- MarketplaceService
+        local MarketplaceService = _G.game:GetService("MarketplaceService")
+        function MarketplaceService:PromptPurchase(player, assetId)
+            table.insert(_G.ACTION_LOG, "💰 PromptPurchase: " .. tostring(assetId))
+        end
+        
+        -- Script context
+        _G.script = _G.Instance.new("LocalScript", Players.LocalPlayer.Character)
+        _G.script.Name = "DeobfuscatorScript"
+
+        -- ============================================
+        -- EXECUTOR ENVIRONMENT
+        -- ============================================
+        _G.getgenv = function() return _G end
+        _G.getrenv = function() return _G end
+        _G.getfenv = getfenv
+        _G.setfenv = setfenv
+        _G.getreg = function() return {} end
+        _G.getgc = function() return {} end
+        _G.getloadedmodules = function() return {} end
+        _G.getrunningscripts = function() return {_G.script} end
+        _G.getnilinstances = function() return {} end
+        _G.getinstances = function() return {} end
+        _G.getscripts = function() return {_G.script} end
+        
+        _G.checkcaller = function() return true end
+        _G.islclosure = function(f) return type(f) == "function" end
+        _G.iscclosure = function(f) return false end
+        _G.newcclosure = function(f) return f end
+        _G.clonefunction = function(f) return f end
+        
+        _G.hookfunction = function(target, hook)
+            return target
+        end
+        
+        _G.hookmetamethod = function(obj, method, hook)
+            return function() end
+        end
+        
+        _G.getnamecallmethod = function()
+            return "FireServer"
+        end
+        
+        _G.getcallingscript = function()
+            return _G.script
+        end
+        
+        _G.getrawmetatable = function(obj)
+            return getmetatable(obj) or {}
+        end
+        
+        _G.setrawmetatable = function(obj, mt)
+            return setmetatable(obj, mt)
+        end
+        
+        _G.setreadonly = function(t, readonly) end
+        _G.isreadonly = function(t) return false end
+        
+        _G.getupvalue = function(f, i) return nil end
+        _G.setupvalue = function(f, i, v) end
+        _G.getupvalues = function(f) return {} end
+        _G.getconstant = function(f, i) return nil end
+        _G.setconstant = function(f, i, v) end
+        _G.getconstants = function(f) return {} end
+        
+        _G.getinfo = debug.getinfo or function() return {} end
+        _G.debug = {
+            getinfo = _G.getinfo,
+            getupvalue = function() end,
+            setupvalue = function() end,
+            getlocal = function() end,
+            setlocal = function() end
+        }
+
+        -- ============================================
+        -- ADVANCED HOOKS & SPY SYSTEM
+        -- ============================================
+        _G.CAPTURED_CHUNKS = {}
+        _G.DETECTED_STRINGS = {}
+        _G.ACTION_LOG = {}
+        _G.FINAL_GLOBALS = {}
+        _G.REMOTE_CALLS = {}
+        _G.HTTP_CALLS = {}
+        _G.ENV_SNAPSHOT = {}
+        
+        local function log(msg)
+            if #_G.ACTION_LOG < 2000 then
+                table.insert(_G.ACTION_LOG, tostring(msg))
+            end
+        end
+        
+        local function capture_string(s)
+            if type(s) == "string" and #s > 2 and #s < 50000 then
+                -- Фильтруем технический мусор
+                if not s:match("^%s*$") and 
+                   not s:match("stack") and 
+                   not s:match("upvalue") and
+                   not s:match("^[%c%z]+$") then
+                    _G.DETECTED_STRINGS[s] = true
+                end
+            end
+            return s
+        end
+        
+        -- Hook: string.char (для MoonSec/IronBrew дешифровки)
+        local real_char = string.char
+        string.char = function(...)
+            local args = {...}
+            local result = real_char(...)
+            capture_string(result)
+            
+            -- Спец логика для длинных последовательностей
+            if #args > 10 then
+                log("🔐 string.char called with " .. #args .. " bytes")
+            end
+            
+            return result
+        end
+        
+        -- Hook: string.byte
+        local real_byte = string.byte
+        string.byte = function(s, i, j)
+            capture_string(s)
+            return real_byte(s, i, j)
+        end
+        
+        -- Hook: string.sub
+        local real_sub = string.sub
+        string.sub = function(s, i, j)
+            capture_string(s)
+            return real_sub(s, i, j)
+        end
+        
+        -- Hook: string.reverse
+        local real_reverse = string.reverse
+        string.reverse = function(s)
+            capture_string(s)
+            local result = real_reverse(s)
+            capture_string(result)
+            return result
+        end
+        
+        -- Hook: table.concat
+        local real_concat = table.concat
+        table.concat = function(t, sep, i, j)
+            local result = real_concat(t, sep, i, j)
+            capture_string(result)
+            return result
+        end
+        
+        -- Hook: load/loadstring (критично!)
+        local real_load = load
+        local load_call_count = 0
+        
+        local function enhanced_load(chunk, chunkname, mode, env)
+            load_call_count = load_call_count + 1
+            
+            if type(chunk) == "string" then
+                local size = #chunk
+                
+                -- Захватываем только значимые чанки
+                if size > 100 and size < 10000000 then
+                    table.insert(_G.CAPTURED_CHUNKS, {
+                        data = chunk,
+                        size = size,
+                        type = "string",
+                        call_number = load_call_count,
+                        is_bytecode = chunk:sub(1, 4) == "\27Lua"
+                    })
+                    
+                    log(string.format("🔥 Captured Chunk #%d: %d bytes %s", 
+                        load_call_count, 
+                        size,
+                        chunk:sub(1, 4) == "\27Lua" and "(BYTECODE)" or "(SOURCE)"
+                    ))
+                end
+                
+                -- Анализируем содержимое
+                if size > 50 and size < 5000 then
+                    local preview = chunk:sub(1, 200):gsub("[%c%z]", "?")
+                    if preview:match("[%w_]+") then
+                        capture_string(preview)
+                    end
+                end
+            elseif type(chunk) == "function" then
+                log("🔥 load() called with function chunk")
+            end
+            
+            return real_load(chunk, chunkname, mode, env or _G)
+        end
+        
+        _G.load = enhanced_load
+        _G.loadstring = enhanced_load
+        
+        -- Hook: require (для модульных обфускаторов)
+        local real_require = require
+        _G.require = function(module)
+            log("📦 require(" .. tostring(module) .. ")")
+            
+            -- Безопасный require
+            local success, result = pcall(real_require, module)
+            if success then
+                return result
+            else
+                -- Возвращаем мок если модуль не найден
+                return {}
+            end
+        end
+        
+        -- Hook: getfenv/setfenv
+        local real_getfenv = getfenv
+        local real_setfenv = setfenv
+        
+        getfenv = function(level)
+            if type(level) == "function" then
+                return real_getfenv(level)
+            end
+            return _G
+        end
+        
+        setfenv = function(level, env)
+            log("🔧 setfenv called")
+            if type(level) == "function" then
+                return real_setfenv(level, env)
+            end
+            return level
+        end
+        
+        -- Hook: pcall/xpcall для отслеживания ошибок
+        local real_pcall = pcall
+        pcall = function(func, ...)
+            local results = {real_pcall(func, ...)}
+            if not results[1] then
+                log("⚠️ pcall error: " .. tostring(results[2]))
+            end
+            return unpack(results)
+        end
+
+        -- ============================================
+        -- ENVIRONMENT SNAPSHOT
+        -- ============================================
+        function _G.dump_globals()
+            local ignore_list = {
+                -- Lua стандарт
+                string=1, math=1, table=1, bit=1, bit32=1, coroutine=1, debug=1,
+                pairs=1, ipairs=1, next=1, _G=1, _VERSION=1, package=1,
+                -- Roblox API
+                Instance=1, Vector3=1, Vector2=1, CFrame=1, UDim2=1, Color3=1,
+                Enum=1, task=1, game=1, workspace=1, script=1,
+                -- Системные
+                print=1, warn=1, error=1, assert=1, tostring=1, tonumber=1,
+                type=1, pcall=1, xpcall=1, select=1, unpack=1, rawget=1, rawset=1,
+                setmetatable=1, getmetatable=1, require=1, load=1, loadstring=1,
+                getfenv=1, setfenv=1, wait=1, spawn=1, delay=1,
+                -- Executor
+                getgenv=1, getrenv=1, getreg=1, getgc=1, checkcaller=1
+            }
+            
+            local snapshot = {}
+            local count = 0
+            
+            for k, v in pairs(_G) do
+                if not ignore_list[k] and count < 200 then
+                    local t = type(v)
+                    if t == "string" or t == "number" or t == "boolean" then
+                        local entry = tostring(k) .. " = " .. tostring(v)
+                        if #entry < 500 then
+                            table.insert(_G.FINAL_GLOBALS, entry)
+                            snapshot[k] = v
+                            count = count + 1
+                        end
+                    elseif t == "function" then
+                        table.insert(_G.FINAL_GLOBALS, tostring(k) .. " = function")
+                        count = count + 1
+                    end
+                end
+            end
+            
+            _G.ENV_SNAPSHOT = snapshot
+            log("📸 Environment snapshot: " .. count .. " globals")
+        end
+        """
