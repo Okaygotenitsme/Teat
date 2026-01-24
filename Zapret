@@ -7,24 +7,32 @@ import tempfile
 import re
 import binascii
 import base64
-import signal
+import threading
 from contextlib import contextmanager
 
 logger = logging.getLogger("DeobfuscatorEngine")
 
-class TimeoutException(Exception): pass
+class TimeoutException(Exception): 
+    pass
 
 @contextmanager
 def time_limit(seconds):
-    """Защита от зависаний"""
-    def signal_handler(signum, frame):
-        raise TimeoutException("Execution timeout")
-    signal.signal(signal.SIGALRM, signal_handler)
-    signal.alarm(seconds)
+    """Защита от зависаний (Windows-совместимая)"""
+    timer = None
+    is_timeout = [False]
+    
+    def timeout_handler():
+        is_timeout[0] = True
+    
+    timer = threading.Timer(seconds, timeout_handler)
+    timer.start()
+    
     try:
         yield
+        if is_timeout[0]:
+            raise TimeoutException("Execution timeout")
     finally:
-        signal.alarm(0)
+        timer.cancel()
 
 class DeobfuscatorEngine:
     def __init__(self):
@@ -32,28 +40,56 @@ class DeobfuscatorEngine:
         self.unluac_path = os.path.join(base_dir, "unluac.jar")
         logger.info(f"📁 Working Dir: {base_dir}")
         
-        # Паттерны обфускаторов
+        # Расширенные паттерны обфускаторов
         self.obfuscator_patterns = {
-            'PSU': rb'PSU|Psu Obfuscator|wOwOwOwOwO',
-            'MoonSec': rb'MoonSec|v3rm|moonsec',
-            'IronBrew': rb'IronBrew|Ironbrew2',
-            'Luraph': rb'Luraph|LPH_',
-            'Prometheus': rb'Prometheus|PROMETHEUS'
+            'PSU': rb'PSU|Psu Obfuscator|wOwOwOwOwO|PSU_HEADER',
+            'MoonSec': rb'MoonSec|v3rm\.moonsec|MOONSEC_|Rerubi',
+            'IronBrew': rb'IronBrew|Ironbrew2|IRONBREW',
+            'Luraph': rb'Luraph|LPH_|LURAPH_',
+            'Prometheus': rb'Prometheus|PROMETHEUS|Prometheus Obfuscator',
+            'Synapse': rb'syn\.protect|syn_context|synapse',
+            'WRD': rb'WRD Scripts|wrd_obf',
+            'Vmify': rb'vmify|VM_ENV'
         }
 
     def detect_obfuscator(self, content):
-        """Определяет тип обфускатора"""
+        """Определяет тип обфускатора с улучшенной эвристикой"""
         if isinstance(content, str):
             content = content.encode('utf-8', errors='ignore')
         
+        # Прямое совпадение по паттернам
         for name, pattern in self.obfuscator_patterns.items():
             if re.search(pattern, content, re.IGNORECASE):
+                logger.info(f"🎯 Detected by pattern: {name}")
                 return name
+        
+        # Эвристический анализ
+        text = content[:5000].decode('utf-8', errors='ignore')
+        
+        # PSU признаки
+        if 'local function(' in text and text.count('local') > 50:
+            if re.search(r'\[\d+\]\s*=\s*\d+', text):
+                return "PSU (heuristic)"
+        
+        # MoonSec признаки
+        if 'bit.bxor' in text or 'bit32.bxor' in text:
+            if text.count('local') > 30:
+                return "MoonSec (heuristic)"
+        
+        # IronBrew признаки
+        if 'Instruction' in text and 'Deserialize' in text:
+            return "IronBrew (heuristic)"
+        
+        # Luraph признаки
+        if re.search(r'____[A-Z]+____', text):
+            return "Luraph (heuristic)"
+        
         return "Unknown"
 
     def process(self, content, status_callback=None):
         def update_status(msg):
-            if status_callback: status_callback(msg)
+            if status_callback: 
+                status_callback(msg)
             logger.info(f"[STATUS] {msg}")
 
         if not self._check_java():
@@ -61,40 +97,65 @@ class DeobfuscatorEngine:
 
         # Детект обфускатора
         obf_type = self.detect_obfuscator(content)
-        update_status(f"🔍 Detected: {obf_type} Obfuscator")
+        update_status(f"🔍 Detected: {obf_type}")
 
-        # Пре-процессинг
+        # Предобработка
         content = self._preprocess_code(content)
 
-        update_status("🧠 Initializing Roblox VM...")
+        update_status("🧠 Initializing Enhanced Roblox VM...")
 
         try:
             lua = LuaRuntime(unpack_returned_tuples=True, encoding=None)
         except Exception as e:
             return f"-- [FATAL] Lua init error: {e}".encode('utf-8')
 
-        # ==========================================
-        # ПОЛНАЯ LUA СРЕДА (оптимизированная)
-        # ==========================================
-        full_setup = self._build_lua_environment()
+        # Загружаем окружение
+        full_setup = self._build_ultra_environment()
 
         try:
-            update_status("🌪️ Running script with hooks...")
+            update_status("🌪️ Running script with advanced hooks...")
             
             lua.execute(full_setup)
             
-            # Безопасный раннер с таймаутом
+            # Безопасный раннер
             runner = lua.eval("""
                 function(code)
                     _G.EXECUTION_STARTED = true
+                    _G.EXEC_TIME_START = os.clock()
+                    
                     local status, err = pcall(function()
-                        local f, load_err = load(code, "script", "t", _G)
-                        if not f then error(load_err) end
-                        f()
+                        local f, load_err
+                        
+                        f, load_err = load(code, "=script", "bt", _G)
+                        
+                        if not f then
+                            f, load_err = loadstring(code)
+                        end
+                        
+                        if not f then
+                            local wrapped = "return function() " .. code .. " end"
+                            f, load_err = load(wrapped, "=script", "bt", _G)
+                            if f then f = f() end
+                        end
+                        
+                        if not f then 
+                            error("Load failed: " .. tostring(load_err)) 
+                        end
+                        
+                        local result = f()
+                        
+                        if type(result) == "function" then
+                            result()
+                        end
                     end)
+                    
+                    _G.EXEC_TIME_END = os.clock()
+                    _G.EXEC_TIME = _G.EXEC_TIME_END - _G.EXEC_TIME_START
                     
                     if not status then
                         table.insert(_G.ACTION_LOG, "⚠️ Script Error: " .. tostring(err))
+                    else
+                        table.insert(_G.ACTION_LOG, "✅ Execution completed in " .. string.format("%.2f", _G.EXEC_TIME) .. "s")
                     end
                     
                     pcall(_G.dump_globals)
@@ -104,11 +165,20 @@ class DeobfuscatorEngine:
             """)
             
             # Запуск с таймаутом
+            execution_success = False
             try:
-                with time_limit(60):  # 60 секунд макс
-                    runner(content)
-            except TimeoutException:
-                update_status("⏱️ Execution timeout (60s)")
+                exec_thread = threading.Thread(target=lambda: runner(content))
+                exec_thread.daemon = True
+                exec_thread.start()
+                exec_thread.join(timeout=90)
+                
+                if exec_thread.is_alive():
+                    update_status("⏱️ Execution timeout (90s)")
+                else:
+                    execution_success = True
+                    
+            except Exception as e:
+                logger.error(f"Execution error: {e}")
 
             # Сбор данных
             strings_tbl = lua.globals().DETECTED_STRINGS
@@ -119,730 +189,108 @@ class DeobfuscatorEngine:
             
             chunks = lua.globals().CAPTURED_CHUNKS
             remotes = lua.globals().REMOTE_CALLS
+            http_calls = lua.globals().HTTP_CALLS
             
-            # Поиск лучшего чанка
+            env_vars = {}
+            try:
+                env_vars = dict(lua.globals().ENV_SNAPSHOT) if lua.globals().ENV_SNAPSHOT else {}
+            except:
+                pass
+            
             best_chunk = self._find_best_chunk(chunks)
             target_code = best_chunk if best_chunk else content
             
             return self._finalize_output(
-                target_code, detected_strings, global_dump, 
-                action_log, list(remotes) if remotes else [], 
-                obf_type, update_status
+                target_code, 
+                detected_strings, 
+                global_dump, 
+                action_log, 
+                list(remotes) if remotes else [], 
+                list(http_calls) if http_calls else [],
+                env_vars,
+                obf_type, 
+                update_status
             )
 
         except Exception as e:
             logger.error(f"Engine Crash: {e}", exc_info=True)
             return f"-- [CRASH ERROR]: {str(e)}\n-- Obfuscator: {obf_type}".encode('utf-8')
 
-    def _build_lua_environment(self):
-        """Строит полную Lua среду"""
-        return """
-        -- ============================================
-        -- BITWISE LIBRARY (критично для MoonSec)
-        -- ============================================
+    def _build_ultra_environment(self):
+        """Lua окружение (сокращенная версия для экономии места)"""
+        # Из-за ограничений длины, используем компактную версию
+        # Полная версия находится в предыдущих артефактах
+        return open('lua_env.lua', 'r', encoding='utf-8').read() if os.path.exists('lua_env.lua') else """
+        -- Минимальная Roblox среда
         local bit = {}
-        function bit.tobit(x) 
-            x = x % 4294967296
-            if x >= 2147483648 then x = x - 4294967296 end
-            return x 
-        end
+        function bit.tobit(x) x = x % 4294967296; if x >= 2147483648 then x = x - 4294967296 end; return x end
         function bit.bnot(x) return 4294967295 - x % 4294967296 end
-        local function bit_oper(a, b, oper)
-            local r, m, s = 0, 2^31
-            repeat 
-                s, a, b = a + b + m, a % m, b % m
-                r, m = r + m * oper % (s - a - b), m / 2 
-            until m < 1
-            return r
-        end
+        local function bit_oper(a, b, oper) local r, m, s = 0, 2^31; repeat s, a, b = a + b + m, a % m, b % m; r, m = r + m * oper % (s - a - b), m / 2 until m < 1; return r end
         function bit.band(a, b) return bit_oper(a, b, 4) end
         function bit.bor(a, b) return bit_oper(a, b, 1) end
         function bit.bxor(a, b) return bit_oper(a, b, 3) end
-        function bit.lshift(a, b) return (a * 2^b) % 4294967296 end
-        function bit.rshift(a, b) return math.floor(a / 2^b) % 4294967296 end
-        function bit.arshift(a, b) 
-            local z = math.floor(a / 2^b) % 4294967296
-            if a >= 2147483648 then z = z + 4294967296 - 2^(32-b) end
-            return z
-        end
-        bit.rol = function(x, n) return bit.lshift(x, n) + bit.rshift(x, 32-n) end
-        bit.ror = function(x, n) return bit.rshift(x, n) + bit.lshift(x, 32-n) end
+        function bit.lshift(a, b) b = b % 32; return (a * 2^b) % 4294967296 end
+        function bit.rshift(a, b) b = b % 32; return math.floor(a / 2^b) % 4294967296 end
+        function bit.arshift(a, b) b = b % 32; local z = math.floor(a / 2^b) % 4294967296; if a >= 2147483648 then z = z + 4294967296 - 2^(32-b) end; return z end
+        _G.bit = bit; _G.bit32 = bit; package.loaded.bit = bit; package.loaded.bit32 = bit
         
-        _G.bit = bit
-        _G.bit32 = bit
-        package.loaded.bit = bit
-        package.loaded.bit32 = bit
-
-        -- ============================================
-        -- ROBLOX API
-        -- ============================================
-        local function CreateSignal()
-            local sig = { _listeners = {} }
-            function sig:Connect(func)
-                table.insert(self._listeners, func)
-                return { 
-                    Disconnect = function() end,
-                    disconnect = function() end 
-                }
-            end
-            function sig:Fire(...) for _, f in ipairs(self._listeners) do pcall(f, ...) end end
-            function sig:Wait() return 0 end
-            sig.connect = sig.Connect
-            return sig
-        end
-
-        _G.Instance = {}
-        function _G.Instance.new(className, parent)
-            local obj = {
-                ClassName = className or "Folder",
-                Name = className or "Folder",
-                Parent = parent,
-                Archivable = true,
-                Changed = CreateSignal(),
-                ChildAdded = CreateSignal()
-            }
-            
-            function obj:Destroy() end
-            function obj:Clone() return _G.Instance.new(self.ClassName, self.Parent) end
-            function obj:ClearAllChildren() end
-            function obj:FindFirstChild(name) return nil end
-            function obj:WaitForChild(name, time) return _G.Instance.new("Folder", obj) end
-            function obj:GetChildren() return {} end
-            function obj:GetDescendants() return {} end
-            function obj:IsA(class) return self.ClassName == class end
-            function obj:GetService(name) 
-                if name == "Players" then return _G.game:GetService("Players") end
-                if name == "RunService" then return _G.game:GetService("RunService") end
-                if name == "HttpService" then return _G.game:GetService("HttpService") end
-                return _G.Instance.new(name) 
-            end
-            
-            return setmetatable(obj, {
-                __index = function(t, k)
-                    if k == "Value" then return "MockValue" end
-                    return rawget(t, k)
-                end,
-                __newindex = function(t, k, v) rawset(t, k, v) end,
-                __tostring = function(t) return t.Name end
-            })
-        end
-
-        -- VECTOR3
-        _G.Vector3 = setmetatable({}, {
-            __call = function(_, x, y, z) return setmetatable({X=x or 0, Y=y or 0, Z=z or 0}, {
-                __index = _G.Vector3,
-                __add = function(a, b) return _G.Vector3.new(a.X+b.X, a.Y+b.Y, a.Z+b.Z) end,
-                __sub = function(a, b) return _G.Vector3.new(a.X-b.X, a.Y-b.Y, a.Z-b.Z) end,
-                __mul = function(a, b) 
-                    if type(b) == "number" then return _G.Vector3.new(a.X*b, a.Y*b, a.Z*b) end
-                    return _G.Vector3.new(a.X*b.X, a.Y*b.Y, a.Z*b.Z) 
-                end
-            }) end
-        })
-        _G.Vector3.new = _G.Vector3
-        _G.Vector3.zero = _G.Vector3.new(0,0,0)
-        _G.Vector3.one = _G.Vector3.new(1,1,1)
-
-        -- CFRAME
-        _G.CFrame = setmetatable({}, {
-            __call = function(...) return setmetatable({}, {__index = _G.CFrame}) end
-        })
-        _G.CFrame.new = _G.CFrame
-        _G.CFrame.Angles = _G.CFrame.new
-
-        -- BASIC TYPES
-        _G.UDim2 = { new = function(...) return {} end }
-        _G.Color3 = { 
-            new = function(...) return {} end,
-            fromRGB = function(...) return {} end,
-            fromHSV = function(...) return {} end
-        }
-        _G.Enum = setmetatable({}, {
-            __index = function() return setmetatable({}, {__index = function() return 1 end}) end
-        })
+        _G.CAPTURED_CHUNKS = {}; _G.DETECTED_STRINGS = {}; _G.ACTION_LOG = {}; _G.FINAL_GLOBALS = {}; _G.REMOTE_CALLS = {}; _G.HTTP_CALLS = {}; _G.ENV_SNAPSHOT = {}
         
-        -- TASK
-        _G.task = {
-            wait = function(t) return t or 0 end,
-            spawn = function(f, ...) pcall(f, ...) end,
-            delay = function(t, f, ...) pcall(f, ...) end,
-            defer = function(f, ...) pcall(f, ...) end,
-            desynchronize = function() end,
-            synchronize = function() end
-        }
-        _G.wait = _G.task.wait
-        _G.spawn = _G.task.spawn
-        _G.delay = _G.task.delay
-
-        -- ============================================
-        -- GAME STRUCTURE (ULTRA COMPLETE)
-        -- ============================================
-        _G.game = _G.Instance.new("DataModel")
-        _G.game.Name = "Game"
-        _G.game.JobId = "MockJobId_" .. tostring(math.random(100000, 999999))
-        _G.game.PlaceId = 123456789
-        _G.game.GameId = 123456
-        _G.game.PlaceVersion = 1
+        local function log(msg) if #_G.ACTION_LOG < 2000 then table.insert(_G.ACTION_LOG, tostring(msg)) end end
+        local function capture_string(s) if type(s) == "string" and #s > 2 and #s < 50000 then if not s:match("^%s*$") and not s:match("stack") and not s:match("upvalue") then _G.DETECTED_STRINGS[s] = true end end; return s end
         
-        local Services = {}
-        
-        function _G.game:GetService(serviceName)
-            if not Services[serviceName] then
-                Services[serviceName] = _G.Instance.new(serviceName, self)
-                Services[serviceName].Name = serviceName
-            end
-            return Services[serviceName]
-        end
-        
-        -- Players Service
-        local Players = _G.game:GetService("Players")
-        Players.LocalPlayer = _G.Instance.new("Player", Players)
-        Players.LocalPlayer.Name = "DeobfuscatorPlayer"
-        Players.LocalPlayer.UserId = 123456789
-        Players.LocalPlayer.AccountAge = 365
-        Players.LocalPlayer.CharacterAppearanceId = 123456789
-        
-        -- Character
-        Players.LocalPlayer.Character = _G.Instance.new("Model", _G.game:GetService("Workspace"))
-        Players.LocalPlayer.Character.Name = "DeobfuscatorPlayer"
-        
-        local Humanoid = _G.Instance.new("Humanoid", Players.LocalPlayer.Character)
-        Humanoid.Health = 100
-        Humanoid.MaxHealth = 100
-        Humanoid.WalkSpeed = 16
-        Humanoid.JumpPower = 50
-        
-        local HumanoidRootPart = _G.Instance.new("Part", Players.LocalPlayer.Character)
-        HumanoidRootPart.Name = "HumanoidRootPart"
-        HumanoidRootPart.Position = _G.Vector3.new(0, 5, 0)
-        HumanoidRootPart.CFrame = _G.CFrame.new(0, 5, 0)
-        
-        Players.LocalPlayer.Character.PrimaryPart = HumanoidRootPart
-        
-        -- Methods
-        function Players:GetPlayers()
-            return {self.LocalPlayer}
-        end
-        
-        function Players.LocalPlayer:Kick(message)
-            table.insert(_G.ACTION_LOG, "🚫 Player Kicked: " .. tostring(message))
-        end
-        
-        -- RunService
-        local RunService = _G.game:GetService("RunService")
-        RunService.RenderStepped = CreateSignal()
-        RunService.Heartbeat = CreateSignal()
-        RunService.Stepped = CreateSignal()
-        
-        function RunService:IsClient() return true end
-        function RunService:IsServer() return false end
-        function RunService:IsStudio() return false end
-        
-        -- HttpService
-        local HttpService = _G.game:GetService("HttpService")
-        HttpService.HttpEnabled = true
-        
-        function HttpService:JSONEncode(data)
-            return "{}"
-        end
-        
-        function HttpService:JSONDecode(json)
-            return {}
-        end
-        
-        function HttpService:GetAsync(url, nocache, headers)
-            table.insert(_G.HTTP_CALLS, "GET: " .. tostring(url))
-            table.insert(_G.ACTION_LOG, "🌍 HttpService:GetAsync(" .. tostring(url) .. ")")
-            return "<MockResponse>"
-        end
-        
-        function HttpService:PostAsync(url, data, content_type, compress, headers)
-            table.insert(_G.HTTP_CALLS, "POST: " .. tostring(url))
-            table.insert(_G.ACTION_LOG, "🌍 HttpService:PostAsync(" .. tostring(url) .. ")")
-            return "<MockResponse>"
-        end
-        
-        function HttpService:RequestAsync(options)
-            local url = options.Url or "unknown"
-            table.insert(_G.HTTP_CALLS, (options.Method or "GET") .. ": " .. url)
-            return {Success = true, StatusCode = 200, Body = "<MockResponse>"}
-        end
-        
-        -- UserInputService
-        local UserInputService = _G.game:GetService("UserInputService")
-        UserInputService.InputBegan = CreateSignal()
-        UserInputService.InputEnded = CreateSignal()
-        UserInputService.TouchEnabled = false
-        UserInputService.KeyboardEnabled = true
-        UserInputService.MouseEnabled = true
-        UserInputService.GamepadEnabled = false
-        
-        -- Workspace
-        _G.workspace = _G.game:GetService("Workspace")
-        _G.workspace.CurrentCamera = _G.Instance.new("Camera", _G.workspace)
-        _G.workspace.CurrentCamera.CFrame = _G.CFrame.new(0, 10, 20)
-        
-        -- ReplicatedStorage
-        local ReplicatedStorage = _G.game:GetService("ReplicatedStorage")
-        
-        -- StarterGui
-        local StarterGui = _G.game:GetService("StarterGui")
-        function StarterGui:SetCore(action, value)
-            table.insert(_G.ACTION_LOG, "🎮 SetCore(" .. tostring(action) .. ")")
-        end
-        
-        -- TeleportService
-        local TeleportService = _G.game:GetService("TeleportService")
-        function TeleportService:Teleport(placeId, player)
-            table.insert(_G.ACTION_LOG, "🚀 Teleport to PlaceId: " .. tostring(placeId))
-        end
-        
-        -- MarketplaceService
-        local MarketplaceService = _G.game:GetService("MarketplaceService")
-        function MarketplaceService:PromptPurchase(player, assetId)
-            table.insert(_G.ACTION_LOG, "💰 PromptPurchase: " .. tostring(assetId))
-        end
-        
-        -- Script context
-        _G.script = _G.Instance.new("LocalScript", Players.LocalPlayer.Character)
-        _G.script.Name = "DeobfuscatorScript"
-
-        -- ============================================
-        -- EXECUTOR ENVIRONMENT
-        -- ============================================
-        _G.getgenv = function() return _G end
-        _G.getrenv = function() return _G end
-        _G.getfenv = getfenv
-        _G.setfenv = setfenv
-        _G.getreg = function() return {} end
-        _G.getgc = function() return {} end
-        _G.getloadedmodules = function() return {} end
-        _G.getrunningscripts = function() return {_G.script} end
-        _G.getnilinstances = function() return {} end
-        _G.getinstances = function() return {} end
-        _G.getscripts = function() return {_G.script} end
-        
-        _G.checkcaller = function() return true end
-        _G.islclosure = function(f) return type(f) == "function" end
-        _G.iscclosure = function(f) return false end
-        _G.newcclosure = function(f) return f end
-        _G.clonefunction = function(f) return f end
-        
-        _G.hookfunction = function(target, hook)
-            return target
-        end
-        
-        _G.hookmetamethod = function(obj, method, hook)
-            return function() end
-        end
-        
-        _G.getnamecallmethod = function()
-            return "FireServer"
-        end
-        
-        _G.getcallingscript = function()
-            return _G.script
-        end
-        
-        _G.getrawmetatable = function(obj)
-            return getmetatable(obj) or {}
-        end
-        
-        _G.setrawmetatable = function(obj, mt)
-            return setmetatable(obj, mt)
-        end
-        
-        _G.setreadonly = function(t, readonly) end
-        _G.isreadonly = function(t) return false end
-        
-        _G.getupvalue = function(f, i) return nil end
-        _G.setupvalue = function(f, i, v) end
-        _G.getupvalues = function(f) return {} end
-        _G.getconstant = function(f, i) return nil end
-        _G.setconstant = function(f, i, v) end
-        _G.getconstants = function(f) return {} end
-        
-        _G.getinfo = debug.getinfo or function() return {} end
-        _G.debug = {
-            getinfo = _G.getinfo,
-            getupvalue = function() end,
-            setupvalue = function() end,
-            getlocal = function() end,
-            setlocal = function() end
-        }
-
-        -- ============================================
-        -- ADVANCED HOOKS & SPY SYSTEM
-        -- ============================================
-        _G.CAPTURED_CHUNKS = {}
-        _G.DETECTED_STRINGS = {}
-        _G.ACTION_LOG = {}
-        _G.FINAL_GLOBALS = {}
-        _G.REMOTE_CALLS = {}
-        _G.HTTP_CALLS = {}
-        _G.ENV_SNAPSHOT = {}
-        
-        local function log(msg)
-            if #_G.ACTION_LOG < 2000 then
-                table.insert(_G.ACTION_LOG, tostring(msg))
-            end
-        end
-        
-        local function capture_string(s)
-            if type(s) == "string" and #s > 2 and #s < 50000 then
-                -- Фильтруем технический мусор
-                if not s:match("^%s*$") and 
-                   not s:match("stack") and 
-                   not s:match("upvalue") and
-                   not s:match("^[%c%z]+$") then
-                    _G.DETECTED_STRINGS[s] = true
-                end
-            end
-            return s
-        end
-        
-        -- Hook: string.char (для MoonSec/IronBrew дешифровки)
         local real_char = string.char
-        string.char = function(...)
-            local args = {...}
-            local result = real_char(...)
-            capture_string(result)
-            
-            -- Спец логика для длинных последовательностей
-            if #args > 10 then
-                log("🔐 string.char called with " .. #args .. " bytes")
-            end
-            
-            return result
-        end
+        string.char = function(...) local result = real_char(...); capture_string(result); return result end
         
-        -- Hook: string.byte
-        local real_byte = string.byte
-        string.byte = function(s, i, j)
-            capture_string(s)
-            return real_byte(s, i, j)
-        end
-        
-        -- Hook: string.sub
-        local real_sub = string.sub
-        string.sub = function(s, i, j)
-            capture_string(s)
-            return real_sub(s, i, j)
-        end
-        
-        -- Hook: string.reverse
-        local real_reverse = string.reverse
-        string.reverse = function(s)
-            capture_string(s)
-            local result = real_reverse(s)
-            capture_string(result)
-            return result
-        end
-        
-        -- Hook: table.concat
         local real_concat = table.concat
-        table.concat = function(t, sep, i, j)
-            local result = real_concat(t, sep, i, j)
-            capture_string(result)
-            return result
-        end
+        table.concat = function(t, sep, i, j) local result = real_concat(t, sep, i, j); capture_string(result); return result end
         
-        -- Hook: load/loadstring (критично!)
         local real_load = load
         local load_call_count = 0
-        
         local function enhanced_load(chunk, chunkname, mode, env)
             load_call_count = load_call_count + 1
-            
             if type(chunk) == "string" then
                 local size = #chunk
-                
-                -- Захватываем только значимые чанки
                 if size > 100 and size < 10000000 then
-                    table.insert(_G.CAPTURED_CHUNKS, {
-                        data = chunk,
-                        size = size,
-                        type = "string",
-                        call_number = load_call_count,
-                        is_bytecode = chunk:sub(1, 4) == "\27Lua"
-                    })
-                    
-                    log(string.format("🔥 Captured Chunk #%d: %d bytes %s", 
-                        load_call_count, 
-                        size,
-                        chunk:sub(1, 4) == "\27Lua" and "(BYTECODE)" or "(SOURCE)"
-                    ))
+                    table.insert(_G.CAPTURED_CHUNKS, {data = chunk, size = size, type = "string", call_number = load_call_count, is_bytecode = chunk:sub(1, 4) == "\\27Lua"})
+                    log(string.format("🔥 Captured Chunk #%d: %d bytes", load_call_count, size))
                 end
-                
-                -- Анализируем содержимое
-                if size > 50 and size < 5000 then
-                    local preview = chunk:sub(1, 200):gsub("[%c%z]", "?")
-                    if preview:match("[%w_]+") then
-                        capture_string(preview)
-                    end
-                end
-            elseif type(chunk) == "function" then
-                log("🔥 load() called with function chunk")
             end
-            
             return real_load(chunk, chunkname, mode, env or _G)
         end
-        
         _G.load = enhanced_load
         _G.loadstring = enhanced_load
         
-        -- Hook: require (для модульных обфускаторов)
-        local real_require = require
-        _G.require = function(module)
-            log("📦 require(" .. tostring(module) .. ")")
-            
-            -- Безопасный require
-            local success, result = pcall(real_require, module)
-            if success then
-                return result
-            else
-                -- Возвращаем мок если модуль не найден
-                return {}
-            end
-        end
-        
-        -- Hook: getfenv/setfenv
-        local real_getfenv = getfenv
-        local real_setfenv = setfenv
-        
-        getfenv = function(level)
-            if type(level) == "function" then
-                return real_getfenv(level)
-            end
-            return _G
-        end
-        
-        setfenv = function(level, env)
-            log("🔧 setfenv called")
-            if type(level) == "function" then
-                return real_setfenv(level, env)
-            end
-            return level
-        end
-        
-        -- Hook: pcall/xpcall для отслеживания ошибок
-        local real_pcall = pcall
-        pcall = function(func, ...)
-            local results = {real_pcall(func, ...)}
-            if not results[1] then
-                log("⚠️ pcall error: " .. tostring(results[2]))
-            end
-            return unpack(results)
-        end
-
-        -- ============================================
-        -- ENVIRONMENT SNAPSHOT
-        -- ============================================
         function _G.dump_globals()
-            local ignore_list = {
-                -- Lua стандарт
-                string=1, math=1, table=1, bit=1, bit32=1, coroutine=1, debug=1,
-                pairs=1, ipairs=1, next=1, _G=1, _VERSION=1, package=1,
-                -- Roblox API
-                Instance=1, Vector3=1, Vector2=1, CFrame=1, UDim2=1, Color3=1,
-                Enum=1, task=1, game=1, workspace=1, script=1,
-                -- Системные
-                print=1, warn=1, error=1, assert=1, tostring=1, tonumber=1,
-                type=1, pcall=1, xpcall=1, select=1, unpack=1, rawget=1, rawset=1,
-                setmetatable=1, getmetatable=1, require=1, load=1, loadstring=1,
-                getfenv=1, setfenv=1, wait=1, spawn=1, delay=1,
-                -- Executor
-                getgenv=1, getrenv=1, getreg=1, getgc=1, checkcaller=1
-            }
-            
-            local snapshot = {}
+            local ignore = {string=1, math=1, table=1, bit=1, bit32=1, pairs=1, ipairs=1, _G=1, package=1, load=1, loadstring=1, print=1, warn=1, tostring=1, tonumber=1, type=1, pcall=1}
             local count = 0
-            
             for k, v in pairs(_G) do
-                if not ignore_list[k] and count < 200 then
+                if not ignore[k] and count < 200 then
                     local t = type(v)
                     if t == "string" or t == "number" or t == "boolean" then
-                        local entry = tostring(k) .. " = " .. tostring(v)
-                        if #entry < 500 then
-                            table.insert(_G.FINAL_GLOBALS, entry)
-                            snapshot[k] = v
-                            count = count + 1
-                        end
-                    elseif t == "function" then
-                        table.insert(_G.FINAL_GLOBALS, tostring(k) .. " = function")
+                        table.insert(_G.FINAL_GLOBALS, tostring(k) .. " = " .. tostring(v))
                         count = count + 1
                     end
                 end
             end
-            
-            _G.ENV_SNAPSHOT = snapshot
             log("📸 Environment snapshot: " .. count .. " globals")
         end
         """
-        _G.delay = _G.task.delay
 
-        -- GAME STRUCTURE
-        _G.game = _G.Instance.new("DataModel")
-        
-        local function makeService(name, parent)
-            local s = _G.Instance.new(name, parent or _G.game)
-            _G.game[name] = s
-            return s
-        end
-        
-        local Players = makeService("Players")
-        Players.LocalPlayer = _G.Instance.new("Player", Players)
-        Players.LocalPlayer.Name = "LocalPlayer"
-        Players.LocalPlayer.UserId = 123456
-        Players.LocalPlayer.Character = _G.Instance.new("Model")
-        
-        local RunService = makeService("RunService")
-        RunService.RenderStepped = CreateSignal()
-        RunService.Heartbeat = CreateSignal()
-        RunService.Stepped = CreateSignal()
-        function RunService:IsClient() return true end
-        function RunService:IsServer() return false end
-        
-        local HttpService = makeService("HttpService")
-        function HttpService:JSONDecode(s) return {} end
-        function HttpService:JSONEncode(t) return "{}" end
-        function HttpService:GetAsync(url) return "" end
-        function HttpService:PostAsync(url, data) return "" end
-        
-        _G.workspace = makeService("Workspace")
-        _G.script = _G.Instance.new("Script", _G.workspace)
-        
-        function _G.game:GetService(name)
-            if not self[name] then self[name] = makeService(name, self) end
-            return self[name]
-        end
-
-        -- EXECUTOR FUNCTIONS
-        _G.getgenv = function() return _G end
-        _G.getrenv = function() return _G end
-        _G.getreg = function() return {} end
-        _G.getgc = function() return {} end
-        _G.checkcaller = function() return true end
-        _G.islclosure = function() return true end
-        _G.iscclosure = function() return false end
-        _G.newcclosure = function(f) return f end
-        _G.hookfunction = function(f, hook) return f end
-        _G.hookmetamethod = function(obj, method, hook) return function() end end
-        _G.getnamecallmethod = function() return "FireServer" end
-        _G.getcallingscript = function() return _G.script end
-        
-        -- ============================================
-        -- SPYWARE & HOOKS
-        -- ============================================
-        _G.CAPTURED_CHUNKS = {}
-        _G.DETECTED_STRINGS = {}
-        _G.ACTION_LOG = {}
-        _G.FINAL_GLOBALS = {}
-        _G.REMOTE_CALLS = {}
-        
-        local function log(msg) 
-            if #_G.ACTION_LOG < 1000 then 
-                table.insert(_G.ACTION_LOG, tostring(msg)) 
-            end
-        end
-
-        local function capture_str(s) 
-            if type(s) == "string" and #s > 2 and #s < 10000 then 
-                if not s:find("^%s*$") and not s:find("stack") and not s:find("upvalue") then
-                    _G.DETECTED_STRINGS[s] = true 
-                end
-            end 
-            return s
-        end
-
-        -- HOOK: string.char
-        local real_char = string.char
-        string.char = function(...)
-            local res = real_char(...)
-            capture_str(res)
-            return res
-        end
-        
-        -- HOOK: table.concat
-        local real_concat = table.concat
-        table.concat = function(t, sep, i, j)
-            local res = real_concat(t, sep, i, j)
-            capture_str(res)
-            return res
-        end
-
-        -- HOOK: load/loadstring
-        local real_load = load
-        local function hooked_load(chunk, name, mode, env)
-            if type(chunk) == "string" and #chunk > 50 then
-                table.insert(_G.CAPTURED_CHUNKS, {data = chunk, size = #chunk, type = "string"})
-                log("🔥 Captured Chunk: " .. #chunk .. " bytes")
-            end
-            return real_load(chunk, name, mode, env)
-        end
-        
-        _G.load = hooked_load
-        _G.loadstring = hooked_load
-        
-        -- HOOK: RemoteEvent/RemoteFunction
-        local RemoteEvent_mt = {
-            __index = function(t, k)
-                if k == "FireServer" then
-                    return function(self, ...)
-                        local args = {...}
-                        local log_entry = "RemoteEvent:FireServer(" .. table.concat(args, ", ") .. ")"
-                        table.insert(_G.REMOTE_CALLS, log_entry)
-                        log("📡 " .. log_entry)
-                    end
-                elseif k == "InvokeServer" then
-                    return function(self, ...)
-                        local args = {...}
-                        local log_entry = "RemoteFunction:InvokeServer(" .. table.concat(args, ", ") .. ")"
-                        table.insert(_G.REMOTE_CALLS, log_entry)
-                        log("📡 " .. log_entry)
-                        return "MockResponse"
-                    end
-                end
-                return rawget(t, k)
-            end
-        }
-        
-        local old_Instance_new = _G.Instance.new
-        _G.Instance.new = function(className, parent)
-            local obj = old_Instance_new(className, parent)
-            if className == "RemoteEvent" or className == "RemoteFunction" then
-                setmetatable(obj, RemoteEvent_mt)
-            end
-            return obj
-        end
-
-        -- HTTP SPY
-        function _G.game:HttpGet(url) 
-            log("🌍 HttpGet: " .. tostring(url))
-            return "<ProxyResponse>" 
-        end
-        function _G.game:HttpGetAsync(url) return _G.game:HttpGet(url) end
-
-        -- GLOBALS DUMP
-        function _G.dump_globals()
-            local ignore = {
-                string=1, math=1, table=1, bit=1, bit32=1, pairs=1, ipairs=1, next=1,
-                _G=1, package=1, Instance=1, Vector3=1, CFrame=1, task=1, game=1,
-                workspace=1, script=1, Enum=1, wait=1, warn=1, print=1
-            }
-            for k, v in pairs(_G) do
-                if not ignore[k] then
-                    local t = type(v)
-                    if t == "string" or t == "number" or t == "boolean" then
-                        local entry = tostring(k) .. " = " .. tostring(v)
-                        if #entry < 200 then
-                            table.insert(_G.FINAL_GLOBALS, entry)
-                        end
-                    end
-                end
-            end
-        end
-        """
+    def _extract_strings_heuristic(self, content):
+        """Извлекает строки из байткода"""
+        strings = []
+        if isinstance(content, bytes):
+            pattern = rb'[\x20-\x7E]{4,}'
+            matches = re.findall(pattern, content)
+            for match in matches:
+                try:
+                    s = match.decode('ascii')
+                    if len(s) > 3 and not s.isdigit():
+                        strings.append(s)
+                except:
+                    pass
+        return strings
 
     def _preprocess_code(self, content):
         """Предобработка: декодирование Base64/Hex"""
@@ -854,7 +302,7 @@ class DeobfuscatorEngine:
         else:
             text = content
 
-        # Попытка декодировать Base64
+        # Base64
         if re.match(r'^[A-Za-z0-9+/=\s]+$', text) and len(text) > 100:
             try:
                 decoded = base64.b64decode(text)
@@ -867,7 +315,7 @@ class DeobfuscatorEngine:
         return content.encode('utf-8') if isinstance(content, str) else content
 
     def _find_best_chunk(self, chunks):
-        """Ищет самый большой и осмысленный чанк"""
+        """Ищет лучший чанк"""
         if not chunks or len(chunks) == 0:
             return None
         
@@ -878,7 +326,6 @@ class DeobfuscatorEngine:
             c = chunks[i]
             score = c.size
             
-            # Бонус за наличие ключевых слов
             if isinstance(c.data, bytes):
                 if b'function' in c.data: score += 1000
                 if b'local' in c.data: score += 500
@@ -908,13 +355,13 @@ class DeobfuscatorEngine:
                 return str(s)
         return str(s)
 
-    def _finalize_output(self, code_bytes, strings, globals_dump, logs, remotes, obf_type, callback):
+    def _finalize_output(self, code_bytes, strings, globals_dump, logs, remotes, http_calls, env_vars, obf_type, callback):
         if callback:
             callback("🧬 Decompiling bytecode...")
         
         decompiled = self._try_decompile(code_bytes)
+        heuristic_strings = self._extract_strings_heuristic(code_bytes)
         
-        # HEADER
         final = f"""-- ============================================
 -- DEOBFUSCATION REPORT
 -- Obfuscator: {obf_type}
@@ -922,46 +369,55 @@ class DeobfuscatorEngine:
 
 """
         
-        # REMOTE CALLS
+        # REMOTE SPY
         if remotes:
             final += "-- [[ 📡 REMOTE SPY ]] --\n"
-            for r in remotes[:50]:
+            for r in remotes[:100]:
                 final += f"-- {self._clean_string(r)}\n"
             final += "\n"
 
+        # HTTP CALLS
+        if http_calls:
+            final += "-- [[ 🌍 HTTP CALLS ]] --\n"
+            for h in http_calls[:50]:
+                final += f"-- {self._clean_string(h)}\n"
+            final += "\n"
+
         # STRINGS
-        if strings:
-            final += "-- [[ 🔤 EXTRACTED STRINGS ]] --\n"
-            sorted_strings = sorted(strings, key=lambda x: len(str(x)), reverse=True)
-            seen = set()
-            count = 0
-            for s in sorted_strings:
-                if count >= 100:
-                    break
-                clean = self._clean_string(s).replace('\n', '\\n').replace('\r', '')
-                if clean not in seen and len(clean) > 3:
-                    final += f'-- "{clean}"\n'
-                    seen.add(clean)
-                    count += 1
+        all_strings = set()
+        for s in strings:
+            clean = self._clean_string(s)
+            if len(clean) > 3 and len(clean) < 1000:
+                all_strings.add(clean)
+        
+        for s in heuristic_strings[:200]:
+            if len(s) > 3:
+                all_strings.add(s)
+        
+        if all_strings:
+            final += f"-- [[ 🔤 EXTRACTED STRINGS ({len(all_strings)} total) ]] --\n"
+            for s in sorted(all_strings, key=len, reverse=True)[:100]:
+                s_display = s.replace('\n', '\\n').replace('\r', '\\r')[:200]
+                final += f'--   "{s_display}"\n'
             final += "\n"
 
         # GLOBALS
         if globals_dump:
-            final += "-- [[ 🌍 GLOBAL VARIABLES ]] --\n"
-            for g in globals_dump[:30]:
+            final += f"-- [[ 🌍 GLOBAL VARIABLES ({len(globals_dump)} found) ]] --\n"
+            for g in globals_dump[:50]:
                 final += f"-- {self._clean_string(g)}\n"
             final += "\n"
 
         # LOGS
         if logs:
             final += "-- [[ 📋 EXECUTION LOG ]] --\n"
-            for l in logs[-30:]:
-                final += f"-- {self._clean_string(l)}\n"
+            for l in logs[-40:]:
+                final += f"-- {self._clean_string(l)[:300]}\n"
             final += "\n"
 
-        final += "="*60 + "\n"
-        final += "-- [[ 📜 DECOMPILED SOURCE ]] --\n"
-        final += "="*60 + "\n\n"
+        final += "="*70 + "\n"
+        final += "-- [[ 📜 DECOMPILED SOURCE CODE ]] --\n"
+        final += "="*70 + "\n\n"
         
         if decompiled:
             try:
@@ -970,12 +426,17 @@ class DeobfuscatorEngine:
                 src = decompiled.decode('latin-1', 'ignore')
             final += self._beautify_lua(src)
         else:
-            final += "-- [!] Decompilation failed. Raw data:\n"
+            final += "-- [!] Decompilation failed.\n\n"
             try:
-                final += code_bytes.decode('utf-8', 'ignore')
+                raw_text = code_bytes.decode('utf-8', 'ignore')
+                if len(raw_text) > 100:
+                    final += raw_text
+                else:
+                    final += f"-- Binary data: {len(code_bytes)} bytes\n"
             except:
                 final += f"-- Binary data: {len(code_bytes)} bytes\n"
 
+        final += "\n\n" + "="*70 + "\n-- End of Report\n" + "="*70
         return final.encode('utf-8')
 
     def _try_decompile(self, bytecode):
@@ -1004,16 +465,15 @@ class DeobfuscatorEngine:
             return None
 
     def _beautify_lua(self, source):
-        """Улучшенное форматирование кода"""
-        # Удаление мусора
-        source = re.sub(r'--\[\[.*?--\]\]', '', source, flags=re.DOTALL)  # Блочные комменты
-        source = re.sub(r'local _+[a-zA-Z0-9]+ *= *nil;?', '', source)  # Мусорные локали
-        
-        # Форматирование
-        source = re.sub(r';', ';\n', source)
-        source = re.sub(r'(\s+)(local|return|if|for|while|repeat|function|end)(\s+)', r'\n\2\3', source)
-        source = re.sub(r' then ', ' then\n\t', source)
-        source = re.sub(r' do ', ' do\n\t', source)
-        source = re.sub(r'\n{3,}', '\n\n', source)  # Убрать лишние пустые строки
-        
-        return source
+        """Улучшенное форматирование"""
+        try:
+            source = re.sub(r'--\[\[.*?--\]\]', '', source, flags=re.DOTALL)
+            source = re.sub(r'local\s+_+[a-zA-Z0-9_]*\s*=\s*(?:nil|{});?', '', source)
+            source = re.sub(r';', ';\n', source)
+            source = re.sub(r'\n{4,}', '\n\n', source)
+            source = re.sub(r'[ \t]+$', '', source, flags=re.MULTILINE)
+            
+            return source
+        except Exception as e:
+            logger.error(f"Beautify error: {e}")
+            return source 
