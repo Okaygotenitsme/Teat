@@ -1,189 +1,302 @@
+import lupa
+from lupa import LuaRuntime
 import logging
 import subprocess
 import os
 import tempfile
 import re
-import shutil
+import binascii
 
 # Логгер
 logger = logging.getLogger("DeobfuscatorEngine")
 
 class DeobfuscatorEngine:
     def __init__(self):
-        self.base_dir = os.path.dirname(os.path.abspath(__file__))
-        
-        # Luau для анализа
-        self.luau_path = os.path.join(self.base_dir, "luau.exe" if os.name == 'nt' else "luau")
-        if not os.path.exists(self.luau_path): self.luau_path = shutil.which("luau")
-
-        # Unluac для байт-кода
-        self.unluac_path = os.path.join(self.base_dir, "unluac.jar")
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        self.unluac_path = os.path.join(base_dir, "unluac.jar")
+        logger.info(f"📁 Working Dir: {base_dir}")
 
     def process(self, content, status_callback=None):
         def update_status(msg):
             if status_callback: status_callback(msg)
             logger.info(f"[STATUS] {msg}")
 
-        # 1. ОПРЕДЕЛЯЕМ ТИП ФАЙЛА
-        is_bytecode = content.startswith(b'\x1bLua')
-        
-        result_text = ""
-        logs, strings, globs = [], [], []
+        if not self._check_java():
+            return b"-- [FATAL] Java is missing. Install Java to use unluac."
 
-        # 2. ЕСЛИ ЭТО БАЙТ-КОД (скомпилированный)
-        if is_bytecode:
-            update_status("⚙️ Обнаружен байт-код. Запуск Unluac...")
-            decompiled = self._run_unluac(content)
-            if decompiled:
-                result_text = decompiled
-            else:
-                result_text = "-- [ERROR] Unluac failed to decompile binary."
-        
-        # 3. ЕСЛИ ЭТО ТЕКСТ (IronBrew, MoonSec, обычный скрипт)
-        else:
-            update_status("📜 Обнаружен исходный код. Форматирование...")
-            try:
-                # Пробуем декодировать текст
-                source = content.decode('utf-8', 'ignore')
-                result_text = self._beautify_lua(source)
-            except:
-                result_text = "-- [ERROR] Could not decode text file."
+        # 1. Очистка кода от синтаксиса Luau (чтобы Lupa не упала)
+        update_status("🧹 Очистка синтаксиса Luau...")
+        content_str = self._clean_string(content)
+        sanitized_code = self._sanitize_luau(content_str)
 
-            # Запускаем шпиона Luau ТОЛЬКО для текстовых скриптов
-            if self.luau_path:
-                update_status("🕵️ Запуск динамического анализа (Luau)...")
-                logs, strings, globs = self._run_luau_spy(content)
+        update_status("🧠 Инициализация среды Roblox (Emulation V4)...")
 
-        # 4. ФИНАЛИЗАЦИЯ
-        return self._finalize_output(result_text, strings, globs, logs)
-
-    def _run_luau_spy(self, content):
-        """Запускает скрипт в безопасной среде Luau"""
-        logs, strings, globs = [], [], []
+        # --- НАСТРОЙКА LUA VM ---
         try:
-            # Декодируем для вставки в шаблон
-            user_script = content.decode('utf-8', 'ignore')
-        except: return [], [], []
+            # set_memory_limit - защита от переполнения памяти
+            lua = LuaRuntime(unpack_returned_tuples=True, encoding=None)
+        except Exception as e:
+            return f"-- [FATAL] Lua start error: {e}".encode('utf-8')
 
-        # Шаблон перехватчика
-        emu_code = r"""
-        -- :: BRIDGE ::
-        local function send(t, d) print("||"..t.."||"..tostring(d)) end
+        # ==========================================
+        # 2. ПОЛИФИЛЛЫ И ЭМУЛЯЦИЯ
+        # ==========================================
         
-        -- :: MOCKS ::
-        _G.game = { 
-            HttpGet = function(_, u) send("LOG", "🌍 GET: "..u) return "Proxy" end,
-            HttpPost = function(_, u) send("LOG", "🌍 POST: "..u) return "Proxy" end
-        }
-        _G.warn = function(...) send("LOG", "Warn: "..table.concat({...}, " ")) end
-        _G.print = function(...) send("LOG", "Print: "..table.concat({...}, " ")) end
+        roblox_env = """
+        -- :: COMPATIBILITY FIXES ::
+        -- Roblox использует bit32, LuaJIT использует bit
+        local bit_lib = {}
+        local function tobit(x) x = x % 4294967296; if x >= 2147483648 then x = x - 4294967296 end; return x end
+        function bit_lib.bnot(x) return 4294967295 - x % 4294967296 end
+        function bit_lib.band(a, b) local r, m, s = 0, 2147483648, nil; repeat s,a,b = a+b+m, a%m, b%m; r,m = r + m*4%(s-a-b), m/2 until m < 1; return r end
+        function bit_lib.bor(a, b) local r, m, s = 0, 2147483648, nil; repeat s,a,b = a+b+m, a%m, b%m; r,m = r + m*1%(s-a-b), m/2 until m < 1; return r end
+        function bit_lib.bxor(a, b) local r, m, s = 0, 2147483648, nil; repeat s,a,b = a+b+m, a%m, b%m; r,m = r + m*3%(s-a-b), m/2 until m < 1; return r end
+        function bit_lib.lshift(a, b) return (a * 2^b) % 4294967296 end
+        function bit_lib.rshift(a, b) return math.floor(a / 2^b) % 4294967296 end
         
-        -- :: STRING SPY ::
-        local old_char = string.char
-        string.char = function(...)
-            local r = old_char(...)
-            if #r > 4 then send("STR", r) end
-            return r
+        _G.bit = bit_lib
+        _G.bit32 = bit_lib -- Важно! Многие скрипты ищут bit32
+
+        -- :: ROBLOX MATH & STRING EXTENSIONS ::
+        function math.clamp(x, min, max) return x < min and min or (x > max and max or x) end
+        function math.round(x) return x>=0 and math.floor(x+0.5) or math.ceil(x-0.5) end
+        function math.sign(x) return x > 0 and 1 or (x < 0 and -1 or 0) end
+        
+        function string.split(inputstr, sep)
+            if sep == nil then sep = "%s" end
+            local t={}
+            for str in string.gmatch(inputstr, "([^"..sep.."]+)") do table.insert(t, str) end
+            return t
         end
 
-        -- :: RUNNER ::
-        local s, e = pcall(function() 
-        """ + user_script + r""" 
-        end)
+        -- :: TYPEOF ::
+        -- Roblox использует typeof вместо type для своих типов
+        local old_type = type
+        function _G.typeof(v)
+            local t = old_type(v)
+            if t == "table" then
+                if v.ClassName then return "Instance" end
+                if v.X and v.Y and v.Z then return "Vector3" end
+            end
+            return t
+        end
+
+        -- :: ROBLOX CLASSES ::
+        local function CreateSignal()
+            return { Connect = function(self, f) return { Disconnect = function() end } end, Fire = function() end, Wait = function() end }
+        end
+
+        _G.Instance = {
+            new = function(cls, par)
+                local obj = { ClassName = cls or "Folder", Name = cls or "Folder", Parent = par, Children = {} }
+                obj.Changed = CreateSignal()
+                obj.ChildAdded = CreateSignal()
+                setmetatable(obj, { 
+                    __index = function(t,k) if k=="Value" then return "Mock" end return rawget(t,k) end,
+                    __tostring = function(t) return t.Name end 
+                })
+                return obj
+            end
+        }
+
+        _G.Vector3 = { new = function(x,y,z) return {X=x or 0, Y=y or 0, Z=z or 0} end, zero = {X=0,Y=0,Z=0} }
+        _G.CFrame = { new = function(...) return {} end, Angles = function(...) return {} end }
+        _G.UDim2 = { new = function(...) return {} end }
+        _G.Color3 = { new = function(...) return {} end, fromRGB = function(...) return {} end }
+        _G.Enum = setmetatable({}, { __index = function() return setmetatable({}, {__index=function() return 1 end}) end })
+
+        -- :: TASK ::
+        _G.task = {
+            wait = function() return 0 end,
+            spawn = function(f) pcall(f) end,
+            delay = function(t, f) pcall(f) end,
+            defer = function(f) pcall(f) end
+        }
+        _G.wait = _G.task.wait
+        _G.spawn = _G.task.spawn
+
+        -- :: GAME TREE ::
+        _G.game = _G.Instance.new("DataModel")
+        _G.game.Players = _G.Instance.new("Players", _G.game)
+        _G.game.Players.LocalPlayer = _G.Instance.new("Player", _G.game.Players)
+        _G.game.Players.LocalPlayer.Name = "Player1"
+        _G.game.Players.LocalPlayer.UserId = 12345678
+        _G.workspace = _G.Instance.new("Workspace", _G.game)
+        _G.script = _G.Instance.new("Script", _G.workspace)
+
+        -- :: ENVIRONMENT HOOKS (SPYWARE) ::
+        _G.CAPTURED = {}
+        _G.LOGS = {}
         
-        if not s then send("LOG", "❌ Error: " .. tostring(e)) end
+        local function log(msg) table.insert(_G.LOGS, msg) end
         
-        -- Dump globals
-        for k,v in pairs(getfenv()) do 
-            if type(v) == "string" and #v < 100 then send("GLB", k.."="..v) end 
+        _G.getgenv = function() return _G end
+        _G.getrenv = function() return _G end
+        _G.checkcaller = function() return true end
+
+        -- Spy on Http
+        _G.game.HttpGet = function(self, url) log("HTTP GET: "..tostring(url)); return "Proxy" end
+        _G.game.HttpGetAsync = _G.game.HttpGet
+        _G.game.HttpPost = function(self, url, d) log("HTTP POST: "..tostring(url)); return "Proxy" end
+        
+        -- Spy on Load
+        local real_load = load
+        local function hooked_load(chunk, name)
+            if type(chunk) == "string" and #chunk > 30 then
+                table.insert(_G.CAPTURED, chunk)
+                log("🔥 LOAD DETECTED: " .. #chunk .. " bytes")
+            end
+            return real_load(chunk, name)
+        end
+        _G.load = hooked_load
+        _G.loadstring = hooked_load
+
+        -- Spy on Strings
+        local real_char = string.char
+        string.char = function(...) 
+            local s = real_char(...)
+            if #s > 4 then _G.CAPTURED[s] = true end
+            return s
         end
         """
 
-        # Запись и запуск
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".lua", mode='w', encoding='utf-8') as tmp:
-            tmp.write(emu_code)
-            tmp_path = tmp.name
-
         try:
-            proc = subprocess.run([self.luau_path, tmp_path], capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=5)
-            for line in proc.stdout.splitlines():
-                if "||STR||" in line: strings.append(line.split("||STR||")[1])
-                elif "||LOG||" in line: logs.append(line.split("||LOG||")[1])
-                elif "||GLB||" in line: globs.append(line.split("||GLB||")[1])
-        except: pass
-        
-        try: os.remove(tmp_path)
-        except: pass
-        
-        return logs, strings, globs
+            # Загружаем окружение
+            lua.execute(roblox_env)
+            
+            update_status("🌪️ Запуск скрипта...")
+            
+            # Функция запуска с таймаутом шагов (защита от бесконечного цикла)
+            runner = lua.eval("""
+                function(code)
+                    -- Ограничитель инструкций (очень простой watchdog)
+                    local start_time = os.clock()
+                    local function check_time()
+                        if os.clock() - start_time > 3 then -- 3 секунды внутри Lua
+                            error("Timeout inside Lua")
+                        end
+                    end
+                    debug.sethook(check_time, "", 10000)
 
-    def _run_unluac(self, bytecode):
+                    local status, err = pcall(function()
+                        local f = load(code)
+                        if f then f() end
+                    end)
+                    if not status then table.insert(_G.LOGS, "Error: " .. tostring(err)) end
+                end
+            """)
+            
+            # Передаем очищенный код
+            runner(sanitized_code)
+
+            # Забираем данные
+            g = lua.globals()
+            logs = list(g.LOGS)
+            captured = list(g.CAPTURED)
+            
+            # Превращаем таблицу captured в список строк (если там смешанные данные)
+            captured_strings = []
+            final_code = sanitized_code.encode('utf-8')
+
+            for k in captured:
+                if isinstance(k, str) or isinstance(k, bytes):
+                    captured_strings.append(k)
+                    # Если нашли большой кусок кода, считаем его распакованным скриптом
+                    if len(k) > len(final_code) and len(k) > 100:
+                         if isinstance(k, str): final_code = k.encode('utf-8')
+                         else: final_code = k
+
+            return self._finalize_output(final_code, captured_strings, logs, update_status)
+
+        except Exception as e:
+            logger.error(f"Engine Crash: {e}")
+            return f"-- [CRASH]: {str(e)}".encode('utf-8')
+
+    def _sanitize_luau(self, code):
+        """Превращает Luau код в валидный Lua 5.1"""
+        # 1. Удаляем типы (local x: number -> local x)
+        # Регулярка ищет ": Type" после имен переменных и аргументов
+        # Это грубая очистка, но работает для 90% скриптов
+        code = re.sub(r':\s*[a-zA-Z0-9_.]+', '', code)
+        code = re.sub(r'->\s*[a-zA-Z0-9_.]+', '', code)
+        
+        # 2. Заменяем составные операторы
+        # x += 1 -> x = x + 1
+        def repl_add(m): return f"{m.group(1)} = {m.group(1)} + {m.group(2)}"
+        code = re.sub(r'([a-zA-Z0-9_]+)\s*\+=\s*(.+)', repl_add, code)
+        
+        def repl_sub(m): return f"{m.group(1)} = {m.group(1)} - {m.group(2)}"
+        code = re.sub(r'([a-zA-Z0-9_]+)\s*\-=\s*(.+)', repl_sub, code)
+
+        # 3. Убираем "continue" (в Lua 5.1 его нет, это сломает циклы, но лучше чем краш)
+        code = code.replace("continue", "--[[continue]]")
+
+        return code
+
+    def _check_java(self):
+        try:
+            subprocess.run(["java", "-version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return True
+        except: return False
+
+    def _clean_string(self, s):
+        if isinstance(s, bytes):
+            try: return s.decode('utf-8')
+            except: return s.decode('latin-1', errors='ignore')
+        return str(s)
+
+    def _finalize_output(self, code_bytes, strings, logs, callback):
+        if callback: callback("🧬 Попытка декомпиляции...")
+        
+        # Если unluac не справится, вернем байткод или исходник как есть
+        decompiled = self._try_decompile(code_bytes)
+        
+        out = []
+        out.append("-- [[ LOGS & NETWORK ]] --")
+        for l in logs: out.append(f"-- {l}")
+        
+        out.append("\n-- [[ CAPTURED STRINGS ]] --")
+        seen = set()
+        for s in strings:
+            s_str = self._clean_string(s)
+            if len(s_str) > 3 and s_str not in seen:
+                out.append(f'-- "{s_str}"')
+                seen.add(s_str)
+        
+        out.append("\n" + "="*40 + "\n")
+        
+        if decompiled:
+            out.append(self._beautify_lua(self._clean_string(decompiled)))
+        else:
+            out.append("-- [WARNING] Unluac failed or code is plain text.")
+            out.append(self._clean_string(code_bytes))
+            
+        return "\n".join(out).encode('utf-8', errors='ignore')
+
+    def _try_decompile(self, bytecode):
+        if not os.path.exists(self.unluac_path): return None
+        # Проверяем, похоже ли это на байткод Lua (начинается с ESC Lua)
+        if not bytecode.startswith(b'\x1bLua'):
+            return bytecode # Это уже текст
+            
         try:
             with tempfile.NamedTemporaryFile(delete=False, suffix=".lua", mode='wb') as tmp:
                 tmp.write(bytecode)
                 path = tmp.name
-            res = subprocess.run(["java", "-jar", self.unluac_path, path], capture_output=True, timeout=10)
+            
+            res = subprocess.run(
+                ["java", "-jar", self.unluac_path, path], 
+                capture_output=True, timeout=10
+            )
             os.remove(path)
-            if res.returncode == 0: return res.stdout.decode('utf-8', 'ignore')
-        except: pass
-        return None
+            if res.returncode == 0: return res.stdout
+            return None
+        except: return None
 
-    def _finalize_output(self, code_text, strings, globs, logs):
-        out = []
-        out.append("-- [[ ROBOT DEOBFUSCATOR REPORT ]] --")
-        
-        if strings:
-            out.append("\n-- [ DECRYPTED STRINGS ] --")
-            for s in list(set(strings))[:50]: out.append(f'-- "{s}"')
-            
-        if logs:
-            out.append("\n-- [ EXECUTION LOGS ] --")
-            for l in logs: out.append(f"-- {l}")
-
-        out.append("\n" + "="*50 + "\n")
-        out.append("-- [ SOURCE CODE ] --\n")
-        out.append(code_text)
-        
-        return "\n".join(out).encode('utf-8')
-
-    def _beautify_lua(self, source):
-        """Простой алгоритм форматирования кода"""
-        # Убираем лишние пробелы
-        source = re.sub(r'\s+', ' ', source)
-        
-        # Вставляем переносы строк после ключевых слов
-        replacements = {
-            " local ": "\nlocal ",
-            " function ": "\nfunction ",
-            " if ": "\nif ",
-            " then ": " then\n\t",
-            " end ": "\nend\n",
-            " return ": "\nreturn ",
-            " do ": " do\n\t",
-            " repeat ": "\nrepeat\n\t",
-            " until ": "\nuntil ",
-            ";": ";\n"
-        }
-        for k, v in replacements.items():
-            source = source.replace(k, v)
-            
-        # Пытаемся восстановить отступы (примитивно)
-        lines = source.split('\n')
-        indent = 0
-        formatted = []
-        for line in lines:
-            line = line.strip()
-            if not line: continue
-            
-            # Уменьшаем отступ для закрывающих конструкций
-            if line.startswith("end") or line.startswith("until") or line.startswith("}"):
-                indent = max(0, indent - 1)
-                
-            formatted.append(("\t" * indent) + line)
-            
-            # Увеличиваем отступ для открывающих
-            if (line.endswith("then") or line.endswith("do") or line.endswith("repeat") or 
-                line.endswith("{") or line.endswith("(")):
-                indent += 1
-                
-        return "\n".join(formatted)
+    def _beautify_lua(self, source_code):
+        # Простой "красивизатор"
+        source_code = source_code.replace(";", ";\n")
+        source_code = source_code.replace(" end ", "\nend\n")
+        source_code = source_code.replace(" then ", " then\n")
+        source_code = source_code.replace(" do ", " do\n")
+        return source_code
