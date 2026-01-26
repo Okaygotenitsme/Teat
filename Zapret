@@ -1,184 +1,589 @@
+import lupa
+from lupa import LuaRuntime
+import logging
+import subprocess
+import os
+import tempfile
 import re
-import random
-import string
-import base64
-import zlib
-from typing import List, Dict
+import binascii
+import struct
 
-class MelotenObfuscator:
-    """Мощный обфускатор для Roblox Lua - Meloten v0.1"""
-    
+logger = logging.getLogger("DeobfuscatorEngine")
+
+class DeobfuscatorEngine:
     def __init__(self):
-        self.header = """--[[ This file was protected with using Meloten:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        self.unluac_path = os.path.join(base_dir, "unluac.jar")
+        logger.info(f"📁 Working Dir: {base_dir}")
 
-http://t.me/Meloten_Obfuscatorbot ]]
+    def process(self, content, status_callback=None):
+        def update_status(msg):
+            if status_callback: status_callback(msg)
+            logger.info(f"[STATUS] {msg}")
 
-"""
-        # Lua ключевые слова
-        self.keywords = {
-            'and', 'break', 'do', 'else', 'elseif', 'end', 'false', 
-            'for', 'function', 'if', 'in', 'local', 'nil', 'not', 
-            'or', 'repeat', 'return', 'then', 'true', 'until', 'while',
-            'game', 'workspace', 'script', 'print', 'warn', 'wait',
-            'pairs', 'ipairs', 'next', 'type', 'tostring', 'tonumber',
-            'table', 'string', 'math', 'require', 'loadstring'
-        }
-        
-        self.var_mapping = {}
-        self.instructions = []
-        self.constants = []
-        self.protos = []
-        
-    def generate_random_name(self, length=8, prefix=''):
-        """Генерация случайного имени переменной"""
-        chars = string.ascii_letters + string.digits
-        if not prefix:
-            prefix = random.choice(['_', '__', '___'])
-        name = prefix + ''.join(random.choices(chars, k=length))
-        return name
-    
-    def encode_string(self, s):
-        """Кодирование строки в байты"""
-        result = []
-        for char in s:
-            # XOR кодирование с рандомным ключом
-            encoded = ord(char) ^ random.randint(1, 255)
-            result.append(str(encoded))
-        return ','.join(result)
-    
-    def create_char_array(self, text):
-        """Создание массива символов из текста"""
-        return ','.join([str(ord(c)) for c in text])
-    
-    def compress_bytecode(self, code):
-        """Сжатие кода в псевдо-байткод"""
-        # Преобразование в числовой формат
-        compressed = []
-        for i, char in enumerate(code):
-            val = ord(char)
-            # Добавляем шум
-            if random.random() < 0.3:
-                compressed.append(str(val + random.randint(-10, 10)))
+        if not self._check_java():
+            return b"-- [FATAL] Java is missing. Install Java to use unluac."
+
+        # === ДЕТЕКЦИЯ ФОРМАТА ===
+        is_binary = self._is_luac_bytecode(content)
+        if is_binary:
+            update_status("🔍 Обнаружен скомпилированный байткод Lua")
+            # Сразу пробуем декомпилировать
+            decompiled = self._try_decompile(content)
+            if decompiled:
+                return self._wrap_output(decompiled, [], [], ["✅ Декомпиляция прошла успешно"])
             else:
-                compressed.append(str(val))
-        
-        return ''.join([
-            random.choice(['<', '>', ':', ';', '=', '@', '[', ']']) + 
-            compressed[i] if i < len(compressed) else ''
-            for i in range(0, len(compressed), 2)
-        ])
-    
-    def create_vm_wrapper(self, code):
-        """Создание обертки виртуальной машины"""
-        # Переменные для VM
-        vm_vars = {
-            'table': self.generate_random_name(1, ''),
-            'string': self.generate_random_name(1, ''),
-            'bit': self.generate_random_name(1, ''),
-            'byte': self.generate_random_name(1, ''),
-            'char': self.generate_random_name(1, ''),
-            'sub': self.generate_random_name(1, ''),
-            'concat': self.generate_random_name(1, ''),
-            'insert': self.generate_random_name(1, ''),
-            'ldexp': self.generate_random_name(1, ''),
-            'getfenv': self.generate_random_name(1, ''),
-            'setmetatable': self.generate_random_name(1, ''),
-            'select': self.generate_random_name(1, ''),
-            'unpack': self.generate_random_name(1, ''),
-            'tonumber': self.generate_random_name(1, ''),
-            'bytecode': self.generate_random_name(1, ''),
-        }
-        
-        # Кодирование исходного кода
-        encoded_code = self.compress_bytecode(code)
-        
-        # Создание декодера байткода
-        decoder_func = self.generate_random_name(1, '')
-        
-        vm_template = f"""return(function(...)
-local {vm_vars['table']},{vm_vars['string']},{vm_vars['bit']}=table,string,bit or {{}}
-local {vm_vars['byte']},{vm_vars['char']},{vm_vars['sub']},{vm_vars['concat']},{vm_vars['insert']}={vm_vars['string']}.byte,{vm_vars['string']}.char,{vm_vars['string']}.sub,{vm_vars['table']}.concat,{vm_vars['table']}.insert
-local {vm_vars['ldexp']},{vm_vars['getfenv']},{vm_vars['setmetatable']},{vm_vars['select']},{vm_vars['unpack']},{vm_vars['tonumber']}=math.ldexp,getfenv and getfenv()or _ENV,setmetatable,select,unpack or {vm_vars['table']}.unpack,tonumber
-local {vm_vars['bytecode']}="{encoded_code}"
+                return b"-- [ERROR] Не удалось декомпилировать байткод. Попробуй другой декомпилятор."
 
-local function {decoder_func}(data)
-    local result,index,value="",1,0
-    local function read()
-        local ch={vm_vars['sub']}(data,index,index)
-        index=index+1
-        return ch
-    end
-    
-    while index<=#data do
-        local ch=read()
-        if ch:match("[%d]") then
-            value=value*10+{vm_vars['tonumber']}(ch)
-        else
-            if value>0 then
-                result=result..{vm_vars['char']}(value)
-                value=0
+        update_status("🧠 Инициализация среды Roblox (Emulation V4)...")
+
+        try:
+            lua = LuaRuntime(unpack_returned_tuples=True, encoding=None)
+        except Exception as e:
+            return f"-- [FATAL] Lua start error: {e}".encode('utf-8')
+
+        # === ПОЛНЫЙ СТЕК ПОЛИФИЛЛОВ ===
+        bit_polyfill = """
+        local bit = bit or {}
+        function bit.tobit(x) x = x % 4294967296; if x >= 2147483648 then x = x - 4294967296 end; return x end
+        function bit.bnot(x) return (-1 - x) % 4294967296 end
+        local function bit_oper(a, b, oper)
+            local r, m, s = 0, 2^31
+            repeat 
+                s, a, b = a+b+m, a%m, b%m
+                r, m = r + m*oper%(s-a-b), m/2 
+            until m < 1
+            return r
+        end
+        function bit.band(a, b) return bit_oper(a, b, 4) end
+        function bit.bor(a, b) return bit_oper(a, b, 1) end
+        function bit.bxor(a, b) return bit_oper(a, b, 3) end
+        function bit.lshift(a, b) return (a * 2^b) % 4294967296 end
+        function bit.rshift(a, b) return math.floor(a % 4294967296 / 2^b) end
+        function bit.arshift(a, b) 
+            a = a % 4294967296
+            if a >= 2147483648 then a = a - 4294967296 end
+            return math.floor(a / 2^b)
+        end
+        bit.rol = function(a, b) return bit.lshift(a, b) + bit.rshift(a, 32-b) end
+        bit.ror = function(a, b) return bit.rshift(a, b) + bit.lshift(a, 32-b) end
+        _G.bit = bit
+        _G.bit32 = bit
+        package.loaded.bit = bit
+        package.loaded.bit32 = bit
+        """
+
+        # === РАСШИРЕННАЯ ЭМУЛЯЦИЯ ROBLOX ===
+        roblox_emu = """
+        -- SIGNALS
+        local function CreateSignal()
+            local sig = {_callbacks = {}}
+            function sig:Connect(func)
+                table.insert(self._callbacks, func)
+                return {Disconnect = function() end}
+            end
+            function sig:Fire(...)
+                for _, f in ipairs(self._callbacks) do pcall(f, ...) end
+            end
+            function sig:Wait() return 0 end
+            return sig
+        end
+
+        -- INSTANCE SYSTEM
+        _G.Instance = {}
+        function _G.Instance.new(className, parent)
+            local obj = {
+                ClassName = className or "Part",
+                Name = className or "Part",
+                Parent = parent,
+                Archivable = true,
+                Changed = CreateSignal(),
+                ChildAdded = CreateSignal(),
+                ChildRemoved = CreateSignal(),
+                AncestryChanged = CreateSignal()
+            }
+            
+            function obj:Destroy() self.Parent = nil end
+            function obj:Clone() return _G.Instance.new(self.ClassName, self.Parent) end
+            function obj:ClearAllChildren() end
+            function obj:FindFirstChild(n) return nil end
+            function obj:WaitForChild(n, t) return _G.Instance.new("Folder") end
+            function obj:GetChildren() return {} end
+            function obj:GetDescendants() return {} end
+            function obj:IsA(cn) return self.ClassName == cn end
+            function obj:GetService(name) return _G.game:GetService(name) end
+            
+            setmetatable(obj, {
+                __index = function(t, k)
+                    if k == "Value" then return "MockValue" end
+                    return rawget(t, k)
+                end,
+                __tostring = function(t) return t.Name end
+            })
+            return obj
+        end
+
+        -- MATH TYPES
+        _G.Vector3 = setmetatable({}, {
+            __call = function(_, x, y, z) return {X=x or 0, Y=y or 0, Z=z or 0} end
+        })
+        _G.Vector3.new = function(x,y,z) return {X=x or 0, Y=y or 0, Z=z or 0} end
+        _G.Vector3.zero = {X=0, Y=0, Z=0}
+        _G.Vector3.one = {X=1, Y=1, Z=1}
+
+        _G.CFrame = setmetatable({}, {
+            __call = function(_, ...) return {p={X=0,Y=0,Z=0}} end
+        })
+        _G.CFrame.new = function(...) return {p={X=0,Y=0,Z=0}} end
+        _G.CFrame.Angles = _G.CFrame.new
+        _G.CFrame.fromEulerAnglesXYZ = _G.CFrame.new
+
+        _G.UDim2 = {new = function(...) return {} end, fromScale = function() return {} end}
+        _G.Color3 = {new = function(...) return {} end, fromRGB = function(...) return {} end, fromHSV = function() return {} end}
+        _G.BrickColor = {new = function() return {} end, Random = function() return {} end}
+        _G.NumberRange = {new = function() return {} end}
+        _G.NumberSequence = {new = function() return {} end}
+        _G.ColorSequence = {new = function() return {} end}
+        
+        -- ENUM MOCK
+        _G.Enum = setmetatable({}, {
+            __index = function(t, k)
+                return setmetatable({}, {__index = function() return {Value=1, Name=k} end})
+            end
+        })
+
+        -- TASK API
+        _G.task = {
+            wait = function(t) return t or 0 end,
+            spawn = function(f) pcall(f) return 0 end,
+            delay = function(t, f) pcall(f) return 0 end,
+            defer = function(f) pcall(f) return 0 end,
+            cancel = function() end,
+            desynchronize = function() end,
+            synchronize = function() end
+        }
+        _G.wait = _G.task.wait
+        _G.spawn = _G.task.spawn
+        _G.delay = _G.task.delay
+
+        -- GAME STRUCTURE
+        _G.game = _G.Instance.new("DataModel")
+        _G.game.GetService = function(self, name)
+            if name == "Players" then return self.Players end
+            if name == "RunService" then return self.RunService end
+            if name == "HttpService" then return self.HttpService end
+            if name == "ReplicatedStorage" then return self.ReplicatedStorage end
+            if name == "Workspace" then return _G.workspace end
+            return _G.Instance.new(name, self)
+        end
+
+        _G.game.Players = _G.Instance.new("Players", _G.game)
+        _G.game.Players.LocalPlayer = _G.Instance.new("Player")
+        _G.game.Players.LocalPlayer.Name = "DeobfUser"
+        _G.game.Players.LocalPlayer.UserId = 123456
+        _G.game.Players.LocalPlayer.Character = _G.Instance.new("Model")
+
+        _G.game.RunService = _G.Instance.new("RunService")
+        _G.game.RunService.RenderStepped = CreateSignal()
+        _G.game.RunService.Heartbeat = CreateSignal()
+        _G.game.RunService.Stepped = CreateSignal()
+        _G.game.RunService.IsStudio = function() return true end
+        _G.game.RunService.IsClient = function() return true end
+
+        _G.game.HttpService = _G.Instance.new("HttpService")
+        _G.game.HttpService.JSONDecode = function(s) return {} end
+        _G.game.HttpService.JSONEncode = function(t) return '{}' end
+        _G.game.HttpService.GetAsync = function(url) return "" end
+        _G.game.HttpService.PostAsync = function(url, data) return "" end
+
+        _G.game.ReplicatedStorage = _G.Instance.new("ReplicatedStorage")
+        _G.workspace = _G.Instance.new("Workspace")
+        _G.script = _G.Instance.new("LocalScript")
+        _G.owner = _G.game.Players.LocalPlayer
+
+        -- EXECUTOR FUNCTIONS
+        _G.getgenv = function() return _G end
+        _G.getrenv = function() return _G end
+        _G.getfenv = function(f) return _G end
+        _G.setfenv = function(f, env) return f end
+        _G.getreg = function() return {} end
+        _G.getgc = function() return {} end
+        _G.getloadedmodules = function() return {} end
+        _G.getcallingscript = function() return _G.script end
+        _G.checkcaller = function() return true end
+        _G.islclosure = function() return true end
+        _G.iscclosure = function() return false end
+        _G.newcclosure = function(f) return f end
+        _G.hookfunction = function(o, n) return o end
+        _G.hookmetamethod = function(o, m, f) return function() end end
+        _G.getnamecallmethod = function() return "FireServer" end
+        _G.isreadonly = function() return false end
+        _G.setreadonly = function() end
+        _G.make_readonly = function() end
+        _G.make_writeable = function() end
+        """
+
+        # === УЛУЧШЕННЫЙ SPYWARE ===
+        spyware = """
+        _G.CAPTURED_CHUNKS = {}
+        _G.DETECTED_STRINGS = {}
+        _G.ACTION_LOG = {}
+        _G.FINAL_GLOBALS = {}
+        _G.NETWORK_CALLS = {}
+        
+        local function log_action(msg)
+            if #_G.ACTION_LOG < 1000 then
+                table.insert(_G.ACTION_LOG, msg)
             end
         end
-    end
-    
-    if value>0 then result=result..{vm_vars['char']}(value) end
-    return result
-end
 
-local decoded={decoder_func}({vm_vars['bytecode']})
-local exec=loadstring(decoded)
-if exec then return exec(...) end
-end)(...)"""
-        
-        return vm_template
-    
-    def add_control_flow_obfuscation(self, code):
-        """Продвинутая обфускация контроля потока"""
-        lines = code.split('\n')
-        result = []
-        
-        for line in lines:
-            stripped = line.strip()
-            if not stripped or stripped.startswith('--'):
-                result.append(line)
-                continue
+        -- УЛУЧШЕННЫЙ ЗАХВАТ СТРОК
+        local function capture_str(s)
+            if type(s) ~= "string" then return s end
+            if #s < 3 or #s > 10000 then return s end
             
-            # Случайное добавление dead code
-            if random.random() < 0.2:
-                junk = [
-                    f"if {random.randint(1,5)}>{random.randint(10,100)} then return end",
-                    f"local _={random.randint(1,1000)}",
-                    f"do end",
-                ]
-                result.append(random.choice(junk))
+            -- Фильтруем технический мусор
+            local blacklist = {
+                "stack traceback", "upvalue", "attempt to", 
+                "bad argument", "expected", "function", "table"
+            }
+            for _, pattern in ipairs(blacklist) do
+                if s:find(pattern, 1, true) then return s end
+            end
             
-            result.append(line)
+            _G.DETECTED_STRINGS[s] = (_G.DETECTED_STRINGS[s] or 0) + 1
+            return s
+        end
+
+        -- ХУК string.char (КРИТИЧНО ДЛЯ MOONSEC)
+        local real_char = string.char
+        string.char = function(...)
+            local res = real_char(...)
+            if #res > 5 then capture_str(res) end
+            return res
+        end
+
+        -- ХУК table.concat
+        local real_concat = table.concat
+        table.concat = function(tbl, sep, i, j)
+            local res = real_concat(tbl, sep, i, j)
+            capture_str(res)
+            return res
+        end
+
+        -- ХУК string.byte (обратная операция)
+        local real_byte = string.byte
+        string.byte = function(s, i, j)
+            capture_str(s)
+            return real_byte(s, i, j)
+        end
+
+        -- ХУК LOAD/LOADSTRING (ДВОЙНОЙ ПЕРЕХВАТ)
+        local real_load = load or loadstring
+        local function hooked_load(chunk, name, mode, env)
+            if type(chunk) == "string" then
+                if #chunk > 50 then
+                    table.insert(_G.CAPTURED_CHUNKS, {
+                        data = chunk, 
+                        size = #chunk, 
+                        name = name or "anonymous"
+                    })
+                    log_action("🔥 Captured Chunk: " .. #chunk .. " bytes")
+                end
+                capture_str(chunk)
+            end
+            return real_load(chunk, name, mode, env or _G)
+        end
         
-        return '\n'.join(result)
-    
-    def rename_variables(self, code):
-        """Переименование всех переменных"""
-        # Поиск всех локальных переменных
-        pattern = r'\blocal\s+([a-zA-Z_][a-zA-Z0-9_]*)'
+        _G.load = hooked_load
+        _G.loadstring = hooked_load
+        load = hooked_load
+        loadstring = hooked_load
+
+        -- NETWORK SPY
+        if _G.game and _G.game.HttpService then
+            local HttpService = _G.game.HttpService
+            HttpService.GetAsync = function(self, url, ...)
+                table.insert(_G.NETWORK_CALLS, "GET: " .. tostring(url))
+                log_action("🌐 HTTP GET: " .. tostring(url))
+                return ""
+            end
+            HttpService.PostAsync = function(self, url, data, ...)
+                table.insert(_G.NETWORK_CALLS, "POST: " .. tostring(url))
+                log_action("🌐 HTTP POST: " .. tostring(url))
+                return ""
+            end
+        end
+
+        -- REMOTESPY (ROBLOX NETWORKING)
+        local function spy_remote(remote, method)
+            return function(self, ...)
+                local args = {...}
+                local info = method .. " on " .. tostring(self.Name or "Unknown")
+                table.insert(_G.NETWORK_CALLS, info)
+                log_action("📡 " .. info)
+            end
+        end
+
+        -- Патчим удаленные события/функции
+        local mt = getmetatable(_G.game) or {}
+        local old_index = mt.__index or function(t, k) return rawget(t, k) end
+        mt.__index = function(t, k)
+            local v = old_index(t, k)
+            if type(v) == "table" and (k == "RemoteEvent" or k == "RemoteFunction") then
+                if not v._SPIED then
+                    v._SPIED = true
+                    v.FireServer = spy_remote(v, "FireServer")
+                    v.InvokeServer = spy_remote(v, "InvokeServer")
+                end
+            end
+            return v
+        end
+        setmetatable(_G.game, mt)
+
+        -- DUMP GLOBALS
+        function _G.dump_globals()
+            local ignore = {
+                string=1, math=1, table=1, bit=1, bit32=1, 
+                pairs=1, ipairs=1, next=1, _G=1, _VERSION=1,
+                Instance=1, Vector3=1, CFrame=1, game=1, workspace=1
+            }
+            
+            for k, v in pairs(_G) do
+                if not ignore[k] and type(k) == "string" then
+                    local t = type(v)
+                    if t == "string" or t == "number" or t == "boolean" then
+                        if t == "string" and #v < 200 then
+                            table.insert(_G.FINAL_GLOBALS, k .. ' = "' .. v .. '"')
+                        elseif t ~= "string" then
+                            table.insert(_G.FINAL_GLOBALS, k .. " = " .. tostring(v))
+                        end
+                    end
+                end
+            end
+        end
+        """
+
+        full_setup = bit_polyfill + "\n" + roblox_emu + "\n" + spyware
+
+        try:
+            update_status("🌪️ Запуск скрипта в песочнице...")
+            lua.execute(full_setup)
+            
+            # БЕЗОПАСНЫЙ РАННЕР
+            runner = lua.eval("""
+                function(code)
+                    local success, err = pcall(function()
+                        local chunk, load_err = load(code, "main", "t", _G)
+                        if not chunk then
+                            table.insert(_G.ACTION_LOG, "❌ Load Error: " .. tostring(load_err))
+                            return
+                        end
+                        
+                        local run_ok, run_err = pcall(chunk)
+                        if not run_ok then
+                            table.insert(_G.ACTION_LOG, "⚠️ Runtime Error: " .. tostring(run_err))
+                        end
+                    end)
+                    
+                    if not success then
+                        table.insert(_G.ACTION_LOG, "💥 Fatal: " .. tostring(err))
+                    end
+                    
+                    pcall(_G.dump_globals)
+                    return success
+                end
+            """)
+            
+            # ЗАПУСК
+            try:
+                decoded_content = content.decode('utf-8')
+            except:
+                decoded_content = content.decode('latin-1', errors='ignore')
+            
+            runner(decoded_content)
+
+            # СБОР ДАННЫХ
+            strings_dict = lua.globals().DETECTED_STRINGS
+            detected_strings = [k for k in strings_dict.keys()]
+            
+            global_dump = list(lua.globals().FINAL_GLOBALS)
+            action_log = list(lua.globals().ACTION_LOG)
+            network_calls = list(lua.globals().NETWORK_CALLS)
+            chunks = lua.globals().CAPTURED_CHUNKS
+            
+            # ВЫБОР ЛУЧШЕГО ЧАНКА
+            best_chunk = None
+            max_size = 0
+            if len(chunks) > 0:
+                for i in range(1, len(chunks) + 1):
+                    c = chunks[i]
+                    if c.size > max_size:
+                        max_size = c.size
+                        best_chunk = c.data
+            
+            target_code = best_chunk if best_chunk else decoded_content
+            
+            return self._finalize_output(
+                target_code, 
+                detected_strings, 
+                global_dump, 
+                action_log,
+                network_calls,
+                update_status
+            )
+
+        except Exception as e:
+            logger.error(f"Engine Crash: {e}")
+            return f"-- [CRASH ERROR]: {str(e)}".encode('utf-8')
+
+    def _is_luac_bytecode(self, data):
+        """Проверяет, является ли файл скомпилированным байткодом Lua"""
+        if len(data) < 4:
+            return False
+        # Lua 5.1/5.2/5.3 signature
+        return data[:4] in [b'\x1bLua', b'\x1bLuQ', b'\x1bLuR']
+
+    def _check_java(self):
+        try:
+            subprocess.run(["java", "-version"], 
+                         stdout=subprocess.DEVNULL, 
+                         stderr=subprocess.DEVNULL,
+                         timeout=5)
+            return True
+        except:
+            return False
+
+    def _clean_string(self, s):
+        if isinstance(s, bytes):
+            try:
+                return s.decode('utf-8')
+            except:
+                return s.decode('latin-1', errors='ignore')
+        return str(s)
+
+    def _finalize_output(self, code, strings, globals_dump, logs, network_calls, callback):
+        if callback:
+            callback("🧬 Финальная декомпиляция...")
         
-        for match in re.finditer(pattern, code):
-            var_name = match.group(1)
-            if var_name not in self.keywords and var_name not in self.var_mapping:
-                new_name = self.generate_random_name(random.randint(6, 12))
-                self.var_mapping[var_name] = new_name
+        # Пробуем декомпилировать
+        decompiled = None
+        if isinstance(code, str):
+            code_bytes = code.encode('utf-8')
+        else:
+            code_bytes = code
         
-        # Замена переменных
-        for original, obfuscated in self.var_mapping.items():
-            code = re.sub(r'\b' + re.escape(original) + r'\b', obfuscated, code)
+        decompiled = self._try_decompile(code_bytes)
         
-        return code
-    
-    def minify_code(self, code):
-        """Минификация кода"""
-        # Удаление комментариев
-        code = re.sub(r'--[^\n]*', '', code)
-        # Удаление лишних пробелов
-        code = re.sub(r'[ \t]+', ' ', code)
-        # Удаление пустых строк
-        code = re.sub(r'\n\s*\n+', '\n', code)
-        return code.strip()
+        return self._wrap_output(
+            decompiled or code_bytes,
+            strings,
+            globals_dump,
+            logs,
+            network_calls
+        )
+
+    def _wrap_output(self, code, strings, globals_dump, logs, network_calls=None):
+        """Формирует финальный вывод"""
+        final_text = "-- ╔═══════════════════════════════════════╗\n"
+        final_text += "-- ║   ROBLOX DEOBFUSCATOR V4 REPORT     ║\n"
+        final_text += "-- ╚═══════════════════════════════════════╝\n\n"
+        
+        # NETWORK CALLS
+        if network_calls and len(network_calls) > 0:
+            final_text += "-- [[ 📡 NETWORK CALLS (RemoteSpy) ]]\n"
+            for call in network_calls[:50]:
+                final_text += f"-- {self._clean_string(call)}\n"
+            final_text += "\n"
+
+        # STRINGS
+        if strings:
+            final_text += "-- [[ 🔎 EXTRACTED STRINGS ]]\n"
+            # Дедупликация и сортировка
+            unique_strings = list(set(strings))
+            unique_strings.sort(key=lambda x: len(str(x)), reverse=True)
+            
+            for s in unique_strings[:100]:  # топ 100
+                clean = self._clean_string(s).replace('\n', '\\n').replace('\r', '')
+                if len(clean) > 3 and len(clean) < 500:
+                    final_text += f'-- "{clean}"\n'
+            final_text += "\n"
+
+        # GLOBALS
+        if globals_dump:
+            final_text += "-- [[ 🌐 GLOBAL VARIABLES ]]\n"
+            for g in globals_dump[:50]:
+                final_text += f"-- {self._clean_string(g)}\n"
+            final_text += "\n"
+
+        # LOGS
+        if logs:
+            final_text += "-- [[ 📋 EXECUTION LOG ]]\n"
+            for log in logs[-30:]:
+                final_text += f"-- {self._clean_string(log)}\n"
+            final_text += "\n"
+
+        final_text += "-- " + "="*50 + "\n"
+        final_text += "-- [[ 📜 DECOMPILED SOURCE CODE ]]\n"
+        final_text += "-- " + "="*50 + "\n\n"
+        
+        # КОД
+        if isinstance(code, bytes):
+            try:
+                source = code.decode('utf-8', errors='ignore')
+            except:
+                source = code.decode('latin-1', errors='ignore')
+        else:
+            source = str(code)
+        
+        final_text += self._beautify_lua(source)
+        
+        return final_text.encode('utf-8')
+
+    def _try_decompile(self, bytecode):
+        """Декомпиляция через unluac.jar"""
+        if not os.path.exists(self.unluac_path):
+            logger.warning("unluac.jar not found")
+            return None
+        
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".luac", mode='wb') as tmp:
+                tmp.write(bytecode)
+                tmp_path = tmp.name
+            
+            result = subprocess.run(
+                ["java", "-Xmx1G", "-jar", self.unluac_path, tmp_path],
+                capture_output=True,
+                timeout=15
+            )
+            
+            os.remove(tmp_path)
+            
+            if result.returncode == 0 and len(result.stdout) > 0:
+                return result.stdout
+            
+            return None
+        except Exception as e:
+            logger.error(f"Decompile failed: {e}")
+            return None
+
+    def _beautify_lua(self, code):
+        """Базовое форматирование Lua"""
+        # Убираем лишние пробелы
+        code = re.sub(r'\s+', ' ', code)
+        
+        # Переносы строк после ключевых слов
+        keywords = ['local ', 'function ', 'return ', 'if ', 'then ', 
+                   'else ', 'elseif ', 'end ', 'for ', 'while ', 'repeat ', 'until ']
+        
+        for kw in keywords:
+            code = code.replace(' ' + kw, '\n' + kw)
+        
+        code = code.replace(' do ', ' do\n')
+        code = code.replace(';', ';\n')
+        code = code.replace('{', '{\n')
+        code = code.replace('}', '\n}')
+        
+        # Убираем пустые строки
+        lines = [l for l in code.split('\n') if l.strip()]
+        return '\n'.join(lines)
