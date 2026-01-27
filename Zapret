@@ -1,119 +1,304 @@
-import asyncio
-import os
+import lupa
+from lupa import LuaRuntime
 import logging
-import uuid
-from aiogram import Bot, Dispatcher, F, types
-from aiogram.types import FSInputFile
-from aiogram.filters import Command
+import subprocess
+import os
+import tempfile
+import re
+import binascii
 
-# Импортируем наш обновленный движок из engine.py
-from engine import DeobfuscatorEngine
+logger = logging.getLogger("DeobfuscatorEngine")
 
-# --- НАСТРОЙКИ ---
-API_TOKEN = 'ТВОЙ_ТОКЕН_СЮДА'
+class DeobfuscatorEngine:
+    def __init__(self):
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        self.unluac_path = os.path.join(base_dir, "unluac.jar")
+        
+    def process(self, content, status_callback=None):
+        def update_status(msg):
+            if status_callback: status_callback(msg)
+            logger.info(f"[STATUS] {msg}")
 
-# Настройка логирования для отладки
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(message)s")
-logger = logging.getLogger("DeobfBot")
+        has_java = self._check_java()
+        if not has_java:
+            update_status("⚠️ Java не найдена. Декомпиляция байткода будет пропущена.")
 
-bot = Bot(token=API_TOKEN)
-dp = Dispatcher()
-engine = DeobfuscatorEngine()
+        update_status("🧠 Запуск LuaJIT (Safe Mode)...")
 
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message):
-    await message.answer(
-        "🤖 **Roblox Deobfuscator V2 (Advanced)**\n\n"
-        "Отправь мне файл `.lua` или `.txt`. Я применю агрессивные хуки для обхода защиты IronBrew и MoonSec.\n\n"
-        "Что я умею:\n"
-        "✅ Перехват динамических строк (`string.char`)\n"
-        "✅ Извлечение скрытого кода из `loadstring`\n"
-        "✅ Сбор констант из виртуальной машины (VM)\n"
-        "✅ Эмуляция окружения Roblox",
-        parse_mode="Markdown"
-    )
+        try:
+            # Создаем Lua Runtime
+            lua = LuaRuntime(unpack_returned_tuples=True)
+        except Exception as e:
+            return f"-- [FATAL] Ошибка запуска Lua: {e}".encode('utf-8')
 
-@dp.message(F.document)
-async def handle_document(message: types.Message):
-    user_id = message.from_user.id
-    unique_id = uuid.uuid4().hex[:8]
-    file_name = message.document.file_name or "script.lua"
-    
-    # Пути для временных файлов
-    input_path = f"temp_{user_id}_{unique_id}.lua"
-    output_path = f"Result_{unique_id}_{file_name}.txt"
+        # ==========================================
+        # 1. ПОЛИФИЛЛЫ BIT32 (Критично для IB2)
+        # ==========================================
+        bit_polyfill = """
+        local bit = {}
+        function bit.bnot(a) return 4294967295 - a % 4294967296 end
+        function bit.band(a, b) local r = 0; local m = 0; for i = 0, 31 do m = 2^i; if (a % (m*2) >= m) and (b % (m*2) >= m) then r = r + m end end return r end
+        function bit.bor(a, b) local r = 0; local m = 0; for i = 0, 31 do m = 2^i; if (a % (m*2) >= m) or (b % (m*2) >= m) then r = r + m end end return r end
+        function bit.bxor(a, b) local r = 0; local m = 0; for i = 0, 31 do m = 2^i; if (a % (m*2) >= m) ~= (b % (m*2) >= m) then r = r + m end end return r end
+        function bit.lshift(a, b) return (a * 2^b) % 4294967296 end
+        function bit.rshift(a, b) return math.floor(a / 2^b) % 4294967296 end
+        
+        _G.bit = bit
+        _G.bit32 = bit 
+        """
 
-    status_msg = await message.answer("⏳ **Инициализация эмулятора...**", parse_mode="Markdown")
-    
-    loop = asyncio.get_running_loop()
-    
-    # Функция для обновления статуса в Телеграме прямо из недр движка
-    def sync_status_updater(text):
-        async def edit_coro():
+        # ==========================================
+        # 2. ИСПРАВЛЕННАЯ СИСТЕМА ХУКОВ
+        # ==========================================
+        spyware = """
+        _G.DEOBF_RESULT = {
+            strings = {},
+            logs = {},
+            captured_scripts = {}
+        }
+        
+        local function safe_log(msg)
+            table.insert(_G.DEOBF_RESULT.logs, tostring(msg))
+        end
+
+        -- :: ANTI-DETECTION & HOOKS ::
+        local real_debug = debug and debug.getinfo or function() end
+        local real_string_char = string.char
+        
+        -- Определяем, как называется функция загрузки в текущей версии Lua
+        local real_loadstring = _G.loadstring or _G.load
+        
+        -- Хук на string.char (дешифровка строк)
+        string.char = function(...)
+            local args = {...}
+            -- Вызываем оригинал
+            local res = real_string_char(unpack(args))
+            
+            if #res > 3 then 
+                local clean = res:gsub("[%c]", "")
+                if #clean > 3 then
+                    _G.DEOBF_RESULT.strings[res] = true 
+                end
+            end
+            return res
+        end
+
+        -- Хук на table.concat
+        local real_concat = table.concat
+        table.concat = function(t, sep, i, j)
+            local res = real_concat(t, sep, i, j)
+            if type(res) == "string" and #res > 4 then
+                _G.DEOBF_RESULT.strings[res] = true
+            end
+            return res
+        end
+
+        -- ВАЖНОЕ ИСПРАВЛЕНИЕ: Хук на loadstring через _G, а не getfenv
+        -- Создаем функцию-перехватчик
+        local function hooked_loadstring(chunk, name)
+            if type(chunk) == "string" then
+                safe_log("🔥 LOADSTRING CAUGHT! Size: " .. #chunk)
+                table.insert(_G.DEOBF_RESULT.captured_scripts, chunk)
+            end
+            if real_loadstring then
+                return real_loadstring(chunk, name)
+            end
+            return nil
+        end
+
+        -- Применяем хук глобально
+        _G.loadstring = hooked_loadstring
+        _G.load = hooked_loadstring
+
+        -- :: ROBLOX MOCKS ::
+        _G.game = {
+            GetService = function(s, n)
+                return {
+                    HttpGet = function(self, url) 
+                        safe_log("🌍 HttpGet: " .. tostring(url))
+                        return "<html>Mock</html>" 
+                    end,
+                    HttpPost = function(self, url, d)
+                        safe_log("🌍 HttpPost: " .. tostring(url))
+                        return "{}" 
+                    end
+                }
+            end,
+            PlaceId = 123456
+        }
+        _G.script = { Parent = _G.game }
+        _G.workspace = {}
+        
+        -- Окружение (фикс для скриптов, проверяющих getfenv)
+        if not getfenv then
+            _G.getfenv = function() return _G end
+        end
+
+        _G.getgenv = function() return _G end
+        _G.getrenv = function() return _G end
+        _G.syn = { request = function() end }
+        _G.http_request = function() end
+        _G.is_synapse_function = function() return true end
+
+        -- :: CONSTANT HARVESTER ::
+        function _G.harvest_constants()
+            local found_count = 0
+            local function scan_table(t, depth)
+                if depth > 2 then return end
+                for k, v in pairs(t) do
+                    if type(v) == "string" and #v > 4 then
+                        _G.DEOBF_RESULT.strings[v] = true
+                        found_count = found_count + 1
+                    elseif type(v) == "table" and k ~= "_G" and k ~= "package" then
+                        scan_table(v, depth + 1)
+                    end
+                end
+            end
+            scan_table(_G, 0)
+            return found_count
+        end
+        """
+
+        setup_code = bit_polyfill + "\n" + spyware
+
+        try:
+            update_status("🌪️ Запуск эмуляции скрипта...")
+            
+            # 1. Загружаем setup
+            lua.execute(setup_code)
+            
+            # 2. Подготовка и запуск пользовательского скрипта
+            lua.globals().USER_CODE_STRING = content
+            
+            res_table = lua.eval("""
+            (function()
+                local status, err = pcall(function()
+                    -- Используем наш перехваченный loadstring для запуска
+                    local func = loadstring(USER_CODE_STRING)
+                    if not func then error("Syntax Error in script") end
+                    func()
+                end)
+                
+                if not status then
+                    table.insert(_G.DEOBF_RESULT.logs, "❌ Runtime Error: " .. tostring(err))
+                end
+                
+                pcall(_G.harvest_constants)
+                return _G.DEOBF_RESULT
+            end)()
+            """)
+
+            # --- СБОР РЕЗУЛЬТАТОВ ---
+            detected_strings = []
+            if res_table['strings']:
+                for k, v in res_table['strings'].items():
+                    if isinstance(k, (bytes, str)): detected_strings.append(k)
+            
+            logs = []
+            if res_table['logs']:
+                for l in res_table['logs'].values(): logs.append(l)
+
+            captured_scripts = []
+            if res_table['captured_scripts']:
+                for k, v in res_table['captured_scripts'].items(): captured_scripts.append(v)
+
+            target_code = content
+            is_captured = False
+            
+            if len(captured_scripts) > 0:
+                target_code = max(captured_scripts, key=len)
+                is_captured = True
+                update_status(f"🔓 Перехвачен скрытый скрипт ({len(target_code)} байт)!")
+
+            return self._finalize_output(target_code, detected_strings, logs, update_status, is_captured)
+
+        except Exception as e:
+            logger.error(f"Engine Exception: {e}")
+            return f"-- [CRASH]: {e}".encode('utf-8')
+
+    def _finalize_output(self, code_bytes, strings, logs, callback, is_decompiled_chunk):
+        if callback: callback("🧬 Формирование отчета...")
+        
+        decompiled_src = None
+        if self._check_java():
+            decompiled_src = self._try_decompile(code_bytes)
+
+        final_text = ""
+        final_text += "-- [[ EXECUTION LOGS ]] --\n"
+        for l in logs:
+            final_text += f"-- {self._clean(l)}\n"
+            
+        final_text += "\n" + "="*40 + "\n-- [[ DECRYPTED STRINGS ]] --\n\n"
+        
+        seen = set()
+        # Сортировка: сначала длинные строки (вероятнее всего полезные)
+        sorted_strings = sorted(strings, key=lambda x: len(str(x)), reverse=True)
+        
+        for s in sorted_strings:
+            s_clean = self._clean(s).strip()
+            if s_clean not in seen and len(s_clean) > 4:
+                # Фильтр совсем бинарного мусора
+                if not all(c in ' \t\n\r' for c in s_clean):
+                    final_text += f'-- "{s_clean}"\n'
+                    seen.add(s_clean)
+
+        final_text += "\n" + "="*40 + "\n\n"
+        
+        if decompiled_src:
+            final_text += "-- [[ DECOMPILED SOURCE (Unluac) ]] --\n\n"
+            final_text += self._beautify_lua(decompiled_src.decode('utf-8', 'ignore'))
+        else:
+            final_text += "-- [[ SOURCE / BYTECODE ]] --\n"
+            if is_decompiled_chunk:
+                final_text += "-- Warning: This is likely raw bytecode or a packed script.\n"
+            
             try:
-                await status_msg.edit_text(f"⚙️ **Статус:** {text}", parse_mode="Markdown")
-            except Exception: pass 
-        
-        if not loop.is_closed():
-            asyncio.run_coroutine_threadsafe(edit_coro(), loop)
+                final_text += code_bytes.decode('utf-8')
+            except:
+                final_text += f"-- Binary data (Hex):\n"
+                final_text += str(binascii.hexlify(code_bytes[:512]))
 
-    try:
-        # 1. Скачиваем файл пользователя
-        file = await bot.get_file(message.document.file_id)
-        await bot.download_file(file.file_path, input_path)
+        return final_text.encode('utf-8')
 
-        with open(input_path, "rb") as f: 
-            content = f.read()
+    def _try_decompile(self, bytecode):
+        if isinstance(bytecode, bytes) and not bytecode.startswith(b'\x1bLua'):
+            return None 
 
-        # 2. Запуск движка в отдельном потоке (чтобы бот не "зависал")
-        # Мы ставим таймаут 2 минуты, так как сложные VM могут долго "раздупляться"
-        result_data = await asyncio.wait_for(
-            loop.run_in_executor(None, engine.process, content, sync_status_updater),
-            timeout=120.0 
-        )
+        if not os.path.exists(self.unluac_path): return None
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".lua", mode='wb') as tmp:
+                tmp.write(bytecode)
+                path = tmp.name
+            
+            # Увеличен timeout, так как IB2 скрипты сложные
+            res = subprocess.run(
+                ["java", "-jar", self.unluac_path, path], 
+                capture_output=True, timeout=20
+            )
+            os.remove(path)
+            if res.returncode == 0 and len(res.stdout) > 0: 
+                return res.stdout
+            return None
+        except: return None
 
-        # 3. Сохраняем и отправляем результат
-        with open(output_path, "wb") as f: 
-            f.write(result_data)
-        
-        out_file = FSInputFile(output_path)
-        
-        # Формируем умную подпись к файлу
-        caption = "✅ **Анализ завершен!**\n"
-        
-        if b"LOADSTRING CAUGHT" in result_data:
-            caption += "🔥 **Вскрыто:** Найден скрытый `loadstring` (чистый код)!\n"
-        if b"DECRYPTED STRINGS" in result_data:
-            caption += "🔎 **Строки:** Извлечены ключи и вебхуки.\n"
-        if b"DECOMPILED SOURCE" in result_data:
-            caption += "📜 **Код:** Байткод успешно декомпилирован.\n"
-        if b"Runtime Error" in result_data:
-            caption += "⚠️ **Внимание:** Скрипт выдал ошибку при выполнении, но данные собраны.\n"
+    def _check_java(self):
+        try:
+            subprocess.run(["java", "-version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return True
+        except: return False
 
-        await message.answer_document(out_file, caption=caption, parse_mode="Markdown")
+    def _clean(self, s):
+        if isinstance(s, bytes):
+            try: return s.decode('utf-8', 'ignore')
+            except: return str(s)
+        return str(s).replace('\n', ' ').replace('\r', '')
 
-    except asyncio.TimeoutError:
-        await status_msg.edit_text("❌ **Ошибка:** Превышено время ожидания (2 мин). Скрипт слишком тяжелый.")
-    except Exception as e:
-        logger.error(f"Error: {e}")
-        await message.answer(f"❌ Произошла критическая ошибка: `{str(e)[:100]}`", parse_mode="Markdown")
-    finally:
-        # Уборка за собой
-        await status_msg.delete()
-        for p in [input_path, output_path]:
-            if os.path.exists(p):
-                try: os.remove(p)
-                except: pass
-
-async def main():
-    logger.info("--- Бот запущен и готов к деобфускации ---")
-    await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    if os.name == 'nt': # Фикс для Windows
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        pass
+    def _beautify_lua(self, source_code):
+        source_code = re.sub(r'(\s)(local|return|if|for|while|repeat|function)(\s)', r'\n\2 ', source_code)
+        replacements = {
+            " then ": " then\n", " do ": " do\n", " end ": "\nend\n",
+            " repeat ": "\nrepeat\n", " until ": "\nuntil ", ";": ";\n"
+        }
+        for k, v in replacements.items():
+            source_code = source_code.replace(k, v)
+        return source_code
