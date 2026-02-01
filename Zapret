@@ -1,38 +1,22 @@
--- ... (начало скрипта такое же)
-local cooldowns = {} 
-
-function _G.CanBeTeacher(player)
-	-- 1. Проверка Геймпасса
-	local hasPass = false
-	pcall(function()
-		hasPass = MarketplaceService:UserOwnsGamePassAsync(player.UserId, TEACHER_PASS_ID)
-	end)
-	
-	if hasPass then
-		local lastTime = cooldowns[player.UserId] or 0
-		local timeLeft = 300 - (os.time() - lastTime) -- 300 секунд = 5 минут
+-- Находим это место в цикле while true do:
+task.spawn(function()
+	while true do
+		-- === 1. ПЕРЕМЕНА ===
+		currentTeacher = nil
+		nextTeacherCandidate = nil
+		teacherTopic = nil
+		essays = {}
+		scores = {}
+		skipTimer = false
 		
-		if timeLeft <= 0 then
-			return true, "Pass"
-		else
-			return false, "Cooldown", timeLeft -- Возвращаем, сколько осталось ждать
+		-- !!! НОВОЕ: Возвращаем ВСЕХ (включая прошлого учителя) на обычные стулья
+		for _, plr in pairs(Players:GetPlayers()) do
+			_G.SeatPlayer(plr, false) -- false значит сажаем как ученика
 		end
-	end
-	
-	-- 2. Проверка Токенов (на них кулдаун обычно не ставят, так как это платно)
-	if player.Data.TeacherTokens.Value > 0 then
-		return true, "Token"
-	end
-	
-	return false, "NoFunds"
-end
 
--- Списание (вызывается только когда раунд реально начался!)
-function _G.ChargeTeacher(player, method)
-	if method == "Pass" then
-		cooldowns[player.UserId] = os.time()
-		print("Установлен кулдаун для " .. player.Name)
-	elseif method == "Token" then
-		player.Data.TeacherTokens.Value -= 1
-	end
-end
+		for i = 15, 0, -1 do
+			Events.TimeUpdate:FireAllClients(i, "Перемена")
+			task.wait(1)
+		end
+        
+        -- ... (дальше идет выбор учителя и раунд)
