@@ -1,8 +1,115 @@
-local CheckFunction = Instance.new("RemoteFunction")
-CheckFunction.Name = "CheckTeacherStatus"
-CheckFunction.Parent = ReplicatedStorage
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
 
-CheckFunction.OnServerInvoke = function(player)
-	local canBe, reason, timeLeft = _G.CanBeTeacher(player)
-	return canBe, reason, timeLeft
+local studentSeatsFolder = Workspace:WaitForChild("ClassroomSeats")
+local teacherSeatFolder = Workspace:WaitForChild("TeacherSeat")
+
+-- Функция заморозки
+local function freezeCharacter(character, seat)
+	local hum = character:FindFirstChild("Humanoid")
+	local root = character:FindFirstChild("HumanoidRootPart")
+	if not hum or not root then return end
+	
+	seat:Sit(hum)
+	task.wait() -- Ждем кадр физики
+	
+	-- Только если реально сели - морозим
+	if hum.SeatPart == seat then
+		hum.WalkSpeed = 0
+		hum.JumpPower = 0
+		root.Anchored = true
+	end
 end
+
+-- Поиск свободного стула ученика
+local function getEmptyStudentSeat()
+	for _, seat in pairs(studentSeatsFolder:GetChildren()) do
+		if seat:IsA("Seat") and seat.Occupant == nil then
+			return seat
+		end
+	end
+	return nil
+end
+
+-- ГЛАВНАЯ ФУНКЦИЯ ПЕРЕСАДКИ
+local function seatPlayer(player, targetRoleIsTeacher)
+	local character = player.Character
+	if not character then return end
+	
+	local hum = character:FindFirstChild("Humanoid")
+	local root = character:FindFirstChild("HumanoidRootPart")
+	if not hum or not root then return end
+	
+	local currentSeat = hum.SeatPart
+	
+	-- === ПРОВЕРКА 1: Нужно ли вообще пересаживать? ===
+	
+	-- Если игрок должен быть УЧЕНИКОМ
+	if targetRoleIsTeacher == false then
+		-- Если он уже сидит на стуле УЧЕНИКА -> не трогаем его!
+		if currentSeat and currentSeat.Parent == studentSeatsFolder then
+			return 
+		end
+	end
+	
+	-- Если игрок должен быть УЧИТЕЛЕМ
+	if targetRoleIsTeacher == true then
+		-- Если он уже сидит на стуле УЧИТЕЛЯ -> не трогаем его!
+		if currentSeat and currentSeat.Parent == teacherSeatFolder then
+			return
+		end
+	end
+
+	-- === ПЕРЕСАДКА ===
+	-- Если мы дошли сюда, значит игрок сидит не там, где должен. Пересаживаем.
+	
+	-- 1. Сначала встаем и размораживаемся
+	if currentSeat then
+		hum.Sit = false
+		task.wait(0.1)
+	end
+	root.Anchored = false
+	hum.WalkSpeed = 16
+	
+	-- 2. Ищем целевой стул
+	local targetSeat = nil
+	
+	if targetRoleIsTeacher then
+		targetSeat = teacherSeatFolder:FindFirstChildWhichIsA("Seat")
+	else
+		targetSeat = getEmptyStudentSeat()
+	end
+	
+	-- 3. Если стул найден — сажаем
+	if targetSeat then
+		-- Телепортируем чуть выше стула
+		local hipHeight = hum.HipHeight
+		if hipHeight == 0 then hipHeight = 2 end -- Страховка, если персонаж не прогрузился
+		
+		root.CFrame = targetSeat.CFrame + Vector3.new(0, hipHeight + 1, 0)
+		
+		-- Важная пауза, чтобы сервер успел обработать телепорт перед посадкой
+		task.wait(0.15) 
+		
+		-- Сажаем принудительно
+		targetSeat:Sit(hum)
+		
+		-- Ждем еще немного и морозим
+		task.delay(0.3, function()
+			freezeCharacter(character, targetSeat)
+		end)
+	else
+		print("Нет мест для " .. player.Name)
+	end
+end
+
+-- Экспортируем функцию для использования в GameManager
+_G.SeatPlayer = seatPlayer
+
+-- При входе игрока - сажаем его как ученика
+Players.PlayerAdded:Connect(function(player)
+	player.CharacterAdded:Connect(function(character)
+		task.wait(1.5) -- Ждем полной прогрузки
+		seatPlayer(player, false)
+	end)
+end)
