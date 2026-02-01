@@ -1,27 +1,8 @@
--- В начале скрипта добавь:
-local CheckFunction = ReplicatedStorage:WaitForChild("CheckTeacherStatus")
+local CheckFunction = Instance.new("RemoteFunction")
+CheckFunction.Name = "CheckTeacherStatus"
+CheckFunction.Parent = ReplicatedStorage
 
--- Обнови логику кнопки RequestTeacherButton:
-requestTeacherButton.MouseButton1Click:Connect(function()
-    -- Вызываем функцию на сервере, чтобы узнать, можно ли нам стать учителем
-    local canBe, reason, timeLeft = CheckFunction:InvokeServer()
-    
-    if canBe then
-        requestTeacherButton.Text = "Запрос принят!"
-        Events.RequestTeacher:FireServer() -- Отправляем основной запрос
-        task.wait(2)
-        requestTeacherButton.Text = "Стать учителем"
-    elseif reason == "Cooldown" then
-        -- Если перезарядка
-        local minutes = math.floor(timeLeft / 60)
-        local seconds = timeLeft % 60
-        requestTeacherButton.Text = string.format("Жди %d:%02d", minutes, seconds)
-        task.wait(2)
-        requestTeacherButton.Text = "Стать учителем"
-    elseif reason == "NoFunds" then
-        requestTeacherButton.Text = "Нужен билет!"
-        shopFrame.Visible = true -- Сразу открываем магазин
-        task.wait(2)
-        requestTeacherButton.Text = "Стать учителем"
-    end
-end)
+CheckFunction.OnServerInvoke = function(player)
+	local canBe, reason, timeLeft = _G.CanBeTeacher(player)
+	return canBe, reason, timeLeft
+end
