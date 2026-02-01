@@ -1,115 +1,207 @@
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Players = game:GetService("Players")
-local Workspace = game:GetService("Workspace")
 
-local studentSeatsFolder = Workspace:WaitForChild("ClassroomSeats")
-local teacherSeatFolder = Workspace:WaitForChild("TeacherSeat")
+local Events = ReplicatedStorage:WaitForChild("Events")
 
--- Функция заморозки
-local function freezeCharacter(character, seat)
-	local hum = character:FindFirstChild("Humanoid")
-	local root = character:FindFirstChild("HumanoidRootPart")
-	if not hum or not root then return end
+-- Темы
+local normalTopics = {
+	"Почему я боюсь пылесоса", "Как я случайно стал президентом",
+	"Один день из жизни бутерброда", "Секретная жизнь учителей",
+	"Что делать, если инопланетяне просят соль", "Мой план захвата мира (с помощью котов)",
+	"Почему пицца круглая, а коробка квадратная?"
+}
+
+local RARE_CHANCE = 15 
+local rareTopics = {
+	"ОПИСАНИЕ: ТОЛЬКО ПРАВДА О СОЗДАТЕЛЕ Topsl_fann",
+	"ПИСЬМО В БУДУЩЕЕ: 3025 ГОД",
+	"ПОЧЕМУ РОБЛОКС ЭТО МАТРИЦА"
+}
+
+-- Переменные игры
+local essays = {}
+local scores = {}
+local currentVotedPlayer = nil
+local skipTimer = false
+local forceRare = false
+
+local currentTeacher = nil
+local teacherTopic = nil
+local afkPlayers = {} 
+
+-- === СОБЫТИЯ ===
+Events.ToggleAFK.OnServerEvent:Connect(function(player, isAfk)
+	afkPlayers[player.UserId] = isAfk
+end)
+
+Events.RequestTeacher.OnServerEvent:Connect(function(player)
+	-- Кандидат обрабатывается в цикле ниже
+end)
+
+Events.TeacherSetTopic.OnServerEvent:Connect(function(player, topic)
+	if player == currentTeacher then teacherTopic = topic end
+end)
+
+Events.SubmitEssay.OnServerEvent:Connect(function(player, text)
+	if text == "" then text = "..." end
+	essays[player] = text
 	
-	seat:Sit(hum)
-	task.wait() -- Ждем кадр физики
-	
-	-- Только если реально сели - морозим
-	if hum.SeatPart == seat then
-		hum.WalkSpeed = 0
-		hum.JumpPower = 0
-		root.Anchored = true
-	end
-end
-
--- Поиск свободного стула ученика
-local function getEmptyStudentSeat()
-	for _, seat in pairs(studentSeatsFolder:GetChildren()) do
-		if seat:IsA("Seat") and seat.Occupant == nil then
-			return seat
+	-- Считаем активных
+	local activeCount = 0
+	for _, p in pairs(Players:GetPlayers()) do
+		if not afkPlayers[p.UserId] and p ~= currentTeacher then
+			activeCount += 1
 		end
 	end
-	return nil
-end
+	
+	local submittedCount = 0
+	for _ in pairs(essays) do submittedCount += 1 end
+	
+	if submittedCount >= activeCount and activeCount > 0 then
+		skipTimer = true
+	end
+end)
 
--- ГЛАВНАЯ ФУНКЦИЯ ПЕРЕСАДКИ
-local function seatPlayer(player, targetRoleIsTeacher)
-	local character = player.Character
-	if not character then return end
-	
-	local hum = character:FindFirstChild("Humanoid")
-	local root = character:FindFirstChild("HumanoidRootPart")
-	if not hum or not root then return end
-	
-	local currentSeat = hum.SeatPart
-	
-	-- === ПРОВЕРКА 1: Нужно ли вообще пересаживать? ===
-	
-	-- Если игрок должен быть УЧЕНИКОМ
-	if targetRoleIsTeacher == false then
-		-- Если он уже сидит на стуле УЧЕНИКА -> не трогаем его!
-		if currentSeat and currentSeat.Parent == studentSeatsFolder then
-			return 
-		end
+Events.SendVote.OnServerEvent:Connect(function(voter, score)
+	if currentVotedPlayer and voter.Name ~= currentVotedPlayer.Name then
+		if not scores[currentVotedPlayer.Name] then scores[currentVotedPlayer.Name] = 0 end
+		scores[currentVotedPlayer.Name] += score
 	end
-	
-	-- Если игрок должен быть УЧИТЕЛЕМ
-	if targetRoleIsTeacher == true then
-		-- Если он уже сидит на стуле УЧИТЕЛЯ -> не трогаем его!
-		if currentSeat and currentSeat.Parent == teacherSeatFolder then
-			return
-		end
-	end
+end)
 
-	-- === ПЕРЕСАДКА ===
-	-- Если мы дошли сюда, значит игрок сидит не там, где должен. Пересаживаем.
-	
-	-- 1. Сначала встаем и размораживаемся
-	if currentSeat then
-		hum.Sit = false
-		task.wait(0.1)
-	end
-	root.Anchored = false
-	hum.WalkSpeed = 16
-	
-	-- 2. Ищем целевой стул
-	local targetSeat = nil
-	
-	if targetRoleIsTeacher then
-		targetSeat = teacherSeatFolder:FindFirstChildWhichIsA("Seat")
-	else
-		targetSeat = getEmptyStudentSeat()
-	end
-	
-	-- 3. Если стул найден — сажаем
-	if targetSeat then
-		-- Телепортируем чуть выше стула
-		local hipHeight = hum.HipHeight
-		if hipHeight == 0 then hipHeight = 2 end -- Страховка, если персонаж не прогрузился
+-- Админка
+Events.AdminCommand.OnServerEvent:Connect(function(player, action)
+	if player.Name ~= "Topsl_fann" then return end
+	if action == "SkipTimer" then skipTimer = true
+	elseif action == "ForceRare" then forceRare = true end
+end)
+
+-- === ГЛАВНЫЙ ЦИКЛ ===
+task.spawn(function()
+	while true do
+		-- 1. ПЕРЕМЕНА
+		currentTeacher = nil
+		teacherTopic = nil
+		essays = {}
+		scores = {}
+		skipTimer = false
 		
-		root.CFrame = targetSeat.CFrame + Vector3.new(0, hipHeight + 1, 0)
-		
-		-- Важная пауза, чтобы сервер успел обработать телепорт перед посадкой
-		task.wait(0.15) 
-		
-		-- Сажаем принудительно
-		targetSeat:Sit(hum)
-		
-		-- Ждем еще немного и морозим
-		task.delay(0.3, function()
-			freezeCharacter(character, targetSeat)
+		-- "Умная рассадка": Просим всех стать учениками.
+		-- Скрипт AutoSeater сам разберется: если ты уже ученик - он тебя не тронет.
+		-- Если ты был учителем - он пересадит тебя.
+		for _, plr in pairs(Players:GetPlayers()) do
+			if not afkPlayers[plr.UserId] then
+				_G.SeatPlayer(plr, false) 
+			end
+		end
+
+		local nextTeacherCandidate = nil
+
+		-- Слушаем запросы на учителя во время перемены (последний нажавший станет кандидатом)
+		local requestConnection
+		requestConnection = Events.RequestTeacher.OnServerEvent:Connect(function(plr)
+			local canBe, _, _ = _G.CanBeTeacher(plr)
+			if canBe then
+				nextTeacherCandidate = plr
+				print("Кандидат: " .. plr.Name)
+			end
 		end)
-	else
-		print("Нет мест для " .. player.Name)
+
+		for i = 15, 0, -1 do
+			Events.TimeUpdate:FireAllClients(i, "Перемена")
+			task.wait(1)
+		end
+		
+		requestConnection:Disconnect() -- Перестаем принимать заявки
+		
+		-- 2. ВЫБОР РОЛЕЙ
+		local topic = ""
+		
+		if nextTeacherCandidate and nextTeacherCandidate.Parent then
+			local canBe, method = _G.CanBeTeacher(nextTeacherCandidate)
+			if canBe then
+				currentTeacher = nextTeacherCandidate
+				_G.ChargeTeacher(currentTeacher, method)
+				
+				-- Сажаем учителя (Умный скрипт поймет, что его надо пересадить)
+				_G.SeatPlayer(currentTeacher, true)
+				
+				Events.StartRound:FireClient(currentTeacher, "TEACHER_MODE") 
+				
+				-- Ждем тему
+				for k = 20, 0, -1 do
+					if teacherTopic then break end
+					Events.TimeUpdate:FireAllClients(k, "Учитель выбирает тему...")
+					task.wait(1)
+				end
+				topic = teacherTopic or "Учитель уснул... Свободная тема!"
+			end
+		end
+		
+		if not currentTeacher then
+			if math.random(1, 100) <= RARE_CHANCE or forceRare then
+				topic = "[СЕКРЕТ] " .. rareTopics[math.random(1, #rareTopics)]
+				forceRare = false
+			else
+				topic = normalTopics[math.random(1, #normalTopics)]
+			end
+		end
+		
+		Events.StartRound:FireAllClients(topic)
+		
+		-- 3. ПИШЕМ
+		for i = 60, 0, -1 do
+			if skipTimer then break end
+			Events.TimeUpdate:FireAllClients(i, "Пишем")
+			task.wait(1)
+		end
+		
+		skipTimer = false
+		task.wait(2)
+		
+		-- 4. ГОЛОСОВАНИЕ
+		local participants = {}
+		for plr, txt in pairs(essays) do
+			table.insert(participants, {Player = plr, Text = txt})
+		end
+		
+		if #participants > 0 then
+			for _, entry in pairs(participants) do
+				local author = entry.Player
+				local text = entry.Text
+				currentVotedPlayer = author
+				
+				Events.ShowEssay:FireAllClients(author.Name, text)
+				
+				for i = 10, 0, -1 do
+					if skipTimer then break end 
+					Events.TimeUpdate:FireAllClients(i, "Оценка")
+					task.wait(1)
+				end
+				skipTimer = false
+			end
+		end
+		
+		-- 5. ИТОГИ
+		local winnerName = "Никто"
+		local maxScore = -1
+		for name, score in pairs(scores) do
+			if score > maxScore then
+				maxScore = score
+				winnerName = name
+			end
+		end
+		
+		if winnerName ~= "Никто" then
+			local winnerPlr = Players:FindFirstChild(winnerName)
+			if winnerPlr then
+				winnerPlr.leaderstats.Points.Value += 10
+			end
+			Events.ShowWinner:FireAllClients(winnerName .. " победил! Очков: " .. maxScore)
+		else
+			Events.ShowWinner:FireAllClients("Победила дружба")
+		end
+		
+		task.wait(5)
 	end
-end
-
--- Экспортируем функцию для использования в GameManager
-_G.SeatPlayer = seatPlayer
-
--- При входе игрока - сажаем его как ученика
-Players.PlayerAdded:Connect(function(player)
-	player.CharacterAdded:Connect(function(character)
-		task.wait(1.5) -- Ждем полной прогрузки
-		seatPlayer(player, false)
-	end)
 end)
