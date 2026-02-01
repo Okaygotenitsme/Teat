@@ -1,0 +1,238 @@
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local MarketplaceService = game:GetService("MarketplaceService")
+
+local player = Players.LocalPlayer
+local Events = ReplicatedStorage:WaitForChild("Events")
+
+-- === ⚙️ НАСТРОЙКИ ID (ОБЯЗАТЕЛЬНО ЗАМЕНИ!) ===
+local TEACHER_PRODUCT_ID = 0000000 -- ID Продукта "One-Time Teacher"
+local TEACHER_PASS_ID = 0000000    -- ID Геймпасса "Permanent Teacher"
+
+-- === 🖼️ ССЫЛКИ НА UI ===
+local ui = script.Parent
+
+-- Основные игровые экраны
+local paperFrame = ui:WaitForChild("PaperFrame")
+local votingFrame = ui:WaitForChild("VotingFrame")
+local winnerFrame = ui:WaitForChild("WinnerFrame")
+
+-- Элементы внутри PaperFrame (Листок)
+local topicLabel = paperFrame:WaitForChild("TopicLabel")
+local timeLabel = paperFrame:WaitForChild("TimeLabel")
+local inputBox = paperFrame:WaitForChild("InputBox")
+local submitButton = paperFrame:WaitForChild("SubmitButton")
+
+-- Элементы внутри VotingFrame (Голосование)
+local essayShowLabel = votingFrame:WaitForChild("EssayText")
+local authorLabel = votingFrame:WaitForChild("AuthorName")
+local buttonsContainer = votingFrame:WaitForChild("ButtonsContainer")
+
+-- Элементы внутри WinnerFrame (Победа)
+local winnerTextLabel = winnerFrame:WaitForChild("WinnerText")
+
+-- === 🛒 МАГАЗИН И КНОПКИ МЕНЮ ===
+-- Кнопки лежат прямо в MainUI
+local shopButton = ui:WaitForChild("ShopButton")
+local afkButton = ui:WaitForChild("AFKButton")
+local requestTeacherButton = ui:WaitForChild("RequestTeacherButton") -- Назови её так в Explorer!
+
+-- Окно магазина
+local shopFrame = ui:WaitForChild("ShopFrame")
+local btnBuyOne = shopFrame:WaitForChild("BtnBuyOne")
+local btnBuyPerm = shopFrame:WaitForChild("BtnBuyPerm")
+local closeShop = shopFrame:WaitForChild("CloseShop")
+
+-- === 🔧 ПЕРЕМЕННЫЕ СОСТОЯНИЯ ===
+local isAfk = false
+local hasSubmitted = false
+local currentSubmitConnection = nil -- Храним подключение кнопки, чтобы сбрасывать его
+
+-- Скрываем лишнее при старте
+paperFrame.Visible = false
+votingFrame.Visible = false
+winnerFrame.Visible = false
+shopFrame.Visible = false
+
+-- === 🛍️ ЛОГИКА МАГАЗИНА И МЕНЮ ===
+
+-- 1. Открыть/Закрыть магазин
+shopButton.MouseButton1Click:Connect(function()
+	shopFrame.Visible = not shopFrame.Visible
+end)
+
+closeShop.MouseButton1Click:Connect(function()
+	shopFrame.Visible = false
+end)
+
+-- 2. Покупки
+btnBuyOne.MouseButton1Click:Connect(function()
+	MarketplaceService:PromptProductPurchase(player, TEACHER_PRODUCT_ID)
+end)
+
+btnBuyPerm.MouseButton1Click:Connect(function()
+	MarketplaceService:PromptGamePassPurchase(player, TEACHER_PASS_ID)
+end)
+
+-- 3. Кнопка "Хочу быть учителем"
+requestTeacherButton.MouseButton1Click:Connect(function()
+	-- Визуальный эффект нажатия
+	local originalText = requestTeacherButton.Text
+	requestTeacherButton.Text = "Запрос..."
+	
+	Events.RequestTeacher:FireServer()
+	
+	task.wait(2)
+	requestTeacherButton.Text = originalText
+end)
+
+-- 4. Режим AFK
+afkButton.MouseButton1Click:Connect(function()
+	isAfk = not isAfk
+	
+	if isAfk then
+		afkButton.Text = "AFK: ВКЛ"
+		-- Если игрок ушел в AFK, скрываем игровые окна
+		paperFrame.Visible = false
+		votingFrame.Visible = false
+		winnerFrame.Visible = false
+	else
+		afkButton.Text = "AFK: ВЫКЛ"
+	end
+	
+	Events.ToggleAFK:FireServer(isAfk)
+end)
+
+
+-- === 🎮 ЛОГИКА ИГРЫ ===
+
+-- Вспомогательная функция для очистки кнопки
+local function resetSubmitButton()
+	if currentSubmitConnection then
+		currentSubmitConnection:Disconnect()
+		currentSubmitConnection = nil
+	end
+end
+
+-- 1. НАЧАЛО РАУНДА
+Events.StartRound.OnClientEvent:Connect(function(topic)
+	-- Сброс состояний
+	resetSubmitButton()
+	hasSubmitted = false
+	winnerFrame.Visible = false
+	votingFrame.Visible = false
+	
+	-- Если мы АФК, то ничего не показываем (кроме случая, если мы случайно стали учителем)
+	if isAfk and topic ~= "TEACHER_MODE" then 
+		return 
+	end
+
+	-- Если сервер говорит, что мы Учитель
+	if topic == "TEACHER_MODE" then
+		paperFrame.Visible = true
+		topicLabel.Text = "ВЫ УЧИТЕЛЬ! Придумайте тему:"
+		submitButton.Text = "ЗАДАТЬ ТЕМУ"
+		submitButton.Visible = true
+		inputBox.Text = ""
+		inputBox.TextEditable = true
+		
+		-- Логика кнопки для УЧИТЕЛЯ
+		currentSubmitConnection = submitButton.MouseButton1Click:Connect(function()
+			local text = inputBox.Text
+			if text == "" then text = "Свободная тема" end
+			
+			Events.TeacherSetTopic:FireServer(text)
+			
+			submitButton.Text = "Тема задана!"
+			inputBox.TextEditable = false
+			task.wait(1)
+			paperFrame.Visible = false
+		end)
+		
+	else
+		-- Обычный режим УЧЕНИКА
+		paperFrame.Visible = true
+		topicLabel.Text = "Тема: " .. topic
+		submitButton.Text = "СДАТЬ РАБОТУ"
+		submitButton.Visible = true
+		inputBox.Text = ""
+		inputBox.TextEditable = true
+		
+		-- Логика кнопки для УЧЕНИКА
+		currentSubmitConnection = submitButton.MouseButton1Click:Connect(function()
+			if not hasSubmitted then
+				hasSubmitted = true
+				inputBox.TextEditable = false
+				submitButton.Text = "Отправлено! Ждем..."
+				Events.SubmitEssay:FireServer(inputBox.Text)
+			end
+		end)
+	end
+end)
+
+-- 2. ОБНОВЛЕНИЕ ТАЙМЕРА
+Events.TimeUpdate.OnClientEvent:Connect(function(seconds, statusText)
+	timeLabel.Text = statusText .. ": " .. tostring(seconds)
+	
+	-- Автосдача, если время вышло (только для учеников)
+	if seconds == 0 and paperFrame.Visible and not hasSubmitted then
+		-- Проверяем, что мы не учитель, который вводит тему (у учителя кнопка "ЗАДАТЬ ТЕМУ")
+		if submitButton.Text == "СДАТЬ РАБОТУ" then
+			hasSubmitted = true
+			inputBox.TextEditable = false
+			Events.SubmitEssay:FireServer(inputBox.Text)
+		end
+		paperFrame.Visible = false
+	end
+	
+	if seconds == 0 then
+		paperFrame.Visible = false
+	end
+end)
+
+-- 3. ПОКАЗ ЧУЖОЙ РАБОТЫ (ГОЛОСОВАНИЕ)
+Events.ShowEssay.OnClientEvent:Connect(function(authorName, text)
+	if isAfk then return end -- AFK не голосуют
+	
+	paperFrame.Visible = false
+	votingFrame.Visible = true
+	winnerFrame.Visible = false
+	
+	essayShowLabel.Text = text
+	authorLabel.Text = "Автор: " .. authorName
+	
+	-- Если это моя работа или я учитель - прячем кнопки голосования
+	-- (Проверка на учителя делается косвенно: если я не писал эссе, я не голосую за себя, но тут проще скрыть всем авторам)
+	if authorName == player.Name then
+		buttonsContainer.Visible = false
+		authorLabel.Text = "Автор: ВЫ (оценивают другие)"
+	else
+		buttonsContainer.Visible = true
+	end
+end)
+
+-- 4. КНОПКИ ГОЛОСОВАНИЯ (1-10)
+for _, btn in pairs(buttonsContainer:GetChildren()) do
+	if btn:IsA("TextButton") then
+		btn.MouseButton1Click:Connect(function()
+			local score = tonumber(btn.Text)
+			if score then
+				Events.SendVote:FireServer(score)
+				buttonsContainer.Visible = false -- Скрываем, чтобы не голосовать дважды
+			end
+		end)
+	end
+end
+
+-- 5. ПОБЕДИТЕЛЬ
+Events.ShowWinner.OnClientEvent:Connect(function(winnerText)
+	if isAfk then return end
+	
+	votingFrame.Visible = false
+	paperFrame.Visible = false
+	winnerFrame.Visible = true
+	winnerTextLabel.Text = winnerText
+	
+	task.wait(5)
+	winnerFrame.Visible = false
+end)
