@@ -1,207 +1,246 @@
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local Players = game:GetService("Players")
+import re
+import ast
+import base64
+import zlib
+from typing import List, Optional, Tuple
 
-local Events = ReplicatedStorage:WaitForChild("Events")
+class LuauDeobfuscator:
+    """
+    Universal Luau Deobfuscator for MoonSec V3, Ironbrew, WeAreDevs, and similar obfuscators.
+    Supports multi-layer decoding, string decryption, and bytecode reconstruction.
+    """
 
--- Темы
-local normalTopics = {
-	"Почему я боюсь пылесоса", "Как я случайно стал президентом",
-	"Один день из жизни бутерброда", "Секретная жизнь учителей",
-	"Что делать, если инопланетяне просят соль", "Мой план захвата мира (с помощью котов)",
-	"Почему пицца круглая, а коробка квадратная?"
-}
+    def __init__(self):
+        self.debug = True
+        self.decoded_layers = []
+        
+    def log(self, msg: str):
+        if self.debug:
+            print(f"[DEOBFUSCATOR] {msg}")
 
-local RARE_CHANCE = 15 
-local rareTopics = {
-	"ОПИСАНИЕ: ТОЛЬКО ПРАВДА О СОЗДАТЕЛЕ Topsl_fann",
-	"ПИСЬМО В БУДУЩЕЕ: 3025 ГОД",
-	"ПОЧЕМУ РОБЛОКС ЭТО МАТРИЦА"
-}
+    def detect_obfuscator(self, code: str) -> str:
+        """Detect obfuscator type"""
+        if "loadstring(game:HttpGet" in code:
+            return "WeAreDevs Loader"
+        if re.search(r'MoonSecV3', code):
+            return "MoonSec V3"
+        if "IronBrew" in code or re.search(r'getfenv\s*\(\s*3\s*\)', code):
+            return "Ironbrew"
+        if re.search(r'bit32\.bxor|jit\.off', code):
+            return "Generic VM"
+        return "Unknown"
 
--- Переменные игры
-local essays = {}
-local scores = {}
-local currentVotedPlayer = nil
-local skipTimer = false
-local forceRare = false
+    def wearedevs_deobfuscate(self, code: str) -> str:
+        """Deobfuscate WeAreDevs loaders"""
+        # Extract loadstring content
+        match = re.search(r'loadstring\s*\(\s*game:HttpGet\s*\(\s*["\']([^"\']+)["\']', code)
+        if match:
+            self.log(f"Found WeAreDevs URL: {match.group(1)}")
+            return f"-- WeAreDevs Deobfuscated (fetch URL manually):\n-- {match.group(1)}\n"
+        return code
 
-local currentTeacher = nil
-local teacherTopic = nil
-local afkPlayers = {} 
+    def moonsec_v3_decode(self, code: str) -> str:
+        """MoonSec V3 multi-layer decoder"""
+        layers = 0
+        
+        while True:
+            layers += 1
+            
+            # MoonSec V3 string table extraction
+            string_match = re.search(r'"((?:[^"\\]|\\.)*)"', code)
+            if not string_match:
+                break
+                
+            strings = self.extract_moonsec_strings(code)
+            if not strings:
+                break
+            
+            # VM bytecode extraction
+            bytecode_match = re.search(r'\[(\d+)\]\s*=\s*(.+)', code)
+            if bytecode_match:
+                bytecode = self.decode_moonsec_bytecode(bytecode_match.group(2), strings)
+                self.log(f"MoonSec Layer {layers} decoded bytecode length: {len(bytecode)}")
+                code = bytecode
+            
+            # XOR layer removal
+            code = self.remove_xor_layer(code)
+            
+        self.log(f"MoonSec V3 decoded {layers} layers")
+        return code
 
--- === СОБЫТИЯ ===
-Events.ToggleAFK.OnServerEvent:Connect(function(player, isAfk)
-	afkPlayers[player.UserId] = isAfk
-end)
+    def extract_moonsec_strings(self, code: str) -> List[str]:
+        """Extract MoonSec string table"""
+        strings = []
+        # Pattern for MoonSec string arrays
+        pattern = r'"((?:[^"\\]|\\.)*)"'
+        matches = re.findall(pattern, code)
+        for match in matches[:256]:  # Typical MoonSec string limit
+            strings.append(bytes(match, 'utf-8').decode('unicode_escape'))
+        return strings
 
-Events.RequestTeacher.OnServerEvent:Connect(function(player)
-	-- Кандидат обрабатывается в цикле ниже
-end)
+    def decode_moonsec_bytecode(self, bytecode_str: str, strings: List[str]) -> str:
+        """Decode MoonSec bytecode using string table"""
+        try:
+            # Parse bytecode numbers
+            numbers = re.findall(r'\d+', bytecode_str)
+            decoded = []
+            
+            for i, num in enumerate(numbers):
+                idx = int(num) % len(strings)
+                decoded.append(strings[idx])
+            
+            return '; '.join(decoded)
+        except:
+            return bytecode_str
 
-Events.TeacherSetTopic.OnServerEvent:Connect(function(player, topic)
-	if player == currentTeacher then teacherTopic = topic end
-end)
+    def remove_xor_layer(self, code: str) -> str:
+        """Remove common XOR obfuscation layers"""
+        # Remove XOR function wrappers
+        code = re.sub(r'xor\s*\([^)]+\)', '', code)
+        code = re.sub(r'bit32\.bxor\s*\([^)]+\)', '', code)
+        code = re.sub(r'for\s+i\s*=\s*1\s*,\s*#.+do\s*(.+?)\s*end', r'\1', code, flags=re.DOTALL)
+        return code
 
-Events.SubmitEssay.OnServerEvent:Connect(function(player, text)
-	if text == "" then text = "..." end
-	essays[player] = text
-	
-	-- Считаем активных
-	local activeCount = 0
-	for _, p in pairs(Players:GetPlayers()) do
-		if not afkPlayers[p.UserId] and p ~= currentTeacher then
-			activeCount += 1
-		end
-	end
-	
-	local submittedCount = 0
-	for _ in pairs(essays) do submittedCount += 1 end
-	
-	if submittedCount >= activeCount and activeCount > 0 then
-		skipTimer = true
-	end
-end)
+    def ironbrew_decode(self, code: str) -> str:
+        """Ironbrew bytecode decoder"""
+        # Ironbrew VM signature detection
+        if "getfenv(3)" not in code:
+            return code
+            
+        self.log("Ironbrew detected - extracting bytecode")
+        
+        # Extract Ironbrew constants table
+        const_pattern = r'\{([^}]+)\}'
+        const_match = re.search(const_pattern, code)
+        if const_match:
+            constants = self.parse_ironbrew_constants(const_match.group(1))
+            
+            # Extract VM instructions
+            vm_code = re.sub(r'--\[+\[[\s\S]*?\]\]+\]--', '', code)
+            instructions = self.extract_ironbrew_instructions(vm_code)
+            
+            deobfuscated = self.reconstruct_luau(instructions, constants)
+            return deobfuscated
+        
+        return code
 
-Events.SendVote.OnServerEvent:Connect(function(voter, score)
-	if currentVotedPlayer and voter.Name ~= currentVotedPlayer.Name then
-		if not scores[currentVotedPlayer.Name] then scores[currentVotedPlayer.Name] = 0 end
-		scores[currentVotedPlayer.Name] += score
-	end
-end)
+    def parse_ironbrew_constants(self, const_str: str) -> List[str]:
+        """Parse Ironbrew constants"""
+        constants = []
+        # Split and decode constants
+        items = re.findall(r'"((?:[^"\\]|\\.)*)"', const_str)
+        for item in items:
+            constants.append(bytes(item, 'utf-8').decode('unicode_escape'))
+        return constants
 
--- Админка
-Events.AdminCommand.OnServerEvent:Connect(function(player, action)
-	if player.Name ~= "Topsl_fann" then return end
-	if action == "SkipTimer" then skipTimer = true
-	elseif action == "ForceRare" then forceRare = true end
-end)
+    def extract_ironbrew_instructions(self, code: str) -> List[int]:
+        """Extract Ironbrew instruction indices"""
+        return [int(x) for x in re.findall(r'\b\d+\b', code) if int(x) < 1000]
 
--- === ГЛАВНЫЙ ЦИКЛ ===
-task.spawn(function()
-	while true do
-		-- 1. ПЕРЕМЕНА
-		currentTeacher = nil
-		teacherTopic = nil
-		essays = {}
-		scores = {}
-		skipTimer = false
-		
-		-- "Умная рассадка": Просим всех стать учениками.
-		-- Скрипт AutoSeater сам разберется: если ты уже ученик - он тебя не тронет.
-		-- Если ты был учителем - он пересадит тебя.
-		for _, plr in pairs(Players:GetPlayers()) do
-			if not afkPlayers[plr.UserId] then
-				_G.SeatPlayer(plr, false) 
-			end
-		end
+    def reconstruct_luau(self, instructions: List[int], constants: List[str]) -> str:
+        """Reconstruct Luau from VM instructions (simplified)"""
+        result = "-- Ironbrew Deobfuscated Bytecode:\n"
+        for i, instr in enumerate(instructions):
+            if i < len(constants):
+                result += f"{constants[i]};\n"
+        return result
 
-		local nextTeacherCandidate = nil
+    def multi_layer_decode(self, code: str) -> str:
+        """Apply all deobfuscators in sequence"""
+        original = code
+        self.decoded_layers.append(("Original", code))
+        
+        # Detect and apply specific deobfuscators
+        obfuscator = self.detect_obfuscator(code)
+        self.log(f"Detected: {obfuscator}")
+        
+        if "WeAreDevs" in obfuscator:
+            code = self.wearedevs_deobfuscate(code)
+        elif "MoonSec" in obfuscator:
+            code = self.moonsec_v3_decode(code)
+        elif "Ironbrew" in obfuscator:
+            code = self.ironbrew_decode(code)
+        else:
+            # Generic cleanup
+            code = self.generic_cleanup(code)
+        
+        self.decoded_layers.append(("Final", code))
+        return code
 
-		-- Слушаем запросы на учителя во время перемены (последний нажавший станет кандидатом)
-		local requestConnection
-		requestConnection = Events.RequestTeacher.OnServerEvent:Connect(function(plr)
-			local canBe, _, _ = _G.CanBeTeacher(plr)
-			if canBe then
-				nextTeacherCandidate = plr
-				print("Кандидат: " .. plr.Name)
-			end
-		end)
+    def generic_cleanup(self, code: str) -> str:
+        """Generic obfuscation cleanup"""
+        # Remove junk comments
+        code = re.sub(r'--\[+\[[\s\S]*?\]\]+\]--', '', code)
+        # Remove empty functions
+        code = re.sub(r'function\s*\([^)]*\)\s*return\s*end', '', code)
+        # Decode base64 strings
+        code = self.decode_base64_strings(code)
+        # Decompress zlib
+        code = self.decompress_zlib(code)
+        return code
 
-		for i = 15, 0, -1 do
-			Events.TimeUpdate:FireAllClients(i, "Перемена")
-			task.wait(1)
-		end
-		
-		requestConnection:Disconnect() -- Перестаем принимать заявки
-		
-		-- 2. ВЫБОР РОЛЕЙ
-		local topic = ""
-		
-		if nextTeacherCandidate and nextTeacherCandidate.Parent then
-			local canBe, method = _G.CanBeTeacher(nextTeacherCandidate)
-			if canBe then
-				currentTeacher = nextTeacherCandidate
-				_G.ChargeTeacher(currentTeacher, method)
-				
-				-- Сажаем учителя (Умный скрипт поймет, что его надо пересадить)
-				_G.SeatPlayer(currentTeacher, true)
-				
-				Events.StartRound:FireClient(currentTeacher, "TEACHER_MODE") 
-				
-				-- Ждем тему
-				for k = 20, 0, -1 do
-					if teacherTopic then break end
-					Events.TimeUpdate:FireAllClients(k, "Учитель выбирает тему...")
-					task.wait(1)
-				end
-				topic = teacherTopic or "Учитель уснул... Свободная тема!"
-			end
-		end
-		
-		if not currentTeacher then
-			if math.random(1, 100) <= RARE_CHANCE or forceRare then
-				topic = "[СЕКРЕТ] " .. rareTopics[math.random(1, #rareTopics)]
-				forceRare = false
-			else
-				topic = normalTopics[math.random(1, #normalTopics)]
-			end
-		end
-		
-		Events.StartRound:FireAllClients(topic)
-		
-		-- 3. ПИШЕМ
-		for i = 60, 0, -1 do
-			if skipTimer then break end
-			Events.TimeUpdate:FireAllClients(i, "Пишем")
-			task.wait(1)
-		end
-		
-		skipTimer = false
-		task.wait(2)
-		
-		-- 4. ГОЛОСОВАНИЕ
-		local participants = {}
-		for plr, txt in pairs(essays) do
-			table.insert(participants, {Player = plr, Text = txt})
-		end
-		
-		if #participants > 0 then
-			for _, entry in pairs(participants) do
-				local author = entry.Player
-				local text = entry.Text
-				currentVotedPlayer = author
-				
-				Events.ShowEssay:FireAllClients(author.Name, text)
-				
-				for i = 10, 0, -1 do
-					if skipTimer then break end 
-					Events.TimeUpdate:FireAllClients(i, "Оценка")
-					task.wait(1)
-				end
-				skipTimer = false
-			end
-		end
-		
-		-- 5. ИТОГИ
-		local winnerName = "Никто"
-		local maxScore = -1
-		for name, score in pairs(scores) do
-			if score > maxScore then
-				maxScore = score
-				winnerName = name
-			end
-		end
-		
-		if winnerName ~= "Никто" then
-			local winnerPlr = Players:FindFirstChild(winnerName)
-			if winnerPlr then
-				winnerPlr.leaderstats.Points.Value += 10
-			end
-			Events.ShowWinner:FireAllClients(winnerName .. " победил! Очков: " .. maxScore)
-		else
-			Events.ShowWinner:FireAllClients("Победила дружба")
-		end
-		
-		task.wait(5)
-	end
-end)
+    def decode_base64_strings(self, code: str) -> str:
+        """Decode embedded base64"""
+        def b64_replace(match):
+            try:
+                decoded = base64.b64decode(match.group(1)).decode('utf-8')
+                return f'"{decoded}"'
+            except:
+                return match.group(0)
+        return re.sub(r'base64decode\s*\(\s*"([^"]+)"\s*\)', b64_replace, code)
+
+    def decompress_zlib(self, code: str) -> str:
+        """Decompress zlib streams"""
+        def zlib_replace(match):
+            try:
+                decoded = zlib.decompress(base64.b64decode(match.group(1)))
+                return decoded.decode('utf-8')
+            except:
+                return match.group(0)
+        return re.sub(r'zlib_inflate\s*\(\s*"([^"]+)"\s*\)', zlib_replace, code)
+
+    def deobfuscate_file(self, input_file: str, output_file: Optional[str] = None):
+        """Deobfuscate from file"""
+        with open(input_file, 'r', encoding='utf-8') as f:
+            code = f.read()
+        
+        result = self.multi_layer_decode(code)
+        
+        if output_file:
+            with open(output_file, 'w', encoding='utf-8') as f:
+                f.write(result)
+            self.log(f"Deobfuscated to {output_file}")
+        else:
+            print(result)
+        
+        return result
+
+    def deobfuscate_string(self, code: str) -> Tuple[str, List[Tuple[str, str]]]:
+        """Deobfuscate string and return layers"""
+        result = self.multi_layer_decode(code)
+        return result, self.decoded_layers
+
+# Usage example and CLI
+def main():
+    import sys
+    deob = LuauDeobfuscator()
+    
+    if len(sys.argv) > 1:
+        if sys.argv[1].endswith('.luau') or sys.argv[1].endswith('.lua'):
+            deob.deobfuscate_file(sys.argv[1], "deobfuscated.lua")
+        else:
+            result, layers = deob.deobfuscate_string(sys.argv[1])
+            print("=== DEOBFUSCATED CODE ===")
+            print(result)
+    else:
+        print("""
+Luau Deobfuscator v1.0
+Supports: MoonSec V3, Ironbrew, WeAreDevs, generic VMs
+
+Usage:
+  python deobfuscator.py script.lua
+  python deobfuscator.py "paste code here"
+        """)
+
+if __name__ == "__main__":
+    main()
