@@ -1,246 +1,847 @@
+import lupa
+from lupa import LuaRuntime
+import logging
+import os
 import re
-import ast
-import base64
-import zlib
-from typing import List, Optional, Tuple
+import binascii
 
-class LuauDeobfuscator:
-    """
-    Universal Luau Deobfuscator for MoonSec V3, Ironbrew, WeAreDevs, and similar obfuscators.
-    Supports multi-layer decoding, string decryption, and bytecode reconstruction.
-    """
+logger = logging.getLogger("DeobfuscatorEngine")
 
+class DeobfuscatorEngine:
     def __init__(self):
-        self.debug = True
-        self.decoded_layers = []
-        
-    def log(self, msg: str):
-        if self.debug:
-            print(f"[DEOBFUSCATOR] {msg}")
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        logger.info(f"📁 Working Dir: {base_dir}")
 
-    def detect_obfuscator(self, code: str) -> str:
-        """Detect obfuscator type"""
-        if "loadstring(game:HttpGet" in code:
-            return "WeAreDevs Loader"
-        if re.search(r'MoonSecV3', code):
-            return "MoonSec V3"
-        if "IronBrew" in code or re.search(r'getfenv\s*\(\s*3\s*\)', code):
-            return "Ironbrew"
-        if re.search(r'bit32\.bxor|jit\.off', code):
-            return "Generic VM"
-        return "Unknown"
+    def process(self, content, status_callback=None):
+        def update_status(msg):
+            if status_callback: status_callback(msg)
+            logger.info(f"[STATUS] {msg}")
 
-    def wearedevs_deobfuscate(self, code: str) -> str:
-        """Deobfuscate WeAreDevs loaders"""
-        # Extract loadstring content
-        match = re.search(r'loadstring\s*\(\s*game:HttpGet\s*\(\s*["\']([^"\']+)["\']', code)
-        if match:
-            self.log(f"Found WeAreDevs URL: {match.group(1)}")
-            return f"-- WeAreDevs Deobfuscated (fetch URL manually):\n-- {match.group(1)}\n"
-        return code
+        update_status("🧠 Инициализация продвинутой среды Luau (Emulation V4)...")
 
-    def moonsec_v3_decode(self, code: str) -> str:
-        """MoonSec V3 multi-layer decoder"""
-        layers = 0
-        
-        while True:
-            layers += 1
-            
-            # MoonSec V3 string table extraction
-            string_match = re.search(r'"((?:[^"\\]|\\.)*)"', code)
-            if not string_match:
-                break
-                
-            strings = self.extract_moonsec_strings(code)
-            if not strings:
-                break
-            
-            # VM bytecode extraction
-            bytecode_match = re.search(r'\[(\d+)\]\s*=\s*(.+)', code)
-            if bytecode_match:
-                bytecode = self.decode_moonsec_bytecode(bytecode_match.group(2), strings)
-                self.log(f"MoonSec Layer {layers} decoded bytecode length: {len(bytecode)}")
-                code = bytecode
-            
-            # XOR layer removal
-            code = self.remove_xor_layer(code)
-            
-        self.log(f"MoonSec V3 decoded {layers} layers")
-        return code
-
-    def extract_moonsec_strings(self, code: str) -> List[str]:
-        """Extract MoonSec string table"""
-        strings = []
-        # Pattern for MoonSec string arrays
-        pattern = r'"((?:[^"\\]|\\.)*)"'
-        matches = re.findall(pattern, code)
-        for match in matches[:256]:  # Typical MoonSec string limit
-            strings.append(bytes(match, 'utf-8').decode('unicode_escape'))
-        return strings
-
-    def decode_moonsec_bytecode(self, bytecode_str: str, strings: List[str]) -> str:
-        """Decode MoonSec bytecode using string table"""
         try:
-            # Parse bytecode numbers
-            numbers = re.findall(r'\d+', bytecode_str)
-            decoded = []
+            lua = LuaRuntime(unpack_returned_tuples=True, encoding=None)
+        except Exception as e:
+            return f"-- [FATAL] Lua start error: {e}".encode('utf-8')
+
+        # ==========================================
+        # РАСШИРЕННАЯ ЭМУЛЯЦИЯ С ГЛУБОКИМ ПЕРЕХВАТОМ
+        # ==========================================
+        
+        advanced_env = """
+        -- ============================================
+        -- BITWISE OPERATIONS (критично для обфускации)
+        -- ============================================
+        local bit = {}
+        function bit.tobit(x) 
+            x = x % 4294967296
+            if x >= 2147483648 then x = x - 4294967296 end
+            return x 
+        end
+        function bit.bnot(x) return (-1 - x) % 4294967296 end
+        function bit.tohex(x, n)
+            n = n or 8
+            local up
+            if n <= 0 then
+                if n == 0 then return '' end
+                up = true
+                n = - n
+            end
+            x = bit.band(x, 16^n-1)
+            return ('%0'..n..(up and 'X' or 'x')):format(x)
+        end
+        
+        local function bit_oper(a, b, oper)
+            local r, m = 0, 2^31
+            repeat
+                local aa, bb = a % m, b % m
+                r = r + m * oper % (aa + bb - aa * bb / m)
+                a, b, m = (a - aa) / 2, (b - bb) / 2, m / 2
+            until m < 1
+            return r
+        end
+        
+        function bit.band(a, b) return bit_oper(a, b, 1) end
+        function bit.bor(a, b) return bit_oper(a, b, 7) end
+        function bit.bxor(a, b) return bit_oper(a, b, 6) end
+        function bit.lshift(a, n) return (a * 2^n) % 4294967296 end
+        function bit.rshift(a, n) return math.floor(a / 2^n) % 4294967296 end
+        function bit.arshift(a, n)
+            if a >= 2147483648 then
+                a = a - 4294967296
+            end
+            return math.floor(a / 2^n)
+        end
+        function bit.rol(x, n) return bit.lshift(x, n) + bit.rshift(x, 32 - n) end
+        function bit.ror(x, n) return bit.rshift(x, n) + bit.lshift(x, 32 - n) end
+        
+        package.loaded.bit = bit
+        package.loaded.bit32 = bit
+        _G.bit = bit
+        _G.bit32 = bit
+
+        -- ============================================
+        -- СИСТЕМА ПЕРЕХВАТА (ТРЕКИНГ)
+        -- ============================================
+        _G.CAPTURED_CHUNKS = {}
+        _G.DETECTED_STRINGS = {}
+        _G.REMOTE_CALLS = {}
+        _G.ACTION_LOG = {}
+        _G.FINAL_GLOBALS = {}
+        _G.FUNCTION_CALLS = {}
+        _G.DECRYPTED_DATA = {}
+        
+        local function log_action(msg)
+            if #_G.ACTION_LOG < 1000 then
+                table.insert(_G.ACTION_LOG, tostring(msg))
+            end
+        end
+
+        local function capture_string(s)
+            if type(s) == "string" and #s > 2 and #s < 10000 then
+                -- Фильтруем технические строки Lua VM
+                local skip = {
+                    "stack begin", "upvalue", "function", "table", "userdata",
+                    "thread", "proto", "light userdata", "nil"
+                }
+                local should_skip = false
+                for _, pattern in ipairs(skip) do
+                    if s:find(pattern) then
+                        should_skip = true
+                        break
+                    end
+                end
+                
+                if not should_skip then
+                    _G.DETECTED_STRINGS[s] = (_G.DETECTED_STRINGS[s] or 0) + 1
+                end
+            end
+            return s
+        end
+
+        -- ============================================
+        -- ПЕРЕХВАТ STRING ОПЕРАЦИЙ
+        -- ============================================
+        local string_mt = getmetatable("")
+        local real_string = {}
+        
+        -- Сохраняем оригинальные функции
+        for k, v in pairs(string) do
+            real_string[k] = v
+        end
+        
+        -- Хук string.char (самое частое в деобфускации)
+        string.char = function(...)
+            local args = {...}
+            local result = real_string.char(...)
             
-            for i, num in enumerate(numbers):
-                idx = int(num) % len(strings)
-                decoded.append(strings[idx])
+            -- Логируем только значимые вызовы
+            if #args > 1 then
+                capture_string(result)
+                log_action("🔡 string.char(" .. #args .. " bytes) -> " .. (#result > 50 and (#result .. " bytes") or '"' .. result .. '"'))
+            end
             
-            return '; '.join(decoded)
-        except:
-            return bytecode_str
+            return result
+        end
+        
+        -- Хук string.byte
+        string.byte = function(s, i, j)
+            capture_string(s)
+            return real_string.byte(s, i, j)
+        end
+        
+        -- Хук string.sub
+        string.sub = function(s, i, j)
+            local result = real_string.sub(s, i, j)
+            if #result > 10 then
+                capture_string(result)
+            end
+            return result
+        end
+        
+        -- Хук string.gsub
+        string.gsub = function(s, pattern, repl, n)
+            local result, count = real_string.gsub(s, pattern, repl, n)
+            if count > 0 and #result > 10 then
+                capture_string(result)
+                log_action("🔄 gsub: " .. count .. " replacements")
+            end
+            return result, count
+        end
+        
+        -- Хук table.concat
+        local real_concat = table.concat
+        table.concat = function(t, sep, i, j)
+            local result = real_concat(t, sep, i, j)
+            if type(result) == "string" and #result > 10 then
+                capture_string(result)
+            end
+            return result
+        end
 
-    def remove_xor_layer(self, code: str) -> str:
-        """Remove common XOR obfuscation layers"""
-        # Remove XOR function wrappers
-        code = re.sub(r'xor\s*\([^)]+\)', '', code)
-        code = re.sub(r'bit32\.bxor\s*\([^)]+\)', '', code)
-        code = re.sub(r'for\s+i\s*=\s*1\s*,\s*#.+do\s*(.+?)\s*end', r'\1', code, flags=re.DOTALL)
-        return code
-
-    def ironbrew_decode(self, code: str) -> str:
-        """Ironbrew bytecode decoder"""
-        # Ironbrew VM signature detection
-        if "getfenv(3)" not in code:
-            return code
+        -- ============================================
+        -- ПЕРЕХВАТ ЗАГРУЗКИ КОДА
+        -- ============================================
+        local real_load = load or loadstring
+        local load_count = 0
+        
+        local function hooked_load(chunk, chunkname, mode, env)
+            load_count = load_count + 1
             
-        self.log("Ironbrew detected - extracting bytecode")
-        
-        # Extract Ironbrew constants table
-        const_pattern = r'\{([^}]+)\}'
-        const_match = re.search(const_pattern, code)
-        if const_match:
-            constants = self.parse_ironbrew_constants(const_match.group(1))
+            if type(chunk) == "string" then
+                local size = #chunk
+                
+                -- Захватываем все чанки > 100 байт
+                if size > 100 then
+                    table.insert(_G.CAPTURED_CHUNKS, {
+                        data = chunk,
+                        size = size,
+                        name = chunkname or ("chunk_" .. load_count),
+                        type = "string"
+                    })
+                    log_action("🔥 Captured chunk #" .. load_count .. ": " .. size .. " bytes")
+                    capture_string(chunk)
+                end
+            elseif type(chunk) == "function" then
+                log_action("🔥 load() called with function (bytecode loader)")
+                table.insert(_G.CAPTURED_CHUNKS, {
+                    data = "<function>",
+                    size = 0,
+                    name = chunkname or ("func_chunk_" .. load_count),
+                    type = "function"
+                })
+            end
             
-            # Extract VM instructions
-            vm_code = re.sub(r'--\[+\[[\s\S]*?\]\]+\]--', '', code)
-            instructions = self.extract_ironbrew_instructions(vm_code)
+            return real_load(chunk, chunkname, mode, env)
+        end
+        
+        load = hooked_load
+        loadstring = hooked_load
+        _G.load = hooked_load
+        _G.loadstring = hooked_load
+
+        -- ============================================
+        -- РАСШИРЕННАЯ ROBLOX API
+        -- ============================================
+        
+        -- Signal (события)
+        local function CreateSignal()
+            local sig = {}
+            local connections = {}
             
-            deobfuscated = self.reconstruct_luau(instructions, constants)
-            return deobfuscated
+            function sig:Connect(callback)
+                local conn = {
+                    Connected = true,
+                    Disconnect = function(self)
+                        self.Connected = false
+                        for i, c in ipairs(connections) do
+                            if c == conn then
+                                table.remove(connections, i)
+                                break
+                            end
+                        end
+                    end
+                }
+                table.insert(connections, {callback = callback, conn = conn})
+                return conn
+            end
+            
+            function sig:Fire(...)
+                for _, data in ipairs(connections) do
+                    if data.conn.Connected then
+                        pcall(data.callback, ...)
+                    end
+                end
+            end
+            
+            function sig:Wait()
+                coroutine.yield()
+                return nil
+            end
+            
+            return sig
+        end
+
+        -- Instance (базовый класс объектов)
+        _G.Instance = {}
+        _G.Instance.__index = _G.Instance
         
-        return code
+        function _G.Instance.new(className, parent)
+            local obj = setmetatable({}, _G.Instance)
+            obj.ClassName = className or "Part"
+            obj.Name = className or "Instance"
+            obj.Parent = parent
+            obj.Archivable = true
+            obj.Changed = CreateSignal()
+            obj.ChildAdded = CreateSignal()
+            obj.ChildRemoved = CreateSignal()
+            obj.AncestryChanged = CreateSignal()
+            obj.Destroying = CreateSignal()
+            
+            function obj:Destroy()
+                self.Destroying:Fire()
+                self.Parent = nil
+            end
+            
+            function obj:Clone()
+                return _G.Instance.new(self.ClassName, self.Parent)
+            end
+            
+            function obj:ClearAllChildren() end
+            function obj:GetChildren() return {} end
+            function obj:GetDescendants() return {} end
+            function obj:FindFirstChild(name, recursive) return nil end
+            function obj:FindFirstAncestor(name) return nil end
+            function obj:WaitForChild(name, timeout) return _G.Instance.new("Folder") end
+            function obj:IsA(className) return self.ClassName == className end
+            function obj:IsDescendantOf(ancestor) return false end
+            function obj:GetFullName() return self.Name end
+            
+            function obj:GetService(serviceName)
+                return _G.game:GetService(serviceName)
+            end
+            
+            return obj
+        end
 
-    def parse_ironbrew_constants(self, const_str: str) -> List[str]:
-        """Parse Ironbrew constants"""
-        constants = []
-        # Split and decode constants
-        items = re.findall(r'"((?:[^"\\]|\\.)*)"', const_str)
-        for item in items:
-            constants.append(bytes(item, 'utf-8').decode('unicode_escape'))
-        return constants
-
-    def extract_ironbrew_instructions(self, code: str) -> List[int]:
-        """Extract Ironbrew instruction indices"""
-        return [int(x) for x in re.findall(r'\b\d+\b', code) if int(x) < 1000]
-
-    def reconstruct_luau(self, instructions: List[int], constants: List[str]) -> str:
-        """Reconstruct Luau from VM instructions (simplified)"""
-        result = "-- Ironbrew Deobfuscated Bytecode:\n"
-        for i, instr in enumerate(instructions):
-            if i < len(constants):
-                result += f"{constants[i]};\n"
-        return result
-
-    def multi_layer_decode(self, code: str) -> str:
-        """Apply all deobfuscators in sequence"""
-        original = code
-        self.decoded_layers.append(("Original", code))
+        -- RemoteEvent/RemoteFunction (перехват сетевых вызовов)
+        local function CreateRemoteEvent(name)
+            local obj = _G.Instance.new("RemoteEvent")
+            obj.Name = name or "RemoteEvent"
+            obj.OnClientEvent = CreateSignal()
+            obj.OnServerEvent = CreateSignal()
+            
+            function obj:FireServer(...)
+                local args = {...}
+                table.insert(_G.REMOTE_CALLS, {
+                    type = "RemoteEvent",
+                    name = self.Name,
+                    direction = "FireServer",
+                    args = args,
+                    timestamp = os.time()
+                })
+                log_action("📡 RemoteEvent:FireServer(" .. self.Name .. ") - " .. #args .. " args")
+            end
+            
+            function obj:FireClient(player, ...)
+                log_action("📡 RemoteEvent:FireClient(" .. self.Name .. ")")
+            end
+            
+            function obj:FireAllClients(...)
+                log_action("📡 RemoteEvent:FireAllClients(" .. self.Name .. ")")
+            end
+            
+            return obj
+        end
         
-        # Detect and apply specific deobfuscators
-        obfuscator = self.detect_obfuscator(code)
-        self.log(f"Detected: {obfuscator}")
+        local function CreateRemoteFunction(name)
+            local obj = _G.Instance.new("RemoteFunction")
+            obj.Name = name or "RemoteFunction"
+            obj.OnClientInvoke = function() return nil end
+            obj.OnServerInvoke = function() return nil end
+            
+            function obj:InvokeServer(...)
+                local args = {...}
+                table.insert(_G.REMOTE_CALLS, {
+                    type = "RemoteFunction",
+                    name = self.Name,
+                    direction = "InvokeServer",
+                    args = args,
+                    timestamp = os.time()
+                })
+                log_action("📡 RemoteFunction:InvokeServer(" .. self.Name .. ") - " .. #args .. " args")
+                return nil
+            end
+            
+            function obj:InvokeClient(player, ...)
+                log_action("📡 RemoteFunction:InvokeClient(" .. self.Name .. ")")
+                return nil
+            end
+            
+            return obj
+        end
+
+        -- Vector3
+        _G.Vector3 = {}
+        _G.Vector3.__index = _G.Vector3
+        function _G.Vector3.new(x, y, z)
+            return setmetatable({X = x or 0, Y = y or 0, Z = z or 0}, _G.Vector3)
+        end
+        _G.Vector3.zero = _G.Vector3.new(0, 0, 0)
+        _G.Vector3.one = _G.Vector3.new(1, 1, 1)
+        function _G.Vector3.__add(a, b) return _G.Vector3.new(a.X + b.X, a.Y + b.Y, a.Z + b.Z) end
+        function _G.Vector3.__sub(a, b) return _G.Vector3.new(a.X - b.X, a.Y - b.Y, a.Z - b.Z) end
+        function _G.Vector3.__mul(a, b)
+            if type(b) == "number" then return _G.Vector3.new(a.X * b, a.Y * b, a.Z * b) end
+            return _G.Vector3.new(a.X * b.X, a.Y * b.Y, a.Z * b.Z)
+        end
+        function _G.Vector3.__tostring(self) return self.X .. ", " .. self.Y .. ", " .. self.Z end
+
+        -- CFrame
+        _G.CFrame = {}
+        _G.CFrame.__index = _G.CFrame
+        function _G.CFrame.new(...) return setmetatable({}, _G.CFrame) end
+        function _G.CFrame.Angles(...) return _G.CFrame.new() end
+        function _G.CFrame.fromEulerAnglesXYZ(...) return _G.CFrame.new() end
+        function _G.CFrame.__mul(a, b) return a end
+        function _G.CFrame:ToEulerAnglesXYZ() return 0, 0, 0 end
+
+        -- Другие типы
+        _G.UDim2 = {new = function(...) return {} end, fromScale = function(...) return {} end, fromOffset = function(...) return {} end}
+        _G.Color3 = {new = function(...) return {} end, fromRGB = function(...) return {} end, fromHSV = function(...) return {} end}
+        _G.BrickColor = {new = function(...) return {} end, Random = function() return {} end}
+        _G.NumberRange = {new = function(...) return {} end}
+        _G.NumberSequence = {new = function(...) return {} end}
+        _G.ColorSequence = {new = function(...) return {} end}
+        _G.Ray = {new = function(...) return {} end}
         
-        if "WeAreDevs" in obfuscator:
-            code = self.wearedevs_deobfuscate(code)
-        elif "MoonSec" in obfuscator:
-            code = self.moonsec_v3_decode(code)
-        elif "Ironbrew" in obfuscator:
-            code = self.ironbrew_decode(code)
-        else:
-            # Generic cleanup
-            code = self.generic_cleanup(code)
+        -- Enum
+        _G.Enum = setmetatable({}, {
+            __index = function(t, k)
+                return setmetatable({}, {
+                    __index = function(t2, k2)
+                        return {Value = 0, Name = k2, EnumType = k}
+                    end
+                })
+            end
+        })
+
+        -- Task library
+        _G.task = {
+            wait = function(t) return t or 0 end,
+            spawn = function(f, ...) pcall(f, ...) end,
+            defer = function(f, ...) pcall(f, ...) end,
+            delay = function(t, f, ...) pcall(f, ...) end,
+            cancel = function() end,
+            synchronize = function() return function() end end,
+            desynchronize = function() end
+        }
+        _G.wait = _G.task.wait
+        _G.spawn = _G.task.spawn
+        _G.delay = _G.task.delay
+
+        -- Game structure
+        _G.game = _G.Instance.new("DataModel")
+        _G.game.PlaceId = 123456789
+        _G.game.GameId = 987654321
+        _G.game.JobId = "test-job-id"
         
-        self.decoded_layers.append(("Final", code))
-        return code
-
-    def generic_cleanup(self, code: str) -> str:
-        """Generic obfuscation cleanup"""
-        # Remove junk comments
-        code = re.sub(r'--\[+\[[\s\S]*?\]\]+\]--', '', code)
-        # Remove empty functions
-        code = re.sub(r'function\s*\([^)]*\)\s*return\s*end', '', code)
-        # Decode base64 strings
-        code = self.decode_base64_strings(code)
-        # Decompress zlib
-        code = self.decompress_zlib(code)
-        return code
-
-    def decode_base64_strings(self, code: str) -> str:
-        """Decode embedded base64"""
-        def b64_replace(match):
-            try:
-                decoded = base64.b64decode(match.group(1)).decode('utf-8')
-                return f'"{decoded}"'
-            except:
-                return match.group(0)
-        return re.sub(r'base64decode\s*\(\s*"([^"]+)"\s*\)', b64_replace, code)
-
-    def decompress_zlib(self, code: str) -> str:
-        """Decompress zlib streams"""
-        def zlib_replace(match):
-            try:
-                decoded = zlib.decompress(base64.b64decode(match.group(1)))
-                return decoded.decode('utf-8')
-            except:
-                return match.group(0)
-        return re.sub(r'zlib_inflate\s*\(\s*"([^"]+)"\s*\)', zlib_replace, code)
-
-    def deobfuscate_file(self, input_file: str, output_file: Optional[str] = None):
-        """Deobfuscate from file"""
-        with open(input_file, 'r', encoding='utf-8') as f:
-            code = f.read()
+        -- Players
+        _G.game.Players = _G.Instance.new("Players")
+        _G.game.Players.LocalPlayer = _G.Instance.new("Player")
+        _G.game.Players.LocalPlayer.Name = "DeobfUser"
+        _G.game.Players.LocalPlayer.UserId = 123456
+        _G.game.Players.LocalPlayer.Character = _G.Instance.new("Model")
+        _G.game.Players.LocalPlayer.Character.Humanoid = _G.Instance.new("Humanoid")
+        _G.game.Players.LocalPlayer.PlayerGui = _G.Instance.new("PlayerGui")
         
-        result = self.multi_layer_decode(code)
+        function _G.game.Players:GetPlayers() return {_G.game.Players.LocalPlayer} end
         
-        if output_file:
-            with open(output_file, 'w', encoding='utf-8') as f:
-                f.write(result)
-            self.log(f"Deobfuscated to {output_file}")
-        else:
-            print(result)
+        -- RunService
+        _G.game.RunService = _G.Instance.new("RunService")
+        _G.game.RunService.RenderStepped = CreateSignal()
+        _G.game.RunService.Heartbeat = CreateSignal()
+        _G.game.RunService.Stepped = CreateSignal()
+        function _G.game.RunService:IsClient() return true end
+        function _G.game.RunService:IsServer() return false end
+        function _G.game.RunService:IsStudio() return false end
         
-        return result
+        -- HttpService
+        _G.game.HttpService = _G.Instance.new("HttpService")
+        function _G.game.HttpService:JSONEncode(t) return "{}" end
+        function _G.game.HttpService:JSONDecode(s) return {} end
+        function _G.game.HttpService:UrlEncode(s) return s end
+        function _G.game.HttpService:GenerateGUID() return "MOCK-GUID-12345" end
+        function _G.game.HttpService:GetAsync(url)
+            log_action("🌐 HttpService:GetAsync(" .. tostring(url) .. ")")
+            return "<mock response>"
+        end
+        function _G.game.HttpService:PostAsync(url, data)
+            log_action("🌐 HttpService:PostAsync(" .. tostring(url) .. ")")
+            return "<mock response>"
+        end
+        
+        -- ReplicatedStorage
+        _G.game.ReplicatedStorage = _G.Instance.new("ReplicatedStorage")
+        
+        -- Workspace
+        _G.workspace = _G.Instance.new("Workspace")
+        _G.game.Workspace = _G.workspace
+        
+        -- Script context
+        _G.script = _G.Instance.new("LocalScript")
+        _G.script.Parent = _G.workspace
+        
+        -- GetService
+        function _G.game:GetService(serviceName)
+            if serviceName == "Players" then return _G.game.Players end
+            if serviceName == "RunService" then return _G.game.RunService end
+            if serviceName == "HttpService" then return _G.game.HttpService end
+            if serviceName == "ReplicatedStorage" then return _G.game.ReplicatedStorage end
+            if serviceName == "Workspace" then return _G.workspace end
+            if serviceName == "Lighting" then return _G.Instance.new("Lighting") end
+            if serviceName == "StarterGui" then return _G.Instance.new("StarterGui") end
+            if serviceName == "UserInputService" then return _G.Instance.new("UserInputService") end
+            if serviceName == "TweenService" then return _G.Instance.new("TweenService") end
+            return _G.Instance.new(serviceName)
+        end
 
-    def deobfuscate_string(self, code: str) -> Tuple[str, List[Tuple[str, str]]]:
-        """Deobfuscate string and return layers"""
-        result = self.multi_layer_decode(code)
-        return result, self.decoded_layers
+        -- Exploit environment functions
+        _G.getgenv = function() return _G end
+        _G.getrenv = function() return _G end
+        _G.getreg = function() return {} end
+        _G.getgc = function(include_tables) return {} end
+        _G.getloadedmodules = function() return {} end
+        _G.getconnections = function(signal) return {} end
+        _G.getcallingscript = function() return _G.script end
+        _G.checkcaller = function() return true end
+        _G.islclosure = function(f) return type(f) == "function" end
+        _G.iscclosure = function(f) return false end
+        _G.newcclosure = function(f) return f end
+        _G.hookfunction = function(old, new) return old end
+        _G.hookmetamethod = function(obj, method, hook) return function() end end
+        _G.getnamecallmethod = function() return "" end
+        _G.getcallstacksize = function() return 0 end
+        _G.isreadonly = function(t) return false end
+        _G.setreadonly = function(t, val) end
+        _G.isrbxactive = function() return true end
+        _G.getrawmetatable = function(obj) return getmetatable(obj) or {} end
+        _G.setrawmetatable = function(obj, mt) return setmetatable(obj, mt) end
+        
+        -- HttpGet/HttpPost (устаревшие)
+        _G.game.HttpGet = function(self, url)
+            log_action("🌐 game:HttpGet(" .. tostring(url) .. ")")
+            return "<mock html>"
+        end
+        _G.game.HttpPost = function(self, url, data)
+            log_action("🌐 game:HttpPost(" .. tostring(url) .. ")")
+            return "<mock response>"
+        end
 
-# Usage example and CLI
-def main():
-    import sys
-    deob = LuauDeobfuscator()
+        -- ============================================
+        -- ФИНАЛЬНЫЙ ДАМП
+        -- ============================================
+        function _G.dump_globals()
+            local ignore_keys = {
+                string = 1, math = 1, table = 1, bit = 1, bit32 = 1, 
+                coroutine = 1, debug = 1, io = 1, os = 1, package = 1,
+                _G = 1, _VERSION = 1, assert = 1, collectgarbage = 1,
+                dofile = 1, error = 1, getmetatable = 1, ipairs = 1,
+                load = 1, loadstring = 1, next = 1, pairs = 1, pcall = 1,
+                print = 1, rawequal = 1, rawget = 1, rawlen = 1, rawset = 1,
+                require = 1, select = 1, setmetatable = 1, tonumber = 1,
+                tostring = 1, type = 1, unpack = 1, xpcall = 1, warn = 1,
+                Instance = 1, Vector3 = 1, CFrame = 1, UDim2 = 1, Color3 = 1,
+                BrickColor = 1, Enum = 1, task = 1, wait = 1, spawn = 1,
+                delay = 1, game = 1, workspace = 1, script = 1,
+                getgenv = 1, getrenv = 1, getreg = 1, getgc = 1,
+                CAPTURED_CHUNKS = 1, DETECTED_STRINGS = 1, REMOTE_CALLS = 1,
+                ACTION_LOG = 1, FINAL_GLOBALS = 1, FUNCTION_CALLS = 1,
+                DECRYPTED_DATA = 1, dump_globals = 1, log_action = 1,
+                capture_string = 1, CreateSignal = 1, CreateRemoteEvent = 1,
+                CreateRemoteFunction = 1
+            }
+            
+            for k, v in pairs(_G) do
+                if not ignore_keys[k] then
+                    local vtype = type(v)
+                    if vtype == "string" or vtype == "number" or vtype == "boolean" then
+                        local value_str = tostring(v)
+                        if #value_str < 200 then
+                            table.insert(_G.FINAL_GLOBALS, tostring(k) .. " = " .. value_str)
+                        else
+                            table.insert(_G.FINAL_GLOBALS, tostring(k) .. " = <long string: " .. #value_str .. " chars>")
+                        end
+                    elseif vtype == "function" then
+                        table.insert(_G.FINAL_GLOBALS, tostring(k) .. " = <function>")
+                    elseif vtype == "table" then
+                        table.insert(_G.FINAL_GLOBALS, tostring(k) .. " = <table>")
+                    end
+                end
+            end
+        end
+        """
+
+        try:
+            update_status("🌪️ Загрузка среды выполнения...")
+            lua.execute(advanced_env)
+            
+            update_status("🚀 Запуск скрипта с полным перехватом...")
+            
+            runner = lua.eval("""
+                function(code)
+                    local success, err = pcall(function()
+                        -- Пытаемся загрузить как строку
+                        local func, load_err = load(code, "deobf_script", "t", _G)
+                        if not func then
+                            log_action("❌ Load error: " .. tostring(load_err))
+                            error(load_err)
+                        end
+                        
+                        -- Выполняем
+                        func()
+                    end)
+                    
+                    if not success then
+                        log_action("❌ Execution error: " .. tostring(err))
+                    else
+                        log_action("✅ Script executed successfully")
+                    end
+                    
+                    -- Собираем финальные данные
+                    pcall(_G.dump_globals)
+                    
+                    return success
+                end
+            """)
+            
+            runner(content)
+
+            # Сбор результатов
+            strings_dict = lua.globals().DETECTED_STRINGS
+            detected_strings = []
+            for s in strings_dict:
+                count = strings_dict[s]
+                detected_strings.append((s, count))
+            
+            # Сортируем по частоте использования
+            detected_strings.sort(key=lambda x: x[1], reverse=True)
+            
+            global_dump = list(lua.globals().FINAL_GLOBALS)
+            action_log = list(lua.globals().ACTION_LOG)
+            remote_calls = lua.globals().REMOTE_CALLS
+            chunks = lua.globals().CAPTURED_CHUNKS
+            
+            # Извлекаем RemoteSpy данные
+            remote_log = []
+            if len(remote_calls) > 0:
+                for i in range(1, len(remote_calls) + 1):
+                    call = remote_calls[i]
+                    remote_log.append({
+                        'type': call.type,
+                        'name': call.name,
+                        'direction': call.direction,
+                        'args': list(call.args) if call.args else []
+                    })
+            
+            # Находим самый большой чанк (вероятно распакованный код)
+            best_chunk = None
+            max_size = 0
+            if len(chunks) > 0:
+                for i in range(1, len(chunks) + 1):
+                    c = chunks[i]
+                    if c.type == "string" and c.size > max_size:
+                        max_size = c.size
+                        best_chunk = c.data
+            
+            target_code = best_chunk if best_chunk else content
+            
+            return self._finalize_output(
+                target_code, 
+                detected_strings, 
+                global_dump, 
+                action_log,
+                remote_log,
+                update_status
+            )
+
+        except Exception as e:
+            logger.error(f"Engine Crash: {e}", exc_info=True)
+            return f"-- [CRASH ERROR]: {str(e)}".encode('utf-8')
+
+    def _clean_string(self, s):
+        if isinstance(s, bytes):
+            try: return s.decode('utf-8', errors='replace')
+            except: return str(s)
+        return str(s)
+
+    def _finalize_output(self, code_bytes, strings_with_count, globals_dump, logs, remote_calls, callback):
+        if callback: callback("📝 Формирование отчёта...")
+        
+        final_text = "-- ╔═══════════════════════════════════════════════════════╗\n"
+        final_text += "-- ║       ROBLOX LUAU DEOBFUSCATOR V4 - REPORT          ║\n"
+        final_text += "-- ╚═══════════════════════════════════════════════════════╝\n\n"
+        
+        # RemoteSpy секция
+        if remote_calls:
+            final_text += "-- ┌─────────────────────────────────────────────────────┐\n"
+            final_text += "-- │              🔴 REMOTE SPY CAPTURES                 │\n"
+            final_text += "-- └─────────────────────────────────────────────────────┘\n"
+            for call in remote_calls[:50]:  # Топ 50 вызовов
+                final_text += f"-- [{call['type']}] {call['name']}:{call['direction']}\n"
+                if call['args']:
+                    final_text += f"--   Args: {call['args']}\n"
+            final_text += "\n"
+        
+        # Топ строк (по частоте)
+        if strings_with_count:
+            final_text += "-- ┌─────────────────────────────────────────────────────┐\n"
+            final_text += "-- │           📜 EXTRACTED STRINGS (TOP 100)            │\n"
+            final_text += "-- └─────────────────────────────────────────────────────┘\n"
+            
+            for s, count in strings_with_count[:100]:
+                clean = self._clean_string(s).replace('\n', '\\n').replace('\r', '')
+                if len(clean) > 100:
+                    clean = clean[:100] + "..."
+                final_text += f'-- [{count}x] "{clean}"\n'
+            final_text += "\n"
+        
+        # Глобальные переменные
+        if globals_dump:
+            final_text += "-- ┌─────────────────────────────────────────────────────┐\n"
+            final_text += "-- │              🌍 GLOBAL VARIABLES                    │\n"
+            final_text += "-- └─────────────────────────────────────────────────────┘\n"
+            for g in globals_dump[:50]:
+                final_text += f"-- {self._clean_string(g)}\n"
+            final_text += "\n"
+        
+        # Логи действий
+        if logs:
+            final_text += "-- ┌─────────────────────────────────────────────────────┐\n"
+            final_text += "-- │                📊 EXECUTION LOG                     │\n"
+            final_text += "-- └─────────────────────────────────────────────────────┘\n"
+            for l in logs[-30:]:
+                final_text += f"-- {self._clean_string(l)}\n"
+            final_text += "\n"
+        
+        # Основной код
+        final_text += "-- ╔═══════════════════════════════════════════════════════╗\n"
+        final_text += "-- ║                  💎 MAIN SOURCE CODE                 ║\n"
+        final_text += "-- ╚═══════════════════════════════════════════════════════╝\n\n"
+        
+        try:
+            if isinstance(code_bytes, bytes):
+                source = code_bytes.decode('utf-8', errors='replace')
+            else:
+                source = str(code_bytes)
+            
+            final_text += self._beautify_lua(source)
+        except Exception as e:
+            final_text += f"-- [ERROR decoding source]: {e}\n"
+            final_text += f"-- Hex dump: {binascii.hexlify(code_bytes[:500])}\n"
+        
+        return final_text.encode('utf-8')
+
+    def _beautify_lua(self, source_code):
+        """Базовое форматирование Lua кода"""
+        # Добавляем переносы строк после ключевых слов
+        keywords = ['then', 'do', 'repeat', 'else', 'elseif']
+        for kw in keywords:
+            source_code = re.sub(rf'\s+{kw}\s+', f' {kw}\n', source_code)
+        
+        # Форматируем end
+        source_code = re.sub(r'\s+end\s+', '\nend\n', source_code)
+        
+        # Точка с запятой
+        source_code = source_code.replace(';', ';\n')
+        
+        return source_code
+
+import asyncio
+import os
+import logging
+import uuid
+from aiogram import Bot, Dispatcher, F, types
+from aiogram.types import FSInputFile
+from aiogram.filters import Command
+
+from engine import DeobfuscatorEngine
+
+API_TOKEN = 'ТВОЙ_ТОКЕН_СЮДА'
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(message)s")
+logger = logging.getLogger("DeobfBot")
+
+bot = Bot(token=API_TOKEN)
+dp = Dispatcher()
+engine = DeobfuscatorEngine()
+
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message):
+    await message.answer(
+        "🤖 **Roblox Luau Deobfuscator V4**\n\n"
+        "🔥 **Новое:**\n"
+        "• Полная эмуляция Luau окружения\n"
+        "• RemoteSpy (перехват сетевых вызовов)\n"
+        "• Глубокий перехват string операций\n"
+        "• Трекинг load/loadstring вызовов\n"
+        "• Частотный анализ строк\n\n"
+        "📤 Отправь `.lua` или `.txt` файл\n"
+        "⚡ Поддержка: MoonSec, IronBrew, Luraph, PSU",
+        parse_mode="Markdown"
+    )
+
+@dp.message(F.document)
+async def handle_document(message: types.Message):
+    user_id = message.from_user.id
+    unique_id = uuid.uuid4().hex[:8]
+    file_name = message.document.file_name or "script.lua"
     
-    if len(sys.argv) > 1:
-        if sys.argv[1].endswith('.luau') or sys.argv[1].endswith('.lua'):
-            deob.deobfuscate_file(sys.argv[1], "deobfuscated.lua")
-        else:
-            result, layers = deob.deobfuscate_string(sys.argv[1])
-            print("=== DEOBFUSCATED CODE ===")
-            print(result)
-    else:
-        print("""
-Luau Deobfuscator v1.0
-Supports: MoonSec V3, Ironbrew, WeAreDevs, generic VMs
+    input_path = f"temp_{user_id}_{unique_id}.lua"
+    output_path = f"Deobf_{unique_id}_{file_name}.txt"
 
-Usage:
-  python deobfuscator.py script.lua
-  python deobfuscator.py "paste code here"
-        """)
+    status_msg = await message.answer("⏳ **Загрузка...**", parse_mode="Markdown")
+    loop = asyncio.get_running_loop()
+    last_status = [""]
+    
+    def sync_status_updater(text):
+        if text == last_status[0]: return
+        last_status[0] = text
+        
+        async def edit_coro():
+            try:
+                await status_msg.edit_text(f"⚙️ {text}", parse_mode="Markdown")
+            except: pass
+        
+        if not loop.is_closed():
+            asyncio.run_coroutine_threadsafe(edit_coro(), loop)
+
+    try:
+        file = await bot.get_file(message.document.file_id)
+        await bot.download_file(file.file_path, input_path)
+
+        with open(input_path, "rb") as f: content = f.read()
+
+        result_data = await asyncio.wait_for(
+            loop.run_in_executor(None, engine.process, content, sync_status_updater),
+            timeout=180.0
+        )
+
+        with open(output_path, "wb") as f: f.write(result_data)
+        out_file = FSInputFile(output_path)
+        
+        caption = "✅ **Деобфускация завершена!**\n"
+        
+        result_str = result_data.decode('utf-8', errors='ignore')
+        if "REMOTE SPY CAPTURES" in result_str:
+            caption += "📡 RemoteSpy: Перехвачены вызовы\n"
+        if "EXTRACTED STRINGS" in result_str:
+            caption += "📜 Извлечены скрытые строки\n"
+        if "GLOBAL VARIABLES" in result_str:
+            caption += "🌍 Найдены глобальные переменные\n"
+        
+        await message.answer_document(out_file, caption=caption, parse_mode="Markdown")
+
+    except asyncio.TimeoutError:
+        await status_msg.edit_text("❌ **Тайм-аут** (>3 мин). Скрипт слишком сложный.")
+    except Exception as e:
+        logger.error(f"Error: {e}", exc_info=True)
+        await status_msg.edit_text(f"❌ Ошибка: {str(e)[:100]}")
+    finally:
+        for p in [input_path, output_path]:
+            if os.path.exists(p):
+                try: os.remove(p)
+                except: pass
+
+async def main():
+    logger.info("🚀 Бот запущен!")
+    await bot.delete_webhook(drop_pending_updates=True)
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    main()
+    try:
+        if os.name == 'nt':
+            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n👋 Бот остановлен")
