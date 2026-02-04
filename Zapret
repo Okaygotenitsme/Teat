@@ -1,4 +1,3 @@
-
 import lupa
 from lupa import LuaRuntime
 import logging
@@ -140,7 +139,7 @@ class DeobfuscatorEngine:
             if #args > 1 then
                 capture_string(result)
                 if #result < 50 then
-                    log_action("🔡 string.char(" .. #args .. " bytes) -> \"" .. result .. "\"")
+                    log_action("🔡 string.char(" .. #args .. " bytes) -> [" .. #result .. " chars]")
                 else
                     log_action("🔡 string.char(" .. #args .. " bytes) -> " .. #result .. " chars")
                 end
