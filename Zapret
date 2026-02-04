@@ -1,3 +1,4 @@
+
 import lupa
 from lupa import LuaRuntime
 import logging
@@ -29,6 +30,45 @@ class DeobfuscatorEngine:
         # ==========================================
         
         advanced_env = """
+        -- ============================================
+        -- СИСТЕМА ПЕРЕХВАТА (ТРЕКИНГ) - ИНИЦИАЛИЗАЦИЯ ПЕРВОЙ!
+        -- ============================================
+        _G.CAPTURED_CHUNKS = {}
+        _G.DETECTED_STRINGS = {}
+        _G.REMOTE_CALLS = {}
+        _G.ACTION_LOG = {}
+        _G.FINAL_GLOBALS = {}
+        _G.FUNCTION_CALLS = {}
+        _G.DECRYPTED_DATA = {}
+        
+        local function log_action(msg)
+            if #_G.ACTION_LOG < 1000 then
+                table.insert(_G.ACTION_LOG, tostring(msg))
+            end
+        end
+
+        local function capture_string(s)
+            if type(s) == "string" and #s > 2 and #s < 10000 then
+                -- Фильтруем технические строки Lua VM
+                local skip = {
+                    "stack begin", "upvalue", "function", "table", "userdata",
+                    "thread", "proto", "light userdata", "nil"
+                }
+                local should_skip = false
+                for _, pattern in ipairs(skip) do
+                    if s:find(pattern, 1, true) then
+                        should_skip = true
+                        break
+                    end
+                end
+                
+                if not should_skip then
+                    _G.DETECTED_STRINGS[s] = (_G.DETECTED_STRINGS[s] or 0) + 1
+                end
+            end
+            return s
+        end
+
         -- ============================================
         -- BITWISE OPERATIONS (критично для обфускации)
         -- ============================================
@@ -81,45 +121,6 @@ class DeobfuscatorEngine:
         _G.bit32 = bit
 
         -- ============================================
-        -- СИСТЕМА ПЕРЕХВАТА (ТРЕКИНГ)
-        -- ============================================
-        _G.CAPTURED_CHUNKS = {}
-        _G.DETECTED_STRINGS = {}
-        _G.REMOTE_CALLS = {}
-        _G.ACTION_LOG = {}
-        _G.FINAL_GLOBALS = {}
-        _G.FUNCTION_CALLS = {}
-        _G.DECRYPTED_DATA = {}
-        
-        local function log_action(msg)
-            if #_G.ACTION_LOG < 1000 then
-                table.insert(_G.ACTION_LOG, tostring(msg))
-            end
-        end
-
-        local function capture_string(s)
-            if type(s) == "string" and #s > 2 and #s < 10000 then
-                -- Фильтруем технические строки Lua VM
-                local skip = {
-                    "stack begin", "upvalue", "function", "table", "userdata",
-                    "thread", "proto", "light userdata", "nil"
-                }
-                local should_skip = false
-                for _, pattern in ipairs(skip) do
-                    if s:find(pattern) then
-                        should_skip = true
-                        break
-                    end
-                end
-                
-                if not should_skip then
-                    _G.DETECTED_STRINGS[s] = (_G.DETECTED_STRINGS[s] or 0) + 1
-                end
-            end
-            return s
-        end
-
-        -- ============================================
         -- ПЕРЕХВАТ STRING ОПЕРАЦИЙ
         -- ============================================
         local string_mt = getmetatable("")
@@ -138,7 +139,11 @@ class DeobfuscatorEngine:
             -- Логируем только значимые вызовы
             if #args > 1 then
                 capture_string(result)
-                log_action("🔡 string.char(" .. #args .. " bytes) -> " .. (#result > 50 and (#result .. " bytes") or '"' .. result .. '"'))
+                if #result < 50 then
+                    log_action("🔡 string.char(" .. #args .. " bytes) -> \"" .. result .. "\"")
+                else
+                    log_action("🔡 string.char(" .. #args .. " bytes) -> " .. #result .. " chars")
+                end
             end
             
             return result
@@ -560,6 +565,8 @@ class DeobfuscatorEngine:
                 end
             end
         end
+        
+        log_action("✅ Environment initialized successfully")
         """
 
         try:
@@ -736,112 +743,3 @@ class DeobfuscatorEngine:
         source_code = source_code.replace(';', ';\n')
         
         return source_code
-
-import asyncio
-import os
-import logging
-import uuid
-from aiogram import Bot, Dispatcher, F, types
-from aiogram.types import FSInputFile
-from aiogram.filters import Command
-
-from engine import DeobfuscatorEngine
-
-API_TOKEN = 'ТВОЙ_ТОКЕН_СЮДА'
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(message)s")
-logger = logging.getLogger("DeobfBot")
-
-bot = Bot(token=API_TOKEN)
-dp = Dispatcher()
-engine = DeobfuscatorEngine()
-
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message):
-    await message.answer(
-        "🤖 **Roblox Luau Deobfuscator V4**\n\n"
-        "🔥 **Новое:**\n"
-        "• Полная эмуляция Luau окружения\n"
-        "• RemoteSpy (перехват сетевых вызовов)\n"
-        "• Глубокий перехват string операций\n"
-        "• Трекинг load/loadstring вызовов\n"
-        "• Частотный анализ строк\n\n"
-        "📤 Отправь `.lua` или `.txt` файл\n"
-        "⚡ Поддержка: MoonSec, IronBrew, Luraph, PSU",
-        parse_mode="Markdown"
-    )
-
-@dp.message(F.document)
-async def handle_document(message: types.Message):
-    user_id = message.from_user.id
-    unique_id = uuid.uuid4().hex[:8]
-    file_name = message.document.file_name or "script.lua"
-    
-    input_path = f"temp_{user_id}_{unique_id}.lua"
-    output_path = f"Deobf_{unique_id}_{file_name}.txt"
-
-    status_msg = await message.answer("⏳ **Загрузка...**", parse_mode="Markdown")
-    loop = asyncio.get_running_loop()
-    last_status = [""]
-    
-    def sync_status_updater(text):
-        if text == last_status[0]: return
-        last_status[0] = text
-        
-        async def edit_coro():
-            try:
-                await status_msg.edit_text(f"⚙️ {text}", parse_mode="Markdown")
-            except: pass
-        
-        if not loop.is_closed():
-            asyncio.run_coroutine_threadsafe(edit_coro(), loop)
-
-    try:
-        file = await bot.get_file(message.document.file_id)
-        await bot.download_file(file.file_path, input_path)
-
-        with open(input_path, "rb") as f: content = f.read()
-
-        result_data = await asyncio.wait_for(
-            loop.run_in_executor(None, engine.process, content, sync_status_updater),
-            timeout=180.0
-        )
-
-        with open(output_path, "wb") as f: f.write(result_data)
-        out_file = FSInputFile(output_path)
-        
-        caption = "✅ **Деобфускация завершена!**\n"
-        
-        result_str = result_data.decode('utf-8', errors='ignore')
-        if "REMOTE SPY CAPTURES" in result_str:
-            caption += "📡 RemoteSpy: Перехвачены вызовы\n"
-        if "EXTRACTED STRINGS" in result_str:
-            caption += "📜 Извлечены скрытые строки\n"
-        if "GLOBAL VARIABLES" in result_str:
-            caption += "🌍 Найдены глобальные переменные\n"
-        
-        await message.answer_document(out_file, caption=caption, parse_mode="Markdown")
-
-    except asyncio.TimeoutError:
-        await status_msg.edit_text("❌ **Тайм-аут** (>3 мин). Скрипт слишком сложный.")
-    except Exception as e:
-        logger.error(f"Error: {e}", exc_info=True)
-        await status_msg.edit_text(f"❌ Ошибка: {str(e)[:100]}")
-    finally:
-        for p in [input_path, output_path]:
-            if os.path.exists(p):
-                try: os.remove(p)
-                except: pass
-
-async def main():
-    logger.info("🚀 Бот запущен!")
-    await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    try:
-        if os.name == 'nt':
-            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\n👋 Бот остановлен")
