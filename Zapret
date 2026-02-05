@@ -1,323 +1,107 @@
-import lupa
-from lupa import LuaRuntime
-import logging
-import subprocess
-import os
-import tempfile
 import re
-import binascii
 import base64
+import binascii
 
-# Логгер
-logger = logging.getLogger("DeobfuscatorEngine")
-
-class StaticDeobfuscator:
-    """
-    Класс для статического снятия слабой защиты (XOR, Base64, Table Encoding)
-    без запуска Lua среды.
-    """
-    
+class StaticDecoder:
     @staticmethod
-    def detect_and_solve(content_str):
-        logs = []
-        
-        # 1. Проверка на VexonHub (Длина строк в таблице)
-        # Паттерн: функция( {'$$$', '$$', ...} )
-        if "string.len" in content_str and "table.concat" in content_str and "string.char" in content_str:
-            vexon_match = re.search(r"\{('[^']+',\s*)+'[^']+'\}", content_str)
-            if vexon_match:
+    def process(content_bytes):
+        """
+        Пытается статически деобфусцировать скрипт.
+        Возвращает: (Success: bool, Result: str/bytes, Method: str)
+        """
+        try:
+            content = content_bytes.decode('utf-8', 'ignore')
+        except:
+            return False, None, None
+
+        # --- 1. VEXON HUB (String Length) ---
+        # Паттерн: rrCCRDIBKJYVYTET({'$$$', '$$', ...})
+        if "string.len" in content and "table.concat" in content:
+            vexon_table = re.search(r"\{('[^']+',\s*)+'[^']+'\}", content)
+            if vexon_table:
                 try:
-                    logs.append("🔍 Обнаружен паттерн: VexonHub (String Length Encoding)")
-                    table_str = vexon_match.group(0)
-                    # Вытаскиваем все строки внутри кавычек
-                    parts = re.findall(r"'([^']+)'", table_str)
-                    decoded = []
-                    for p in parts:
-                        decoded.append(chr(len(p)))
-                    res = "".join(decoded)
-                    return res, logs
-                except Exception as e:
-                    logs.append(f"⚠️ Ошибка Vexon декодера: {e}")
+                    raw_strings = re.findall(r"'([^']+)'", vexon_table.group(0))
+                    decoded_chars = [chr(len(s)) for s in raw_strings]
+                    result = "".join(decoded_chars)
+                    if StaticDecoder._is_valid_lua(result):
+                        return True, StaticDecoder._beautify(result), "VexonHub (Len Encoding)"
+                except: pass
 
-        # 2. Проверка на Byte Array XOR (Meloten / GarouTe)
-        # Паттерн: local table = {123, 234, ...} и последующий bxor
-        # Ищем массив чисел
-        array_match = re.search(r"\{((?:\d+,\s*)*\d+)\}", content_str)
-        if array_match:
-            # Если массив слишком короткий, это может быть просто Vector3 или Color3, игнорируем
-            nums_str = array_match.group(1)
-            nums = [int(x) for x in nums_str.split(',')]
-            
-            if len(nums) > 50: # Только если массив большой
-                # Ищем ключ XOR (часто это число рядом с bxor или bit.bxor)
-                # Паттерн: bxor(a, 123) или bxor(v, key)
-                key_match = re.search(r"(?:bxor|xor)\s*\(\s*[^,]+,\s*(\d+)\s*\)", content_str)
-                
-                # Если явного ключа нет, пробуем перебором или ищем простые операции
-                key = int(key_match.group(1)) if key_match else None
-                
-                if key:
-                    logs.append(f"🔍 Обнаружен паттерн: Mass Array XOR (Key: {key})")
-                    try:
-                        decoded_chars = [chr(n ^ key) for n in nums]
-                        return "".join(decoded_chars), logs
-                    except: pass
-                
-                # Если это Meloten/GarouTe без явного xor (сложная мат. операция),
-                # иногда они просто вычитают число. Пробуем эвристику (часто код начинается с "local" или "--")
-                # Но для надежности лучше оставить это на VM, если статика не нашла XOR.
+        # --- 2. UNIVERSAL ARRAY XOR (BRUTE FORCE) ---
+        # Подходит для: Meloten, GarouTe, IronBrew, PSU
+        # Ищем массив чисел {123, 22, 10...} и перебираем ключи
+        arrays = re.findall(r"\{((?:\d+,\s*){20,}\d+)\}", content)
+        if arrays:
+            # Берем самый длинный массив (вероятно это пейлоад)
+            longest_array = max(arrays, key=len)
+            try:
+                nums = [int(x) for x in longest_array.split(',')]
+                # Если массив байтов (0-255)
+                if all(0 <= n <= 255 for n in nums[:20]): 
+                    # Пробуем перебор ключей от 0 до 255
+                    for key in range(256):
+                        try:
+                            # XOR операция
+                            decoded_chars = [chr(n ^ key) for n in nums]
+                            candidate = "".join(decoded_chars)
+                            
+                            # Проверяем, похож ли результат на Луа код
+                            if StaticDecoder._is_valid_lua(candidate):
+                                return True, StaticDecoder._beautify(candidate), f"Byte XOR (BruteKey: {key})"
+                        except: continue
+            except: pass
 
-        # 3. Проверка на Base64
-        # Ищем длинные строки без пробелов, кратные 4, заканчивающиеся на =
-        b64_matches = re.findall(r'["\']([A-Za-z0-9+/]{50,}={0,2})["\']', content_str)
+        # --- 3. DECIMAL / CHAR DUMP ---
+        # Паттерн: string.char(108, 111, 99, 97, 108) -> "local"
+        if "string.char" in content:
+            char_matches = re.findall(r"string\.char\(([\d,\s]+)\)", content)
+            for match in char_matches:
+                try:
+                    nums = [int(x) for x in match.split(',')]
+                    decoded = "".join(chr(n) for n in nums)
+                    if len(decoded) > 20 and StaticDecoder._is_valid_lua(decoded):
+                        return True, StaticDecoder._beautify(decoded), "Decimal/Char Dump"
+                except: pass
+
+        # --- 4. REVERSE STRING ---
+        # Паттерн: string.reverse("...edoc...")
+        reverse_match = re.search(r"string\.reverse\(['\"](.*?)['\"]\)", content)
+        if reverse_match:
+            try:
+                reversed_str = reverse_match.group(1)[::-1] # Переворачиваем обратно
+                if StaticDecoder._is_valid_lua(reversed_str):
+                    return True, StaticDecoder._beautify(reversed_str), "Reverse String"
+            except: pass
+
+        # --- 5. BASE64 LAYER ---
+        # Ищем большие куски Base64
+        b64_matches = re.findall(r'["\']([A-Za-z0-9+/]{50,}={0,2})["\']', content)
         for b64 in b64_matches:
             try:
                 decoded = base64.b64decode(b64).decode('utf-8')
-                # Проверка, что результат похож на код
-                if "local" in decoded or "function" in decoded or "game:" in decoded:
-                    logs.append("🔍 Обнаружен паттерн: Base64 String")
-                    return decoded, logs
-            except:
-                pass
+                if StaticDecoder._is_valid_lua(decoded):
+                    return True, StaticDecoder._beautify(decoded), "Base64 Layer"
+            except: pass
 
-        return None, logs
+        return False, None, None
 
-class DeobfuscatorEngine:
-    def __init__(self):
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        self.unluac_path = os.path.join(base_dir, "unluac.jar")
-        logger.info(f"📁 Working Dir: {base_dir}")
+    @staticmethod
+    def _is_valid_lua(text):
+        """Проверяет, похож ли текст на Lua код"""
+        keywords = ["local ", "function ", "game:", "return ", "if ", "end)", "end"]
+        # Должен содержать хотя бы 2 ключевых слова
+        count = sum(1 for k in keywords if k in text)
+        return count >= 2
 
-    def process(self, content_bytes, status_callback=None):
-        def update_status(msg):
-            if status_callback: status_callback(msg)
-            logger.info(f"[STATUS] {msg}")
-
-        # Декодируем байты в строку для статического анализа
-        try:
-            content_str = content_bytes.decode('utf-8', errors='ignore')
-        except:
-            content_str = ""
-
-        # --- ЭТАП 1: СТАТИЧЕСКАЯ ДЕОБФУСКАЦИЯ (БЫСТРАЯ) ---
-        update_status("⚡ Статический анализ (Signature Scanning)...")
-        static_result, static_logs = StaticDeobfuscator.detect_and_solve(content_str)
-        
-        if static_result:
-            update_status("✅ Успешно дешифровано статически!")
-            final_output = "-- [[ STATIC DEOBFUSCATION SUCCESS ]] --\n"
-            for log in static_logs:
-                final_output += f"-- {log}\n"
-            final_output += "\n" + self._beautify_lua(static_result)
-            return final_output.encode('utf-8')
-
-        # --- ЭТАП 2: ДИНАМИЧЕСКАЯ ЭМУЛЯЦИЯ (ЕСЛИ СТАТИКА НЕ СПРАВИЛАСЬ) ---
-        if not self._check_java():
-            return b"-- [FATAL] Java is missing. Install Java to use unluac."
-        
-        update_status("🧠 Инициализация среды Roblox (Emulation V3)...")
-
-        # --- НАСТРОЙКА LUA VM ---
-        try:
-            lua = LuaRuntime(unpack_returned_tuples=True, encoding=None)
-        except Exception as e:
-            return f"-- [FATAL] Lua start error: {e}".encode('utf-8')
-
-        # ПОЛИФИЛЛЫ (BITWISE) - Важно для XOR скриптов
-        bit_polyfill = """
-        local bit = {}
-        function bit.tobit(x) x = x % 4294967296; if x >= 2147483648 then x = x - 4294967296 end; return x end
-        function bit.bnot(x) return 4294967295 - x % 4294967296 end
-        local function bit_oper(a, b, oper)
-            local r, m, s = 0, 2^31, nil
-            repeat s,a,b = a+b+m, a%m, b%m; r,m = r + m*oper%(s-a-b), m/2 until m < 1
-            return r
-        end
-        function bit.band(a, b) return bit_oper(a, b, 4) end
-        function bit.bor(a, b)  return bit_oper(a, b, 1) end
-        function bit.bxor(a, b) return bit_oper(a, b, 3) end
-        function bit.lshift(a, b) return (a * 2^b) % 4294967296 end
-        function bit.rshift(a, b) return math.floor(a / 2^b) % 4294967296 end
-        function bit.arshift(a, b) 
-            local z = math.floor(a / 2^b) % 4294967296
-            if a >= 2147483648 then z = z + 4294967296 - 2^(32-b) end
-            return z
-        end
-        package.loaded.bit = bit;
-        _G.bit = bit; _G.bit32 = bit 
-        """
-
-        # ROBLOX API EMULATION (Сокращено для экономии места, используй свой полный вариант)
-        roblox_emu = """
-        local function CreateSignal()
-            local sig = {}
-            local callbacks = {}
-            function sig:Connect(func) table.insert(callbacks, func); return {Disconnect=function() end} end
-            function sig:Fire(...) for _, f in ipairs(callbacks) do pcall(f, ...) end end
-            function sig:Wait() return 0 end
-            return sig
-        end
-        _G.Instance = { new = function(c, p) 
-            local o = {Name=c, ClassName=c, Parent=p, Children={}} 
-            return setmetatable(o, {__index=function(t,k) return rawget(t,k) end, __newindex=function(t,k,v) rawset(t,k,v) end})
-        end}
-        _G.Vector3 = {new=function(x,y,z) return {X=x or 0, Y=y or 0, Z=z or 0} end}
-        _G.CFrame = {new=function(...) return {} end}
-        _G.game = _G.Instance.new("DataModel")
-        _G.game:GetService("HttpService").JSONDecode = function(s) return {} end
-        _G.wait = function(t) return 0 end
-        _G.spawn = function(f) pcall(f) end
-        _G.script = _G.Instance.new("Script")
-        """
-
-        # SPYWARE HOOKS (Улучшенная версия)
-        spyware = """
-        _G.CAPTURED_CHUNKS = {}
-        _G.DETECTED_STRINGS = {}
-        _G.ACTION_LOG = {}
-        _G.FINAL_GLOBALS = {}
-        
-        local function log_action(msg) if #_G.ACTION_LOG < 500 then table.insert(_G.ACTION_LOG, msg) end end
-        local function capture_str(s) 
-            if type(s) == "string" and #s > 4 then _G.DETECTED_STRINGS[s] = true end 
-            return s
-        end
-
-        -- Хук loadstring для перехвата деобфусцированного кода
-        local real_load = load
-        local function hooked_load(chunk, name, mode, env)
-            if type(chunk) == "string" and #chunk > 50 then
-                table.insert(_G.CAPTURED_CHUNKS, {data = chunk, size = #chunk})
-                log_action("🔥 Captured Chunk Size: " .. #chunk)
-            end
-            return real_load(chunk, name, mode, env)
-        end
-        _G.load = hooked_load
-        _G.loadstring = hooked_load
-        
-        -- Хук string.char (для сборки строк)
-        local real_char = string.char
-        string.char = function(...)
-            local res = real_char(...)
-            -- Если строка длинная, возможно это код
-            if #res > 20 then capture_str(res) end
-            return res
-        end
-        
-        -- Функция дампа глобалов
-        function _G.dump_globals()
-            for k, v in pairs(getfenv()) do
-                if type(v) == "string" and #v > 10 then table.insert(_G.FINAL_GLOBALS, k.." = "..v) end
-            end
-        end
-        """
-
-        full_setup = bit_polyfill + "\n" + roblox_emu + "\n" + spyware
-
-        try:
-            update_status("🌪️ Запуск скрипта с трассировкой...")
-            lua.execute(full_setup)
-            
-            # Запускаем скрипт пользователя
-            runner = lua.eval("""
-                function(code)
-                    local status, err = pcall(function()
-                        local f = load(code)
-                        if f then f() end
-                    end)
-                    if not status then table.insert(_G.ACTION_LOG, "❌ Error: " .. tostring(err)) end
-                    pcall(_G.dump_globals)
-                end
-            """)
-            runner(content_bytes)
-
-            # --- СБОР РЕЗУЛЬТАТОВ ---
-            chunks = list(lua.globals().CAPTURED_CHUNKS)
-            strings = list(lua.globals().DETECTED_STRINGS)
-            
-            # Ищем лучший чанк (код внутри loadstring)
-            best_code = None
-            max_len = 0
-            for c in chunks:
-                if c.size > max_len:
-                    max_len = c.size
-                    best_code = c.data
-
-            target_code = best_code if best_code else content_bytes
-            
-            return self._finalize_output(target_code, strings, list(lua.globals().ACTION_LOG), update_status)
-
-        except Exception as e:
-            logger.error(f"Engine Crash: {e}")
-            return f"-- [CRASH ERROR]: {str(e)}".encode('utf-8')
-
-    def _check_java(self):
-        try:
-            subprocess.run(["java", "-version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            return True
-        except: return False
-
-    def _finalize_output(self, code_data, strings, logs, callback):
-        if callback: callback("🧬 Финализация результата...")
-        
-        # Если code_data это байты, пробуем декомпилировать
-        decompiled = None
-        is_bytecode = False
-        
-        if isinstance(code_data, str):
-            code_str = code_data # Это уже исходник
-        else:
-            # Проверяем сигнатуру Lua Bytecode (обычно начинается с ESC Lua)
-            if code_data.startswith(b'\x1bLua'):
-                is_bytecode = True
-                decompiled = self._try_decompile(code_data)
-                code_str = decompiled.decode('utf-8', 'ignore') if decompiled else "-- [Unluac Failed]"
-            else:
-                code_str = code_data.decode('utf-8', 'ignore')
-
-        final_text = "-- [[ DEOBFUSCATOR V2 OUTPUT ]] --\n"
-        if logs:
-            final_text += "-- LOGS:\n" + "\n".join([f"-- {l}" for l in logs[-10:]]) + "\n\n"
-        
-        final_text += "-- [[ SOURCE CODE ]] --\n"
-        final_text += self._beautify_lua(code_str)
-
-        return final_text.encode('utf-8')
-
-    def _try_decompile(self, bytecode):
-        if not os.path.exists(self.unluac_path): return None
-        try:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".lua", mode='wb') as tmp:
-                tmp.write(bytecode)
-                path = tmp.name
-            
-            res = subprocess.run(
-                ["java", "-jar", self.unluac_path, path], 
-                capture_output=True, timeout=10
-            )
-            os.remove(path)
-            if res.returncode == 0: return res.stdout
-            return None
-        except: return None
-
-    def _beautify_lua(self, source_code):
-        # Простое форматирование
-        indent = 0
-        lines = source_code.split('\n')
-        formatted = []
-        for line in lines:
-            line = line.strip()
-            if not line: continue
-            
-            # Уменьшаем отступ для закрывающих конструкций
-            if line.startswith("end") or line.startswith("until") or line.startswith("}"):
-                indent = max(0, indent - 1)
-            
-            formatted.append("\t" * indent + line)
-            
-            # Увеличиваем отступ для открывающих
-            if line.endswith("then") or line.endswith("do") or line.endswith("repeat") or line.endswith("{") or "function" in line:
-                if not line.endswith("end"): # игнорируем однострочники
-                    indent += 1
-                    
-        return "\n".join(formatted)
+    @staticmethod
+    def _beautify(source_code):
+        """Делает код читаемым"""
+        source_code = re.sub(r'(\s)(local|return|if|for|while|repeat|function)(\s)', r'\n\2 ', source_code)
+        replacements = {
+            " then ": " then\n", " do ": " do\n", " end ": "\nend\n",
+            " repeat ": "\nrepeat\n", " until ": "\nuntil ", ";": ";\n",
+            "(){": "() {"
+        }
+        for k, v in replacements.items():
+            source_code = source_code.replace(k, v)
+        return source_code
