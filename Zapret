@@ -1,107 +1,169 @@
+import logging
+import asyncio
+import os
 import re
-import base64
-import binascii
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import Command
+from aiogram.types import FSInputFile
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-class StaticDecoder:
-    @staticmethod
-    def process(content_bytes):
-        """
-        Пытается статически деобфусцировать скрипт.
-        Возвращает: (Success: bool, Result: str/bytes, Method: str)
-        """
+# === ИМПОРТЫ НАШИХ МОДУЛЕЙ ===
+# Убедись, что engine.py и static_decoder.py лежат в одной папке с ботом
+from engine import DeobfuscatorEngine
+from static_decoder import StaticDecoder 
+
+# === КОНФИГУРАЦИЯ ===
+API_TOKEN = "ТВОЙ_ТОКЕН_ЗДЕСЬ"  # <--- ВСТАВЬ ТОКЕН СЮДА
+
+# Настройка логгера
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+logger = logging.getLogger("LuaDeobfBot")
+
+# Инициализация бота и диспетчера
+bot = Bot(token=API_TOKEN)
+dp = Dispatcher()
+
+# Инициализация движка деобфускации
+engine = DeobfuscatorEngine()
+
+# === ХЕНДЛЕРЫ (ОБРАБОТЧИКИ) ===
+
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message):
+    """Приветственное сообщение"""
+    text = (
+        "👋 **Привет! Я Lua Deobfuscator Bot.**\n\n"
+        "Я умею снимать защиту с Lua скриптов (Roblox).\n"
+        "Поддерживаю два режима работы:\n"
+        "1. ⚡ **Static Analysis:** Мгновенное снятие слабой защиты (Vexon, Meloten, GarouTe, Base64, XOR).\n"
+        "2. 🧠 **Dynamic Emulation:** Запуск скрипта в виртуальной среде (VM) для дампа сильных обфускаторов (MoonSec, IronBrew, PSU).\n\n"
+        "📂 **Просто отправь мне .lua или .txt файл со скриптом!**"
+    )
+    await message.answer(text, parse_mode="Markdown")
+
+@dp.message(F.document)
+async def handle_document(message: types.Message):
+    """Обработка файлов"""
+    user_id = message.from_user.id
+    file_name = message.document.file_name
+    
+    # Проверка расширения
+    if not file_name.endswith(('.lua', '.txt')):
+        await message.reply("❌ Пожалуйста, отправляйте только файлы .lua или .txt")
+        return
+
+    status_msg = await message.reply("⏳ **Скачивание файла...**", parse_mode="Markdown")
+    
+    # Пути к файлам
+    input_path = f"temp_{user_id}_{file_name}"
+    output_path = f"deobf_{user_id}_{file_name}"
+
+    try:
+        # 1. Скачиваем файл
+        file = await bot.get_file(message.document.file_id)
+        await bot.download_file(file.file_path, input_path)
+
+        # Читаем содержимое
+        with open(input_path, "rb") as f:
+            content = f.read()
+
+        # ==========================================================
+        # ЭТАП 1: СТАТИЧЕСКАЯ ДЕОБФУСКАЦИЯ (БЫСТРАЯ)
+        # ==========================================================
+        await status_msg.edit_text("⚡ **Анализ сигнатур (Static)...**\n_Пытаюсь найти ключи шифрования..._", parse_mode="Markdown")
+        
+        is_solved, static_code, method_name = StaticDecoder.process(content)
+        
+        if is_solved:
+            # УСПЕХ: Статика сработала
+            logger.info(f"User {user_id}: Static Success ({method_name})")
+            
+            header = f"-- [[ DEOBFUSCATED BY STATIC ANALYZER ]]\n-- METHOD: {method_name}\n\n"
+            final_data = (header + static_code).encode('utf-8')
+            
+            with open(output_path, "wb") as f:
+                f.write(final_data)
+            
+            out_file = FSInputFile(output_path)
+            await message.answer_document(
+                out_file, 
+                caption=f"✅ **Успешно деобфусцировано!**\n🛡️ Тип защиты: `{method_name}`\n⚡ Метод: Статический анализ",
+                parse_mode="Markdown"
+            )
+            await status_msg.delete() # Удаляем сообщение о статусе
+            
+            # Чистка и выход
+            cleanup([input_path, output_path])
+            return
+
+        # ==========================================================
+        # ЭТАП 2: ДИНАМИЧЕСКАЯ ЭМУЛЯЦИЯ (ЕСЛИ СТАТИКА НЕ ПОМОГЛА)
+        # ==========================================================
+        await status_msg.edit_text(
+            "🧠 **Запуск эмулятора (VM)...**\n"
+            "_Статический анализ не дал результатов. Запускаю виртуальную машину Lua..._\n"
+            "_Это может занять до 20 секунд._", 
+            parse_mode="Markdown"
+        )
+
+        # Функция для обновления статуса из engine.py
+        loop = asyncio.get_event_loop()
+        last_update_time = 0
+        
+        def sync_status_updater(msg):
+            # В реальном боте лучше не спамить edit_text слишком часто
+            pass 
+
+        # Запускаем тяжелый процесс в отдельном потоке
+        result_data = await asyncio.wait_for(
+            loop.run_in_executor(None, engine.process, content, sync_status_updater),
+            timeout=120.0 # Таймаут 2 минуты
+        )
+
+        # Сохраняем результат
+        with open(output_path, "wb") as f:
+            f.write(result_data)
+            
+        # Формируем ответ
+        caption = "✅ **Обработка завершена!**\n🧠 Метод: Dynamic VM Emulation"
+        
+        if b"[FATAL]" in result_data:
+             caption = "⚠️ **Ошибка при обработке.**\nСм. файл для деталей."
+        elif b"STATIC DEOBFUSCATION SUCCESS" in result_data:
+             caption += "\n🛡️ Сработал внутренний детектор."
+        
+        out_file = FSInputFile(output_path)
+        await message.answer_document(out_file, caption=caption, parse_mode="Markdown")
+        await status_msg.delete()
+
+    except asyncio.TimeoutError:
+        await status_msg.edit_text("❌ **Ошибка:** Скрипт выполнялся слишком долго (более 2 минут).")
+    except Exception as e:
+        logger.error(f"Error processing file: {e}")
         try:
-            content = content_bytes.decode('utf-8', 'ignore')
-        except:
-            return False, None, None
+            await status_msg.edit_text(f"❌ Произошла ошибка: {e}")
+        except: pass
+    finally:
+        cleanup([input_path, output_path])
 
-        # --- 1. VEXON HUB (String Length) ---
-        # Паттерн: rrCCRDIBKJYVYTET({'$$$', '$$', ...})
-        if "string.len" in content and "table.concat" in content:
-            vexon_table = re.search(r"\{('[^']+',\s*)+'[^']+'\}", content)
-            if vexon_table:
-                try:
-                    raw_strings = re.findall(r"'([^']+)'", vexon_table.group(0))
-                    decoded_chars = [chr(len(s)) for s in raw_strings]
-                    result = "".join(decoded_chars)
-                    if StaticDecoder._is_valid_lua(result):
-                        return True, StaticDecoder._beautify(result), "VexonHub (Len Encoding)"
-                except: pass
-
-        # --- 2. UNIVERSAL ARRAY XOR (BRUTE FORCE) ---
-        # Подходит для: Meloten, GarouTe, IronBrew, PSU
-        # Ищем массив чисел {123, 22, 10...} и перебираем ключи
-        arrays = re.findall(r"\{((?:\d+,\s*){20,}\d+)\}", content)
-        if arrays:
-            # Берем самый длинный массив (вероятно это пейлоад)
-            longest_array = max(arrays, key=len)
-            try:
-                nums = [int(x) for x in longest_array.split(',')]
-                # Если массив байтов (0-255)
-                if all(0 <= n <= 255 for n in nums[:20]): 
-                    # Пробуем перебор ключей от 0 до 255
-                    for key in range(256):
-                        try:
-                            # XOR операция
-                            decoded_chars = [chr(n ^ key) for n in nums]
-                            candidate = "".join(decoded_chars)
-                            
-                            # Проверяем, похож ли результат на Луа код
-                            if StaticDecoder._is_valid_lua(candidate):
-                                return True, StaticDecoder._beautify(candidate), f"Byte XOR (BruteKey: {key})"
-                        except: continue
+def cleanup(files):
+    """Удаляет временные файлы"""
+    for p in files:
+        if os.path.exists(p):
+            try: os.remove(p)
             except: pass
 
-        # --- 3. DECIMAL / CHAR DUMP ---
-        # Паттерн: string.char(108, 111, 99, 97, 108) -> "local"
-        if "string.char" in content:
-            char_matches = re.findall(r"string\.char\(([\d,\s]+)\)", content)
-            for match in char_matches:
-                try:
-                    nums = [int(x) for x in match.split(',')]
-                    decoded = "".join(chr(n) for n in nums)
-                    if len(decoded) > 20 and StaticDecoder._is_valid_lua(decoded):
-                        return True, StaticDecoder._beautify(decoded), "Decimal/Char Dump"
-                except: pass
+async def main():
+    logger.info("Бот запускается...")
+    # Удаляем вебхук и запускаем поллинг
+    await bot.delete_webhook(drop_pending_updates=True)
+    await dp.start_polling(bot)
 
-        # --- 4. REVERSE STRING ---
-        # Паттерн: string.reverse("...edoc...")
-        reverse_match = re.search(r"string\.reverse\(['\"](.*?)['\"]\)", content)
-        if reverse_match:
-            try:
-                reversed_str = reverse_match.group(1)[::-1] # Переворачиваем обратно
-                if StaticDecoder._is_valid_lua(reversed_str):
-                    return True, StaticDecoder._beautify(reversed_str), "Reverse String"
-            except: pass
-
-        # --- 5. BASE64 LAYER ---
-        # Ищем большие куски Base64
-        b64_matches = re.findall(r'["\']([A-Za-z0-9+/]{50,}={0,2})["\']', content)
-        for b64 in b64_matches:
-            try:
-                decoded = base64.b64decode(b64).decode('utf-8')
-                if StaticDecoder._is_valid_lua(decoded):
-                    return True, StaticDecoder._beautify(decoded), "Base64 Layer"
-            except: pass
-
-        return False, None, None
-
-    @staticmethod
-    def _is_valid_lua(text):
-        """Проверяет, похож ли текст на Lua код"""
-        keywords = ["local ", "function ", "game:", "return ", "if ", "end)", "end"]
-        # Должен содержать хотя бы 2 ключевых слова
-        count = sum(1 for k in keywords if k in text)
-        return count >= 2
-
-    @staticmethod
-    def _beautify(source_code):
-        """Делает код читаемым"""
-        source_code = re.sub(r'(\s)(local|return|if|for|while|repeat|function)(\s)', r'\n\2 ', source_code)
-        replacements = {
-            " then ": " then\n", " do ": " do\n", " end ": "\nend\n",
-            " repeat ": "\nrepeat\n", " until ": "\nuntil ", ";": ";\n",
-            "(){": "() {"
-        }
-        for k, v in replacements.items():
-            source_code = source_code.replace(k, v)
-        return source_code
+if __name__ == "__main__":
+    try:
+        # Для Windows
+        if os.name == 'nt':
+            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Бот остановлен.")
