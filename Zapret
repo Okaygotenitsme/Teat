@@ -2,61 +2,54 @@ import telebot
 import subprocess
 import os
 
-# 1. Твой токен от @BotFather
-TOKEN = 'ВАШ_ТОКЕН_ЗДЕСЬ'
+TOKEN = 'ТВОЙ_ТОКЕН_ОТ_BOTFATHER'
 bot = telebot.TeleBot(TOKEN)
 
-# 2. Название файла-обфускатора (в этом репо это обычно 'main.lua')
-# И путь к luau (если ты на Windows и закинул luau.exe в папку, пиши 'luau.exe')
-LUAU_PATH = 'luau' # Или 'luau.exe' для Windows
-
 @bot.message_handler(commands=['start'])
-def send_welcome(message):
-    bot.reply_to(message, "Привет! Я бот-обфускатор. Пришли мне .lua файл, и я его зашифрую.")
+def start(message):
+    bot.reply_to(message, "Отправь мне файл .lua, и я его обфусцирую!")
 
 @bot.message_handler(content_types=['document'])
-def handle_lua_file(message):
-    # Проверяем, что это файл
-    if not message.document.file_name.endswith(('.lua', '.txt')):
-        bot.reply_to(message, "Пожалуйста, отправь файл с расширением .lua")
+def handle_docs(message):
+    if not message.document.file_name.endswith('.lua'):
+        bot.reply_to(message, "Ошибка: Принимаются только файлы .lua")
         return
 
     try:
-        # Скачиваем файл пользователя
+        # 1. Загружаем файл
         file_info = bot.get_file(message.document.file_id)
         downloaded_file = bot.download_file(file_info.file_path)
+        
+        input_file = "input.lua"
+        output_file = "output.lua"
 
-        input_path = "input_code.lua"
-        output_path = "obfuscated_code.lua"
-
-        with open(input_path, 'wb') as f:
+        with open(input_file, 'wb') as f:
             f.write(downloaded_file)
 
-        bot.send_message(message.chat.id, "⏳ Обфускация запущена...")
+        bot.send_message(message.chat.id, "⚙️ Запускаю Laufuscator...")
 
-        # 3. ЗАПУСК ОБФУСКАТОРА
-        # Мы вызываем luau, передаем ему файл обфускатора (main.lua) и наш файл с кодом
-        # В Laufuscator команда обычно выглядит так: luau main.lua input_code.lua
-        process = subprocess.run(
-            [LUAU_PATH, 'main.lua', input_path], 
-            capture_output=True, 
+        # 2. Вызываем обфускатор (как указано в README)
+        # Мы используем os.path.join, чтобы путь работал и на Windows, и на Linux
+        script_path = os.path.join('src', 'obfuscator.lua')
+        
+        result = subprocess.run(
+            ['luau', script_path, input_file, output_file],
+            capture_output=True,
             text=True
         )
 
-        # Проверяем, создался ли файл или была ошибка
-        if os.path.exists(output_path):
-            with open(output_path, 'rb') as f:
-                bot.send_document(message.chat.id, f, caption="✅ Готово! Код защищен.")
-            
-            # Чистим временные файлы
-            os.remove(input_path)
-            os.remove(output_path)
+        # 3. Проверяем результат
+        if os.path.exists(output_file):
+            with open(output_file, 'rb') as f:
+                bot.send_document(message.chat.id, f, caption="✅ Код успешно защищен!")
+            os.remove(output_file)
         else:
-            bot.reply_to(message, f"❌ Ошибка обфускации:\n{process.stderr}")
+            bot.reply_to(message, f"❌ Ошибка при создании файла:\n{result.stderr}")
+        
+        os.remove(input_file)
 
     except Exception as e:
-        bot.reply_to(message, f"Произошла критическая ошибка: {e}")
+        bot.reply_to(message, f"⚠️ Произошла ошибка: {str(e)}")
 
-# Запуск бота
-print("Бот запущен...")
+print("Бот запущен и готов к работе...")
 bot.polling()
