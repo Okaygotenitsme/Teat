@@ -1,169 +1,62 @@
-import logging
-import asyncio
+import telebot
+import subprocess
 import os
-import re
-from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import Command
-from aiogram.types import FSInputFile
-from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-# === ИМПОРТЫ НАШИХ МОДУЛЕЙ ===
-# Убедись, что engine.py и static_decoder.py лежат в одной папке с ботом
-from engine import DeobfuscatorEngine
-from static_decoder import StaticDecoder 
+# 1. Твой токен от @BotFather
+TOKEN = 'ВАШ_ТОКЕН_ЗДЕСЬ'
+bot = telebot.TeleBot(TOKEN)
 
-# === КОНФИГУРАЦИЯ ===
-API_TOKEN = "ТВОЙ_ТОКЕН_ЗДЕСЬ"  # <--- ВСТАВЬ ТОКЕН СЮДА
+# 2. Название файла-обфускатора (в этом репо это обычно 'main.lua')
+# И путь к luau (если ты на Windows и закинул luau.exe в папку, пиши 'luau.exe')
+LUAU_PATH = 'luau' # Или 'luau.exe' для Windows
 
-# Настройка логгера
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-logger = logging.getLogger("LuaDeobfBot")
+@bot.message_handler(commands=['start'])
+def send_welcome(message):
+    bot.reply_to(message, "Привет! Я бот-обфускатор. Пришли мне .lua файл, и я его зашифрую.")
 
-# Инициализация бота и диспетчера
-bot = Bot(token=API_TOKEN)
-dp = Dispatcher()
-
-# Инициализация движка деобфускации
-engine = DeobfuscatorEngine()
-
-# === ХЕНДЛЕРЫ (ОБРАБОТЧИКИ) ===
-
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message):
-    """Приветственное сообщение"""
-    text = (
-        "👋 **Привет! Я Lua Deobfuscator Bot.**\n\n"
-        "Я умею снимать защиту с Lua скриптов (Roblox).\n"
-        "Поддерживаю два режима работы:\n"
-        "1. ⚡ **Static Analysis:** Мгновенное снятие слабой защиты (Vexon, Meloten, GarouTe, Base64, XOR).\n"
-        "2. 🧠 **Dynamic Emulation:** Запуск скрипта в виртуальной среде (VM) для дампа сильных обфускаторов (MoonSec, IronBrew, PSU).\n\n"
-        "📂 **Просто отправь мне .lua или .txt файл со скриптом!**"
-    )
-    await message.answer(text, parse_mode="Markdown")
-
-@dp.message(F.document)
-async def handle_document(message: types.Message):
-    """Обработка файлов"""
-    user_id = message.from_user.id
-    file_name = message.document.file_name
-    
-    # Проверка расширения
-    if not file_name.endswith(('.lua', '.txt')):
-        await message.reply("❌ Пожалуйста, отправляйте только файлы .lua или .txt")
+@bot.message_handler(content_types=['document'])
+def handle_lua_file(message):
+    # Проверяем, что это файл
+    if not message.document.file_name.endswith(('.lua', '.txt')):
+        bot.reply_to(message, "Пожалуйста, отправь файл с расширением .lua")
         return
 
-    status_msg = await message.reply("⏳ **Скачивание файла...**", parse_mode="Markdown")
-    
-    # Пути к файлам
-    input_path = f"temp_{user_id}_{file_name}"
-    output_path = f"deobf_{user_id}_{file_name}"
-
     try:
-        # 1. Скачиваем файл
-        file = await bot.get_file(message.document.file_id)
-        await bot.download_file(file.file_path, input_path)
+        # Скачиваем файл пользователя
+        file_info = bot.get_file(message.document.file_id)
+        downloaded_file = bot.download_file(file_info.file_path)
 
-        # Читаем содержимое
-        with open(input_path, "rb") as f:
-            content = f.read()
+        input_path = "input_code.lua"
+        output_path = "obfuscated_code.lua"
 
-        # ==========================================================
-        # ЭТАП 1: СТАТИЧЕСКАЯ ДЕОБФУСКАЦИЯ (БЫСТРАЯ)
-        # ==========================================================
-        await status_msg.edit_text("⚡ **Анализ сигнатур (Static)...**\n_Пытаюсь найти ключи шифрования..._", parse_mode="Markdown")
-        
-        is_solved, static_code, method_name = StaticDecoder.process(content)
-        
-        if is_solved:
-            # УСПЕХ: Статика сработала
-            logger.info(f"User {user_id}: Static Success ({method_name})")
-            
-            header = f"-- [[ DEOBFUSCATED BY STATIC ANALYZER ]]\n-- METHOD: {method_name}\n\n"
-            final_data = (header + static_code).encode('utf-8')
-            
-            with open(output_path, "wb") as f:
-                f.write(final_data)
-            
-            out_file = FSInputFile(output_path)
-            await message.answer_document(
-                out_file, 
-                caption=f"✅ **Успешно деобфусцировано!**\n🛡️ Тип защиты: `{method_name}`\n⚡ Метод: Статический анализ",
-                parse_mode="Markdown"
-            )
-            await status_msg.delete() # Удаляем сообщение о статусе
-            
-            # Чистка и выход
-            cleanup([input_path, output_path])
-            return
+        with open(input_path, 'wb') as f:
+            f.write(downloaded_file)
 
-        # ==========================================================
-        # ЭТАП 2: ДИНАМИЧЕСКАЯ ЭМУЛЯЦИЯ (ЕСЛИ СТАТИКА НЕ ПОМОГЛА)
-        # ==========================================================
-        await status_msg.edit_text(
-            "🧠 **Запуск эмулятора (VM)...**\n"
-            "_Статический анализ не дал результатов. Запускаю виртуальную машину Lua..._\n"
-            "_Это может занять до 20 секунд._", 
-            parse_mode="Markdown"
+        bot.send_message(message.chat.id, "⏳ Обфускация запущена...")
+
+        # 3. ЗАПУСК ОБФУСКАТОРА
+        # Мы вызываем luau, передаем ему файл обфускатора (main.lua) и наш файл с кодом
+        # В Laufuscator команда обычно выглядит так: luau main.lua input_code.lua
+        process = subprocess.run(
+            [LUAU_PATH, 'main.lua', input_path], 
+            capture_output=True, 
+            text=True
         )
 
-        # Функция для обновления статуса из engine.py
-        loop = asyncio.get_event_loop()
-        last_update_time = 0
-        
-        def sync_status_updater(msg):
-            # В реальном боте лучше не спамить edit_text слишком часто
-            pass 
-
-        # Запускаем тяжелый процесс в отдельном потоке
-        result_data = await asyncio.wait_for(
-            loop.run_in_executor(None, engine.process, content, sync_status_updater),
-            timeout=120.0 # Таймаут 2 минуты
-        )
-
-        # Сохраняем результат
-        with open(output_path, "wb") as f:
-            f.write(result_data)
+        # Проверяем, создался ли файл или была ошибка
+        if os.path.exists(output_path):
+            with open(output_path, 'rb') as f:
+                bot.send_document(message.chat.id, f, caption="✅ Готово! Код защищен.")
             
-        # Формируем ответ
-        caption = "✅ **Обработка завершена!**\n🧠 Метод: Dynamic VM Emulation"
-        
-        if b"[FATAL]" in result_data:
-             caption = "⚠️ **Ошибка при обработке.**\nСм. файл для деталей."
-        elif b"STATIC DEOBFUSCATION SUCCESS" in result_data:
-             caption += "\n🛡️ Сработал внутренний детектор."
-        
-        out_file = FSInputFile(output_path)
-        await message.answer_document(out_file, caption=caption, parse_mode="Markdown")
-        await status_msg.delete()
+            # Чистим временные файлы
+            os.remove(input_path)
+            os.remove(output_path)
+        else:
+            bot.reply_to(message, f"❌ Ошибка обфускации:\n{process.stderr}")
 
-    except asyncio.TimeoutError:
-        await status_msg.edit_text("❌ **Ошибка:** Скрипт выполнялся слишком долго (более 2 минут).")
     except Exception as e:
-        logger.error(f"Error processing file: {e}")
-        try:
-            await status_msg.edit_text(f"❌ Произошла ошибка: {e}")
-        except: pass
-    finally:
-        cleanup([input_path, output_path])
+        bot.reply_to(message, f"Произошла критическая ошибка: {e}")
 
-def cleanup(files):
-    """Удаляет временные файлы"""
-    for p in files:
-        if os.path.exists(p):
-            try: os.remove(p)
-            except: pass
-
-async def main():
-    logger.info("Бот запускается...")
-    # Удаляем вебхук и запускаем поллинг
-    await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    try:
-        # Для Windows
-        if os.name == 'nt':
-            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("Бот остановлен.")
+# Запуск бота
+print("Бот запущен...")
+bot.polling()
