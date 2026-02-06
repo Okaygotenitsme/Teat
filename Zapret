@@ -6,7 +6,8 @@ import os
 import tempfile
 import re
 import binascii
-import requests  # [NEW] Нужен для реального интернета
+import requests
+import time
 
 # Логгер
 logger = logging.getLogger("DeobfuscatorEngine")
@@ -25,7 +26,13 @@ class DeobfuscatorEngine:
         if not self._check_java():
             return b"-- [FATAL] Java is missing. Install Java to use unluac."
 
-        update_status("🧠 Инициализация среды Roblox (God Mode)...")
+        # Проверка на Luau Bytecode (подпись 0x00 + версия или "LuaQ")
+        is_luau = False
+        if content.startswith(b'\x1bLua') and len(content) > 4 and content[4] >= 0x04:
+            update_status("⚠️ Обнаружен Luau Bytecode (Binary). Декомпиляция ограничена.")
+            is_luau = True
+
+        update_status("🧠 Инициализация среды Roblox (God Mode V3)...")
 
         # --- НАСТРОЙКА LUA VM ---
         try:
@@ -33,19 +40,13 @@ class DeobfuscatorEngine:
         except Exception as e:
             return f"-- [FATAL] Lua start error: {e}".encode('utf-8')
 
-        # [NEW] === МОСТ В РЕАЛЬНЫЙ ИНТЕРНЕТ ===
-        # Эта функция будет доступна из Lua
+        # [NETWORK BRIDGE]
         def py_http_get(url):
             try:
                 url = str(url).strip()
-                # Имитируем браузер/эксплойт, чтобы Pastebin/GitHub не блочили
-                headers = {
-                    "User-Agent": "Roblox/WinInet",
-                    "Accept": "text/plain"
-                }
-                update_status(f"🌐 GET Request: {url[:50]}...")
-                response = requests.get(url, headers=headers, timeout=10)
-                
+                headers = {"User-Agent": "Roblox/WinInet", "Accept": "text/plain"}
+                update_status(f"🌐 GET Request: {url[:60]}...")
+                response = requests.get(url, headers=headers, timeout=5)
                 if response.status_code == 200:
                     return response.text
                 return ""
@@ -53,15 +54,30 @@ class DeobfuscatorEngine:
                 logger.error(f"Network Error: {e}")
                 return ""
 
-        # Прокидываем функцию в глобалы Lua
         lua.globals().PYTHON_HTTP_GET = py_http_get
 
-
         # ==========================================
-        # 1. LUA SCRIPT: POLYFILLS & EMULATION
+        # 1. LUA SCRIPT: ADVANCED EMULATION
         # ==========================================
         lua_env_setup = """
-        -- :: BITWISE OPERATIONS (Roblox uses Lua 5.1 + Bit32) ::
+        -- :: LOGGING CONTAINERS ::
+        _G.CAPTURED_STRINGS = {}
+        _G.RECONSTRUCTED_CODE = {}  -- Сюда пишем исполняемый код
+        _G.GLOBALS_DUMP = {}
+
+        local function log_code(line)
+            if #_G.RECONSTRUCTED_CODE < 2000 then 
+                table.insert(_G.RECONSTRUCTED_CODE, line) 
+            end
+        end
+
+        local function log_string(s)
+            if type(s) == "string" and #s > 3 then
+                _G.CAPTURED_STRINGS[s] = true
+            end
+        end
+
+        -- :: POLYFILLS (Bitwise) ::
         local bit = {}
         function bit.tobit(x) x = x % 4294967296; if x >= 2147483648 then x = x - 4294967296 end; return x end
         function bit.bnot(x) return 4294967295 - x % 4294967296 end
@@ -77,299 +93,174 @@ class DeobfuscatorEngine:
         function bit.rshift(a, b) return math.floor(a / 2^b) % 4294967296 end
         package.loaded.bit = bit; _G.bit = bit; _G.bit32 = bit
 
-        -- :: GLOBAL STORAGE ::
-        _G.CAPTURED_CHUNKS = {}
-        _G.DETECTED_STRINGS = {}
-        _G.ACTION_LOG = {}
-        _G.FINAL_GLOBALS = {}
+        -- :: ANTI-DETECTION & DEBUG API ::
+        _G.debug = {}
+        _G.debug.getinfo = function(...) return {source="=[C]", what="C", name="debug", short_src="[C]"} end
+        _G.debug.traceback = function(...) return "Stack Traceback" end
+        _G.debug.getupvalue = function(...) return nil end
+        _G.debug.getconstants = function(...) return {} end
+        
+        _G.os.clock = function() return 0.1 end
+        _G.os.time = function() return 100000 end
+        _G.tick = function() return 100000 end
 
-        local function log_action(msg)
-            if #_G.ACTION_LOG < 1000 then table.insert(_G.ACTION_LOG, msg) end
-        end
+        _G.task = { 
+            wait = function(t) return t or 0 end, 
+            spawn = function(f) pcall(f) end, 
+            delay = function(t,f) pcall(f) end,
+            defer = function(f) pcall(f) end
+        }
+        _G.wait = _G.task.wait
+        _G.spawn = _G.task.spawn
 
-        -- :: ROBLOX INSTANCE EMULATION ::
-        local function CreateSignal()
-            return { Connect = function(f) return {Disconnect=function() end} end, Fire = function(...) end, Wait = function() return 0 end }
-        end
+        -- :: ROBLOX INSTANCE MOCK (THE SPY) ::
+        local InstanceMT = {
+            __index = function(self, key)
+                -- Возврат метода, который логирует вызов
+                return function(self_dummy, ...)
+                    local args = {...}
+                    local arg_str = ""
+                    for i,v in ipairs(args) do 
+                        if type(v)=="string" then arg_str = arg_str .. '"'..v..'", ' 
+                        else arg_str = arg_str .. tostring(v) .. ", " end
+                    end
+                    arg_str = arg_str:sub(1, -3) -- remove comma
+                    
+                    -- Логируем действие как код
+                    log_code("game." .. self.Name .. ":" .. key .. "(" .. arg_str .. ")")
+                    
+                    if key == "GetService" then
+                        local srv = args[1]
+                        if not _G.game[srv] then
+                            _G.game[srv] = _G.Instance.new(srv, _G.game)
+                        end
+                        return _G.game[srv]
+                    elseif key == "HttpGet" or key == "HttpGetAsync" then
+                         -- Реальный запрос через Python
+                         log_string(args[1])
+                         local res = PYTHON_HTTP_GET(args[1])
+                         if #res > 50 then 
+                            log_code("-- [DOWNLOADED] " .. #res .. " bytes") 
+                         end
+                         return res
+                    end
+                    
+                    return _G.Instance.new("Folder") -- Заглушка
+                end
+            end,
+            __newindex = function(self, key, value)
+                log_code(self.Name .. "." .. key .. " = " .. tostring(value))
+                rawset(self, key, value)
+            end,
+            __tostring = function(self) return self.Name end
+        }
 
         _G.Instance = {}
         function _G.Instance.new(className, parent)
-            local obj = {}
-            obj.ClassName = className or "Folder"
-            obj.Name = className or "Folder"
-            obj.Parent = parent
-            obj.Archivable = true
+            local obj = {Name = className or "Object", ClassName = className or "Object", Parent = parent}
+            -- Special handling
+            if className == "Player" then obj.UserId = 123456 end
             
-            -- Signals
-            obj.Changed = CreateSignal()
-            obj.ChildAdded = CreateSignal()
-            
-            -- Methods
-            function obj:Destroy() end
-            function obj:Clone() return self end
-            function obj:ClearAllChildren() end
-            function obj:FindFirstChild(n) return nil end
-            function obj:WaitForChild(n, t) return _G.Instance.new("Folder", obj) end
-            function obj:GetChildren() return {} end
-            function obj:GetDescendants() return {} end
-            function obj:GetService(name)
-                -- Возвращаем существующие сервисы или создаем новые
-                if _G.game[name] then return _G.game[name] end
-                return _G.Instance.new(name, _G.game)
-            end
-            
-            -- Metatable
-            local mt = {
+            -- Привязываем метатаблицу шпиона (только для объектов, не функций)
+            -- В Lupa сложно сделать __namecall, поэтому используем замыкания в __index
+            local proxy = {}
+            local meta = {
                 __index = function(t, k)
-                    if k == "Value" then return "MockValue" end
-                    return rawget(t, k)
+                    if obj[k] then return obj[k] end
+                    -- Магия перехвата методов
+                    return function(_, ...)
+                         local args = {...}
+                         local arg_str = ""
+                         for i,v in ipairs(args) do 
+                             if type(v)=="string" then arg_str = arg_str .. '"'..v..'"' 
+                             else arg_str = arg_str .. tostring(v) end
+                             if i < #args then arg_str = arg_str .. ", " end
+                         end
+                         log_code(obj.Name .. ":" .. k .. "(" .. arg_str .. ")")
+                         
+                         if k == "HttpGet" then return PYTHON_HTTP_GET(args[1]) end
+                         return _G.Instance.new("Folder")
+                    end
                 end,
-                __newindex = rawset,
-                __tostring = function(t) return t.Name end
+                __newindex = function(t, k, v)
+                    log_code(obj.Name .. "." .. k .. " = " .. tostring(v))
+                    obj[k] = v
+                end,
+                __tostring = function(t) return obj.Name end
             }
-            return setmetatable(obj, mt)
+            return setmetatable(proxy, meta)
         end
 
-        -- :: DATA TYPES ::
-        _G.Vector3 = { new = function(x,y,z) return {X=x or 0, Y=y or 0, Z=z or 0} end, zero={X=0,Y=0,Z=0} }
-        _G.CFrame = { new = function(...) return {p=_G.Vector3.new()} end, Angles=function(...) return {} end }
-        _G.UDim2 = { new = function(...) return {} end, fromScale=function(...) return {} end }
-        _G.Color3 = { new = function(...) return {} end, fromRGB=function(...) return {} end }
-        _G.Enum = setmetatable({}, { __index = function() return setmetatable({}, {__index=function() return 1 end}) end })
-        _G.task = { wait = function(t) return t or 0 end, spawn = function(f) pcall(f) end, delay = function(t,f) pcall(f) end, defer = function(f) pcall(f) end }
-        _G.wait = _G.task.wait; _G.spawn = _G.task.spawn
-
-        -- :: GAME HIERARCHY ::
+        -- :: GAME ROOT ::
         _G.game = _G.Instance.new("DataModel")
+        _G.game.Name = "game"
+        _G.workspace = _G.Instance.new("Workspace", _G.game)
         _G.game.Players = _G.Instance.new("Players", _G.game)
         _G.game.Players.LocalPlayer = _G.Instance.new("Player", _G.game.Players)
-        _G.game.Players.LocalPlayer.Name = "DeobfuscatorUser"
-        _G.game.Players.LocalPlayer.UserId = 2652366
-        _G.workspace = _G.Instance.new("Workspace", _G.game)
-        _G.game.HttpService = _G.Instance.new("HttpService", _G.game)
-        _G.game.HttpService.JSONDecode = function(s, t) return {} end
-        _G.game.HttpService.JSONEncode = function(s, t) return "{}" end
-
-        -- ==========================================
-        -- 2. SMART PROXY & NETWORK (Level: God Mode)
-        -- ==========================================
+        _G.game.Players.LocalPlayer.Name = "LocalPlayer"
         
-        -- Функция для обработки ответа
-        local function handle_network_response(url, content)
-            if content and #content > 0 then
-                log_action("   ✅ 200 OK: " .. #content .. " bytes")
-                
-                -- Если скачан большой кусок текста, это может быть скрипт
-                if #content > 50 then
-                    -- Сохраняем как чанк (важно!)
-                    table.insert(_G.CAPTURED_CHUNKS, {data = content, size = #content, type = "http_response"})
-                    
-                    -- Сохраняем строку
-                    table.insert(_G.DETECTED_STRINGS, "HTTP_RESP: " .. url)
-                end
-                return content
-            else
-                log_action("   ❌ Empty/Error")
-                return ""
-            end
-        end
-
-        -- Перехват game:HttpGet
-        _G.game.HttpGet = function(self, url) 
-            log_action("🌍 HTTP GET: " .. tostring(url)) 
-            
-            -- Вызов Python функции!
-            local success, res = pcall(PYTHON_HTTP_GET, url)
-            if success then 
-                return handle_network_response(url, res)
-            end
-            return "" 
-        end
-        _G.game.HttpGetAsync = _G.game.HttpGet
-
-        -- Эмуляция request / syn.request / http_request (для Synapse X / KRNL)
-        local function emulation_request(options)
-            local url = options.Url or options.url
-            if not url then return {Success=false} end
-            
-            log_action("🌍 SYN.REQUEST: " .. tostring(url))
-            local body = _G.game:HttpGet(url)
-            
-            return {
-                Body = body,
-                StatusCode = (body ~= "") and 200 or 404,
-                Success = (body ~= ""),
-                StatusMessage = "OK"
-            }
-        end
-
-        -- ==========================================
-        -- 3. EXPLOIT ENVIRONMENT (Обман защиты)
-        -- ==========================================
-        _G.request = emulation_request
-        _G.http_request = emulation_request
-        _G.syn = { 
-            request = emulation_request,
-            protect_gui = function() end,
-            queue_on_teleport = function() end
-        }
-        
-        -- Идентификация (Говорим скрипту, что мы Synapse X)
-        _G.identifyexecutor = function() return "Synapse X", "2.0.0" end
-        _G.getexecutorname = function() return "Synapse X" end
-        
-        -- Environment Getters
+        -- :: EXPLOIT ENVIRONMENT ::
+        _G.identifyexecutor = function() return "Synapse X" end
         _G.getgenv = function() return _G end
-        _G.getrenv = function() return _G end
-        _G.getreg = function() return {} end
-        _G.getgc = function() return {} end
-        _G.checkcaller = function() return true end
-        _G.islclosure = function() return true end
-        _G.newcclosure = function(f) return f end
-        _G.hookfunction = function(old, new) return old end
-        
-        -- Файловая система (Заглушки, чтобы не падали скрипты с конфигами)
-        _G.writefile = function(path, data) log_action("💾 writefile: "..tostring(path)) end
-        _G.readfile = function(path) return "" end
-        _G.isfile = function(path) return false end
-        _G.delfile = function(path) end
-        _G.makefolder = function(path) end
-
-        -- ==========================================
-        -- 4. SPYWARE HOOKS (Перехват данных)
-        -- ==========================================
-        
-        local function capture_str(s) 
-            if type(s) == "string" and #s > 4 then 
-                if not s:find("stack begin") and not s:find("upvalue") then
-                    _G.DETECTED_STRINGS[s] = true 
-                end
-            end 
-            return s
+        _G.request = function(opt) 
+             log_code("request({Url='"..tostring(opt.Url).."'})")
+             return {Body=PYTHON_HTTP_GET(opt.Url), StatusCode=200} 
         end
+        _G.syn = { request = _G.request }
 
-        -- Умный хук на string.char (дешифровка)
-        local real_char = string.char
+        -- :: STRING HOOKS ::
+        local old_char = string.char
         string.char = function(...)
-            local args = {...}
-            -- Если много аргументов - это массив байтов (пейлоад)
-            if #args > 10 then
-                local res = real_char(...)
-                capture_str(res)
-                return res
-            end
-            return real_char(...)
-        end
-        
-        -- Хук на table.concat
-        local real_concat = table.concat
-        table.concat = function(t, sep, i, j)
-            local res = real_concat(t, sep, i, j)
-            capture_str(res)
+            local res = old_char(...)
+            if #res > 4 then log_string(res) end
             return res
         end
-
-        -- Хук на load/loadstring (Самое важное для лоадеров)
-        local real_load = load
-        local function hooked_load(chunk, name, mode, env)
-            if type(chunk) == "string" and #chunk > 50 then
-                table.insert(_G.CAPTURED_CHUNKS, {data = chunk, size = #chunk, type = "load_string"})
-                log_action("🔥 Captured Chunk Size: " .. #chunk)
-            end
-            return real_load(chunk, name, mode, env)
-        end
-        _G.load = hooked_load
-        _G.loadstring = hooked_load
         
-        -- Функция дампа
-        function _G.dump_globals()
-             local ignore = {
-                string=1, math=1, table=1, bit=1, bit32=1, pairs=1, ipairs=1, next=1, _G=1, 
-                package=1, os=1, io=1, Instance=1, Vector3=1, CFrame=1, UDim2=1, Color3=1,
-                Enum=1, task=1, wait=1, spawn=1, delay=1, defer=1, game=1, workspace=1,
-                script=1, getgenv=1, getrenv=1, getreg=1, getgc=1, checkcaller=1,
-                islclosure=1, newcclosure=1, load=1, loadstring=1, print=1, warn=1, error=1,
-                tostring=1, tonumber=1, type=1, pcall=1, xpcall=1, select=1, unpack=1,
-                setmetatable=1, getmetatable=1, require=1, syn=1, request=1, http_request=1,
-                identifyexecutor=1, getexecutorname=1, hookfunction=1, writefile=1, readfile=1,
-                isfile=1, delfile=1, makefolder=1, REAL_HTTP_GET=1, PYTHON_HTTP_GET=1,
-                DETECTED_STRINGS=1, CAPTURED_CHUNKS=1, ACTION_LOG=1, FINAL_GLOBALS=1
-            }
-            for k, v in pairs(getfenv()) do
-                if not ignore[k] then
-                    if type(v) == "string" or type(v) == "number" or type(v) == "boolean" then
-                        table.insert(_G.FINAL_GLOBALS, tostring(k) .. " = " .. tostring(v))
-                    end
+        -- :: GLOBAL DUMPER ::
+        function _G.dump_all()
+             for k,v in pairs(_G) do
+                if type(v) == "string" or type(v) == "number" then
+                    table.insert(_G.GLOBALS_DUMP, k.." = "..tostring(v))
                 end
-            end
+             end
         end
         """
 
         try:
-            update_status("🌪️ Запуск скрипта (Tracing Active)...")
+            update_status("🌪️ Запуск трассировки (Tracing)...")
             
-            # Загружаем среду
             lua.execute(lua_env_setup)
             
-            # Раннер
+            # Runner с защитой от ошибок
             runner = lua.eval("""
                 function(code)
-                    -- Оборачиваем в pcall
                     local status, err = pcall(function()
-                        local f, load_err = load(code, "script", "t", _G)
-                        if not f then error(load_err) end
+                        local f = load(code)
+                        if not f then error("Cannot load chunk") end
                         f()
                     end)
-                    
                     if not status then
-                        table.insert(_G.ACTION_LOG, "❌ Script Error: " .. tostring(err))
+                        table.insert(_G.RECONSTRUCTED_CODE, "-- [ERROR] Script crash: " .. tostring(err))
                     end
-                    
-                    -- Пробуем сдампить
-                    pcall(_G.dump_globals)
+                    pcall(_G.dump_all)
                     return true
                 end
             """)
             
             runner(content)
 
-            # --- СБОР РЕЗУЛЬТАТОВ ---
-            strings_tbl = lua.globals().DETECTED_STRINGS
-            # Обработка словаря строк
-            detected_strings = []
-            if strings_tbl:
-                for k in strings_tbl:
-                    detected_strings.append(str(k))
+            # Сбор данных
+            captured_strings = []
+            tbl = lua.globals().CAPTURED_STRINGS
+            if tbl:
+                for k in tbl: captured_strings.append(str(k))
             
-            global_dump = list(lua.globals().FINAL_GLOBALS)
-            action_log = list(lua.globals().ACTION_LOG)
-            chunks = lua.globals().CAPTURED_CHUNKS
-            
-            # Поиск лучшего чанка (распакованного скрипта)
-            best_chunk = None
-            max_size = 0
-            
-            # Сначала проверяем чанки
-            if len(chunks) > 0:
-                for i in range(1, len(chunks) + 1):
-                    c = chunks[i]
-                    # Предпочитаем http_response, если он большой, так как это скорее всего raw pastebin
-                    priority = 1.0
-                    if c.type == "http_response": priority = 1.2 
-                    
-                    weighted_size = c.size * priority
-                    
-                    if weighted_size > max_size:
-                        max_size = weighted_size
-                        best_chunk = c.data
-            
-            target_code = best_chunk if best_chunk else content
-            
-            # Если нашли чанк, добавим инфо об этом
-            if best_chunk:
-                update_status(f"🎉 Найден скрытый код ({int(max_size)} bytes)!")
-
-            return self._finalize_output(target_code, detected_strings, global_dump, action_log, update_status)
+            reconstructed_code = []
+            code_tbl = lua.globals().RECONSTRUCTED_CODE
+            if code_tbl:
+                for k in code_tbl.values(): reconstructed_code.append(str(k))
+                
+            return self._finalize_output(content, captured_strings, reconstructed_code, is_luau, update_status)
 
         except Exception as e:
             logger.error(f"Engine Crash: {e}")
@@ -381,59 +272,82 @@ class DeobfuscatorEngine:
             return True
         except: return False
 
-    def _clean_string(self, s):
-        if isinstance(s, bytes):
-            try: return s.decode('utf-8')
-            except: return str(s)
-        return str(s)
-
-    def _finalize_output(self, code_bytes, strings, globals_dump, logs, callback):
-        if callback: callback("🧬 Декомпиляция и сборка отчета...")
+    def _clean_string(self, text):
+        """
+        Умная очистка мусора. Оставляет только читаемые строки, URL и AssetID.
+        """
+        if isinstance(text, bytes):
+            try: text = text.decode('utf-8', 'ignore')
+            except: return ""
+            
+        # Убираем все символы, кроме печатных ASCII и русских букв
+        # Оставляем символы: a-zA-Z0-9, русские, знаки препинания
+        # Паттерн: Найти последовательности > 4 символов
+        clean_text = ""
         
-        # Если код пришел строкой из Lua (чанк), кодируем в байты
-        if isinstance(code_bytes, str):
-            code_bytes = code_bytes.encode('utf-8', 'ignore')
-
-        decompiled = self._try_decompile(code_bytes)
+        # 1. Сначала ищем URL и специфичные паттерны
+        urls = re.findall(r'(https?://[^\s<>"]+|rbxassetid://\d+)', text)
         
-        final_text = ""
-        final_text += "-- [[ GENERATED BY DEOBFUSCATOR V2 (GOD MODE) ]] --\n"
-        final_text += "-- [[ DUMPED STRINGS ]] --\n"
+        # 2. Ищем просто слова/предложения
+        # Паттерн: буквы/цифры, длина от 4 до 100
+        words = re.findall(r'([a-zA-Z0-9_\-\.\/:\s]{4,100})', text)
         
-        sorted_strings = sorted(strings, key=lambda x: len(str(x)), reverse=True)
-        seen = set()
-        for s in sorted_strings:
-            clean = self._clean_string(s).replace('\n', ' ').replace('\r', '')
-            if clean not in seen and len(clean) > 3:
-                final_text += f'-- "{clean}"\n'
-                seen.add(clean)
+        valid_items = set(urls)
+        for w in words:
+            w = w.strip()
+            # Фильтр совсем мусора (например "x00x05")
+            if len(w) > 3 and not re.search(r'[\x00-\x1f]', w):
+                valid_items.add(w)
 
-        if globals_dump:
-            final_text += "\n" + "="*30 + "\n-- [[ GLOBALS ]] --\n"
-            for g in globals_dump:
-                final_text += f"-- {self._clean_string(g)}\n"
+        return sorted(list(valid_items), key=len, reverse=True)
 
-        if logs:
-             final_text += "\n" + "="*30 + "\n-- [[ EXECUTION LOG ]] --\n"
-             for l in logs: # Выводим все логи, а не последние
-                 final_text += f"-- {self._clean_string(l)}\n"
-
-        final_text += "\n" + "="*50 + "\n\n"
+    def _finalize_output(self, original_bytes, strings, reconstructed_log, is_luau, callback):
+        if callback: callback("🧬 Генерация финального отчета...")
         
-        if decompiled:
-            try: src = decompiled.decode('utf-8', 'ignore')
-            except: src = decompiled.decode('latin-1', 'ignore')
-            final_text += self._beautify_lua(src)
+        final_text = "-- [[ DEOBFUSCATOR V3 (GOD MODE) REPORT ]] --\n"
+        final_text += f"-- Date: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        
+        # 1. ВЫВОД СТРОК (Очищенный)
+        final_text += "-- [[ 🔎 DETECTED STRINGS / URLS ]] --\n"
+        # Собираем строки из лога + строки из байткода (через регулярки)
+        raw_strings = self._clean_string(original_bytes)
+        combined_strings = set(self._clean_string('\n'.join(strings)) + raw_strings)
+        
+        for s in combined_strings:
+            final_text += f'-- "{s}"\n'
+            
+        # 2. РЕКОНСТРУИРОВАННЫЙ КОД (Самое ценное)
+        final_text += "\n" + "="*40 + "\n-- [[ 🛠 RECONSTRUCTED LOGIC ]] --\n"
+        final_text += "-- Этот код показывает, что скрипт делал во время выполнения.\n\n"
+        
+        if reconstructed_log:
+            for line in reconstructed_log:
+                final_text += f"{line}\n"
         else:
-            final_text += "-- [WARNING] Decompilation skipped or failed (Raw Dump below).\n"
-            try: final_text += code_bytes.decode('utf-8')
-            except: final_text += str(binascii.hexlify(code_bytes[:500])) + "..."
+            final_text += "-- [INFO] Лог действий пуст (скрипт не выполнил активных действий или упал сразу).\n"
+
+        # 3. ДЕКОМПИЛЯЦИЯ
+        final_text += "\n" + "="*40 + "\n-- [[ 📜 SOURCE DECOMPILATION ]] --\n"
+        
+        if is_luau:
+            final_text += "-- [WARNING] Обнаружен Luau Bytecode. Unluac не может полностью восстановить код.\n"
+            final_text += "-- Ниже представлен сырой дамп (попробуйте использовать Node.js декомпиляторы для Luau).\n\n"
+            try: final_text += original_bytes.decode('utf-8', 'ignore')[:2000] # Ограничим вывод
+            except: pass
+        else:
+            decompiled = self._try_decompile(original_bytes)
+            if decompiled:
+                try: src = decompiled.decode('utf-8', 'ignore')
+                except: src = decompiled.decode('latin-1', 'ignore')
+                final_text += self._beautify_lua(src)
+            else:
+                final_text += "-- [WARNING] Decompilation skipped or failed.\n"
 
         return final_text.encode('utf-8')
 
     def _try_decompile(self, bytecode):
-        # Если это простой текст (не байткод), возвращаем как есть
-        if bytecode.startswith(b"--") or b"local " in bytecode or b"function" in bytecode:
+        # Если это простой текст, возвращаем
+        if bytecode.strip().startswith(b"--") or b"local " in bytecode:
             return bytecode
 
         if not os.path.exists(self.unluac_path): return None
@@ -442,9 +356,10 @@ class DeobfuscatorEngine:
                 tmp.write(bytecode)
                 path = tmp.name
             
+            # Запускаем unluac
             res = subprocess.run(
                 ["java", "-Xmx1G", "-jar", self.unluac_path, path], 
-                capture_output=True, timeout=10
+                capture_output=True, timeout=15
             )
             os.remove(path)
             if res.returncode == 0 and len(res.stdout) > 0: return res.stdout
@@ -452,12 +367,6 @@ class DeobfuscatorEngine:
         except: return None
 
     def _beautify_lua(self, source_code):
-        # Простое форматирование
+        # Форматирование для красоты
         source_code = re.sub(r'(\s)(local|return|if|for|while|repeat|function)(\s)', r'\n\2 ', source_code)
-        replacements = {
-            " then ": " then\n", " do ": " do\n", " end ": "\nend\n",
-            " repeat ": "\nrepeat\n", " until ": "\nuntil ", ";": ";\n"
-        }
-        for k, v in replacements.items():
-            source_code = source_code.replace(k, v)
         return source_code
