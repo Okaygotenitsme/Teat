@@ -7,7 +7,9 @@ import tempfile
 import re
 import binascii
 import requests
-import time
+import base64
+import hashlib
+from typing import Optional, Tuple, List
 
 # Логгер
 logger = logging.getLogger("DeobfuscatorEngine")
@@ -16,67 +18,179 @@ class DeobfuscatorEngine:
     def __init__(self):
         base_dir = os.path.dirname(os.path.abspath(__file__))
         self.unluac_path = os.path.join(base_dir, "unluac.jar")
+        self.http_cache = {}  # Кеш для HTTP запросов
         logger.info(f"📁 Working Dir: {base_dir}")
 
-    def process(self, content, status_callback=None):
-        def update_status(msg):
-            if status_callback: status_callback(msg)
-            logger.info(f"[STATUS] {msg}")
-
-        if not self._check_java():
-            return b"-- [FATAL] Java is missing. Install Java to use unluac."
-
-        update_status("🧠 Инициализация среды Roblox (Full Emulation)...")
-
-        # --- НАСТРОЙКА LUA VM ---
-        try:
-            lua = LuaRuntime(unpack_returned_tuples=True, encoding=None)
-        except Exception as e:
-            return f"-- [FATAL] Lua start error: {e}".encode('utf-8')
-
-        # [NETWORK BRIDGE]
-        def py_http_get(url):
-            try:
-                url = str(url).strip()
-                headers = {
-                    "User-Agent": "Roblox/WinInet",
-                    "Accept": "text/plain",
-                    "Roblox-Place-Id": "123456"
-                }
-                update_status(f"🌐 GET Request: {url[:50]}...")
-                response = requests.get(url, headers=headers, timeout=10)
-                if response.status_code == 200:
-                    return response.text
-                return ""
-            except Exception as e:
-                logger.error(f"Network Error: {e}")
-                return ""
-
-        lua.globals().PYTHON_HTTP_GET = py_http_get
-
-        # ==========================================
-        # 1. LUA SCRIPT: HEAVY EMULATION LAYER
-        # ==========================================
-        lua_env_setup = """
-        -- :: GLOBAL STORAGE ::
-        _G.CAPTURED_CHUNKS = {}
-        _G.DETECTED_STRINGS = {}
-        _G.ACTION_LOG = {}
+    # ==========================================
+    # PRE-PROCESSING: ДЕТЕКЦИЯ И ДЕКОДИРОВАНИЕ
+    # ==========================================
+    
+    def _detect_and_decode(self, content: bytes) -> Tuple[bytes, List[str]]:
+        """
+        Многоуровневый анализ и декодирование перед запуском
+        Возвращает: (decoded_content, detection_log)
+        """
+        detection_log = []
         
-        local function log_action(msg)
-            if #_G.ACTION_LOG < 2000 then 
-                table.insert(_G.ACTION_LOG, msg) 
-            end
-        end
+        try:
+            text = content.decode('utf-8', 'ignore')
+        except:
+            return content, ["⚠️ Binary content, skipping pre-processing"]
+        
+        original_text = text
+        
+        # === STAGE 1: BASE64 DETECTION ===
+        # Ищем большие base64 блоки (минимум 100 символов)
+        base64_pattern = r'[A-Za-z0-9+/]{100,}={0,2}'
+        base64_matches = re.findall(base64_pattern, text)
+        
+        if base64_matches:
+            detection_log.append(f"🔍 Found {len(base64_matches)} Base64 blocks")
+            for i, b64_str in enumerate(base64_matches[:5]):  # Лимит 5 для безопасности
+                try:
+                    decoded = base64.b64decode(b64_str)
+                    # Проверяем, что это валидный Lua код
+                    if b'local' in decoded or b'function' in decoded or b'return' in decoded:
+                        text = text.replace(b64_str, f'--[[BASE64_DECODED_{i}]]--\n{decoded.decode("utf-8", "ignore")}')
+                        detection_log.append(f"  ✅ Decoded Base64 block {i} ({len(decoded)} bytes)")
+                except:
+                    pass
+        
+        # === STAGE 2: HEX STRING DETECTION ===
+        # Паттерн: "\\x48\\x65\\x6c\\x6c\\x6f" или "\x48\x65\x6c\x6c\x6f"
+        hex_pattern = r'\\x[0-9a-fA-F]{2}'
+        if re.search(hex_pattern, text):
+            detection_log.append("🔍 Found Hex-encoded strings")
+            
+            def hex_replace(match):
+                hex_str = match.group(0)
+                try:
+                    char = chr(int(hex_str[2:], 16))
+                    return char
+                except:
+                    return hex_str
+            
+            text = re.sub(hex_pattern, hex_replace, text)
+            detection_log.append("  ✅ Decoded Hex strings")
+        
+        # === STAGE 3: ASCII ARRAY DETECTION ===
+        # Паттерн: {72,101,108,108,111} или {0x48,0x65,0x6c,0x6c,0x6f}
+        ascii_pattern = r'\{(\s*\d{1,3}\s*,\s*){10,}\d{1,3}\s*\}'
+        ascii_matches = re.finditer(ascii_pattern, text)
+        
+        for match in ascii_matches:
+            try:
+                array_str = match.group(0)
+                # Извлекаем числа
+                numbers = re.findall(r'\d+', array_str)
+                # Конвертируем в строку
+                decoded_str = ''.join(chr(int(n)) for n in numbers if 0 <= int(n) <= 255)
+                
+                # Если получилась читаемая строка
+                if len(decoded_str) > 5 and all(32 <= ord(c) <= 126 or c in '\n\r\t' for c in decoded_str[:20]):
+                    text = text.replace(array_str, f'"{decoded_str}"')
+                    detection_log.append(f"  ✅ Decoded ASCII array: {decoded_str[:30]}...")
+            except:
+                pass
+        
+        # === STAGE 4: XOR PATTERN DETECTION ===
+        # Ищем типичные XOR паттерны
+        xor_patterns = [
+            r'bit\.bxor\s*\(',
+            r'bit32\.bxor\s*\(',
+            r'string\.char\s*\(\s*bit',
+        ]
+        
+        for pattern in xor_patterns:
+            if re.search(pattern, text):
+                detection_log.append("🔍 Detected XOR encryption (will be handled in Lua runtime)")
+                break
+        
+        # === STAGE 5: ROT13/CAESAR DETECTION ===
+        # Простая эвристика: если есть gsub с числовыми операциями на байтах
+        if re.search(r':gsub\s*\([^)]*function.*?:byte\(\)', text):
+            detection_log.append("🔍 Detected character substitution cipher")
+        
+        # === STAGE 6: ESCAPED UNICODE ===
+        # Паттерн: \u0048\u0065\u006c\u006c\u006f
+        unicode_pattern = r'\\u([0-9a-fA-F]{4})'
+        if re.search(unicode_pattern, text):
+            def unicode_replace(match):
+                try:
+                    return chr(int(match.group(1), 16))
+                except:
+                    return match.group(0)
+            
+            text = re.sub(unicode_pattern, unicode_replace, text)
+            detection_log.append("  ✅ Decoded Unicode escapes")
+        
+        # === STAGE 7: OBFUSCATED FUNCTION NAMES ===
+        # Ищем паттерны типа: _0x1a2b3c, __LLILIL__
+        obf_name_pattern = r'\b(_+[0-9a-fA-F]{6,}|_+[IL]{6,})\b'
+        obf_names = set(re.findall(obf_name_pattern, text))
+        if obf_names:
+            detection_log.append(f"🔍 Found {len(obf_names)} obfuscated identifiers")
+        
+        # Если текст изменился - это успех
+        if text != original_text:
+            detection_log.append(f"✨ Pre-processing: {len(original_text)} -> {len(text)} chars")
+            return text.encode('utf-8'), detection_log
+        
+        return content, detection_log
 
-        local function log_string(s)
-            if type(s) == "string" and #s > 3 then
-                -- Фильтруем совсем жесткий бинарный мусор для лога, но сохраняем всё
-                _G.DETECTED_STRINGS[s] = true
-            end
+    # ==========================================
+    # ENHANCED LUA ENVIRONMENT
+    # ==========================================
+    
+    def _create_lua_environment(self) -> str:
+        """Создает улучшенное Lua окружение с декодерами"""
+        
+        return """
+        -- ==========================================
+        -- AUTO-DECODERS (Встроенные в среду)
+        -- ==========================================
+        
+        -- Хранилище для найденных ключей
+        _G.DETECTED_KEYS = {}
+        _G.DECODED_PAYLOADS = {}
+        
+        -- === BASE64 DECODER ===
+        local b64chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+        function _G.base64_decode(data)
+            data = string.gsub(data, '[^'..b64chars..'=]', '')
+            return (data:gsub('.', function(x)
+                if (x == '=') then return '' end
+                local r,f='',(b64chars:find(x)-1)
+                for i=6,1,-1 do r=r..(f%2^i-f%2^(i-1)>0 and '1' or '0') end
+                return r;
+            end):gsub('%d%d%d?%d?%d?%d?%d?%d?', function(x)
+                if (#x ~= 8) then return '' end
+                local c=0
+                for i=1,8 do c=c+(x:sub(i,i)=='1' and 2^(8-i) or 0) end
+                return string.char(c)
+            end))
         end
-
-        -- :: BITWISE OPERATIONS (FULL COMPATIBILITY) ::
+        
+        -- === HEX DECODER ===
+        function _G.hex_decode(str)
+            return (str:gsub('..', function(cc)
+                return string.char(tonumber(cc, 16))
+            end))
+        end
+        
+        -- === XOR DECODER ===
+        function _G.xor_decrypt(data, key)
+            local result = {}
+            local key_len = #key
+            for i = 1, #data do
+                local data_byte = data:byte(i)
+                local key_byte = key:byte(((i - 1) % key_len) + 1)
+                table.insert(result, string.char(bit.bxor(data_byte, key_byte)))
+            end
+            return table.concat(result)
+        end
+        
+        -- === BITWISE OPERATIONS ===
         local bit = {}
         function bit.tobit(x) x = x % 4294967296; if x >= 2147483648 then x = x - 4294967296 end; return x end
         function bit.bnot(x) return 4294967295 - x % 4294967296 end
@@ -90,18 +204,42 @@ class DeobfuscatorEngine:
         function bit.bxor(a, b) return bit_oper(a, b, 3) end
         function bit.lshift(a, b) return (a * 2^b) % 4294967296 end
         function bit.rshift(a, b) return math.floor(a / 2^b) % 4294967296 end
-        function bit.arshift(x, n) local z = bit.rshift(x, n); if x >= 2147483648 then z = z + (4294967296 - 2^(32-n)) end; return z end
-        package.loaded.bit = bit; _G.bit = bit; _G.bit32 = bit
-
-        -- :: ROBLOX INSTANCE MOCK (FULL) ::
+        function bit.arshift(a, b) 
+            local z = math.floor(a / 2^b) % 4294967296
+            if a >= 2147483648 then z = z + 4294967296 - 2^(32-b) end
+            return z
+        end
+        package.loaded.bit = bit
+        _G.bit = bit
+        _G.bit32 = bit
+        
+        -- ==========================================
+        -- GLOBAL STORAGE & LOGGING
+        -- ==========================================
+        _G.CAPTURED_CHUNKS = {}
+        _G.DETECTED_STRINGS = {}
+        _G.ACTION_LOG = {}
+        _G.FINAL_GLOBALS = {}
+        _G.LOADSTRING_DEPTH = 0
+        _G.MAX_LOADSTRING_DEPTH = 10
+        
+        local function log_action(msg)
+            if #_G.ACTION_LOG < 2000 then 
+                table.insert(_G.ACTION_LOG, msg) 
+            end
+        end
+        
+        -- ==========================================
+        -- ROBLOX API EMULATION
+        -- ==========================================
         local function CreateSignal()
             return { 
-                Connect = function(self, f) return {Disconnect=function() end} end, 
+                Connect = function(f) return {Disconnect=function() end} end, 
                 Fire = function(...) end, 
                 Wait = function() return 0 end 
             }
         end
-
+        
         _G.Instance = {}
         function _G.Instance.new(className, parent)
             local obj = {}
@@ -109,261 +247,518 @@ class DeobfuscatorEngine:
             obj.Name = className or "Folder"
             obj.Parent = parent
             obj.Archivable = true
-            
-            -- Signals
             obj.Changed = CreateSignal()
             obj.ChildAdded = CreateSignal()
-            obj.DescendantAdded = CreateSignal()
             
-            -- Methods (With Logging)
             function obj:Destroy() end
             function obj:Clone() return self end
             function obj:ClearAllChildren() end
-            function obj:FindFirstChild(n) 
-                log_action("game."..self.Name..":FindFirstChild('"..tostring(n).."')")
-                return nil 
-            end
-            function obj:WaitForChild(n, t) 
-                log_action("game."..self.Name..":WaitForChild('"..tostring(n).."')")
-                return _G.Instance.new("Folder", obj) 
-            end
+            function obj:FindFirstChild(n) return nil end
+            function obj:WaitForChild(n, t) return _G.Instance.new("Folder", obj) end
             function obj:GetChildren() return {} end
             function obj:GetDescendants() return {} end
             function obj:GetService(name)
-                log_action("game:GetService('"..tostring(name).."')")
                 if _G.game[name] then return _G.game[name] end
-                local s = _G.Instance.new(name, _G.game)
-                s.Name = name
-                _G.game[name] = s
-                return s
+                return _G.Instance.new(name, _G.game)
             end
-            function obj:IsA(name) return name == obj.ClassName end
             
-            -- HTTP Logic
-            if className == "DataModel" or className == "HttpService" then
-                function obj:HttpGet(url)
-                    log_action("game:HttpGet('"..tostring(url).."')")
-                    log_string(url)
-                    return PYTHON_HTTP_GET(url)
-                end
-                function obj:HttpGetAsync(url) return self:HttpGet(url) end
-                function obj:PostAsync(url, data)
-                    log_action("game:PostAsync('"..tostring(url).."')")
-                    log_string(url)
-                    log_string(data)
-                    return "{}"
-                end
-                obj.JSONDecode = function(s, t) return {} end
-                obj.JSONEncode = function(s, t) return "{}" end
-            end
-
-            -- Metatable for properties
             local mt = {
                 __index = function(t, k)
+                    if k == "Value" then return "MockValue" end
                     return rawget(t, k)
                 end,
-                __newindex = function(t, k, v)
-                    -- Log sensitive property changes
-                    if k == "Text" or k == "Source" or k == "Value" then
-                        log_action(t.Name.."."..k.." = [DATA]")
-                        if type(v) == "string" then log_string(v) end
-                    end
-                    rawset(t, k, v)
-                end,
+                __newindex = rawset,
                 __tostring = function(t) return t.Name end
             }
             return setmetatable(obj, mt)
         end
-
-        -- :: DATA TYPES ::
+        
+        -- Data types
         _G.Vector3 = { new = function(x,y,z) return {X=x or 0, Y=y or 0, Z=z or 0} end, zero={X=0,Y=0,Z=0} }
-        _G.CFrame = { new = function(...) return {p=_G.Vector3.new(), lookVector=_G.Vector3.new()} end, Angles=function(...) return {} end }
+        _G.CFrame = { new = function(...) return {p=_G.Vector3.new()} end, Angles=function(...) return {} end }
         _G.UDim2 = { new = function(...) return {} end, fromScale=function(...) return {} end }
-        _G.Color3 = { new = function(...) return {} end, fromRGB=function(...) return {} end, fromHSV=function(...) return {} end }
+        _G.Color3 = { new = function(...) return {} end, fromRGB=function(...) return {} end }
         _G.Enum = setmetatable({}, { __index = function() return setmetatable({}, {__index=function() return 1 end}) end })
         
-        -- :: TASK & TIME ::
-        _G.task = { wait = function(t) return t or 0 end, spawn = function(f) pcall(f) end, delay = function(t,f) pcall(f) end, defer = function(f) pcall(f) end }
-        _G.wait = _G.task.wait; _G.spawn = _G.task.spawn
-        _G.os.clock = function() return 0.0 end
-        _G.tick = function() return 0.0 end
+        -- Task library
+        _G.task = { 
+            wait = function(t) return t or 0 end, 
+            spawn = function(f) pcall(f) end, 
+            delay = function(t,f) pcall(f) end, 
+            defer = function(f) pcall(f) end 
+        }
+        _G.wait = _G.task.wait
+        _G.spawn = _G.task.spawn
         
-        -- :: GAME HIERARCHY ::
+        -- Game hierarchy
         _G.game = _G.Instance.new("DataModel")
-        _G.game.Name = "game"
         _G.game.Players = _G.Instance.new("Players", _G.game)
         _G.game.Players.LocalPlayer = _G.Instance.new("Player", _G.game.Players)
-        _G.game.Players.LocalPlayer.Name = "LocalPlayer"
-        _G.game.Players.LocalPlayer.UserId = 12345678
+        _G.game.Players.LocalPlayer.Name = "DeobfuscatorUser"
+        _G.game.Players.LocalPlayer.UserId = 2652366
         _G.workspace = _G.Instance.new("Workspace", _G.game)
         _G.game.HttpService = _G.Instance.new("HttpService", _G.game)
-
-        -- :: EXPLOIT COMPATIBILITY (SYN/KRNL) ::
-        local function emu_request(opt)
-            local url = opt.Url or opt.url
-            log_action("request({Url='"..tostring(url).."'})")
-            log_string(url)
-            return { Body = PYTHON_HTTP_GET(url), StatusCode = 200, Success = true }
+        _G.game.HttpService.JSONDecode = function(s, t) return {} end
+        _G.game.HttpService.JSONEncode = function(s, t) return "{}" end
+        _G.script = _G.Instance.new("Script", _G.game.workspace)
+        
+        -- ==========================================
+        -- NETWORK EMULATION
+        -- ==========================================
+        local function handle_network_response(url, content)
+            if content and #content > 0 then
+                log_action("   ✅ HTTP 200: " .. #content .. " bytes")
+                
+                if #content > 50 then
+                    table.insert(_G.CAPTURED_CHUNKS, {
+                        data = content, 
+                        size = #content, 
+                        type = "http_response",
+                        url = url
+                    })
+                    table.insert(_G.DETECTED_STRINGS, "HTTP_URL: " .. url)
+                    
+                    -- Пробуем автодекодинг
+                    local decoded = nil
+                    
+                    -- Проба Base64
+                    pcall(function()
+                        decoded = base64_decode(content)
+                        if decoded and #decoded > 10 then
+                            log_action("   🔓 Auto-decoded Base64 from HTTP response")
+                            table.insert(_G.DECODED_PAYLOADS, {source="http_base64", data=decoded})
+                        end
+                    end)
+                end
+                return content
+            else
+                log_action("   ❌ HTTP Error/Empty")
+                return ""
+            end
         end
-        _G.request = emu_request
-        _G.http_request = emu_request
-        _G.syn = { request = emu_request, queue_on_teleport = function() end }
+        
+        _G.game.HttpGet = function(self, url) 
+            log_action("🌍 HTTP GET: " .. tostring(url)) 
+            local success, res = pcall(PYTHON_HTTP_GET, url)
+            if success then 
+                return handle_network_response(url, res)
+            end
+            return "" 
+        end
+        _G.game.HttpGetAsync = _G.game.HttpGet
+        
+        local function emulation_request(options)
+            local url = options.Url or options.url
+            if not url then return {Success=false} end
+            
+            log_action("🌍 SYN.REQUEST: " .. tostring(url))
+            local body = _G.game:HttpGet(url)
+            
+            return {
+                Body = body,
+                StatusCode = (body ~= "") and 200 or 404,
+                Success = (body ~= ""),
+                StatusMessage = "OK"
+            }
+        end
+        
+        -- ==========================================
+        -- EXPLOIT ENVIRONMENT
+        -- ==========================================
+        _G.request = emulation_request
+        _G.http_request = emulation_request
+        _G.syn = { 
+            request = emulation_request,
+            protect_gui = function() end,
+            queue_on_teleport = function() end
+        }
+        
+        _G.identifyexecutor = function() return "Synapse X", "2.0.0" end
+        _G.getexecutorname = function() return "Synapse X" end
         _G.getgenv = function() return _G end
-        _G.identifyexecutor = function() return "Synapse X" end
-
-        -- :: DEBUG LIBRARY (ANTI-ANTI-TAMPER) ::
-        _G.debug = {}
-        _G.debug.getinfo = function() return {source="=[C]", what="C", name="debug"} end
-        _G.debug.traceback = function() return "" end
-
-        -- :: SPYWARE HOOKS ::
+        _G.getrenv = function() return _G end
+        _G.getreg = function() return {} end
+        _G.getgc = function() return {} end
+        _G.checkcaller = function() return true end
+        _G.islclosure = function() return true end
+        _G.newcclosure = function(f) return f end
+        _G.hookfunction = function(old, new) return old end
+        
+        -- Filesystem stubs
+        _G.writefile = function(path, data) log_action("💾 writefile: "..tostring(path)) end
+        _G.readfile = function(path) return "" end
+        _G.isfile = function(path) return false end
+        _G.delfile = function(path) end
+        _G.makefolder = function(path) end
+        
+        -- ==========================================
+        -- ENHANCED SPYWARE HOOKS
+        -- ==========================================
+        local function capture_str(s) 
+            if type(s) == "string" and #s > 4 then 
+                if not s:find("stack begin") and not s:find("upvalue") and not s:find("^%s*$") then
+                    _G.DETECTED_STRINGS[s] = true 
+                end
+            end 
+            return s
+        end
+        
+        -- Hook string.char (с детекцией массовой дешифровки)
         local real_char = string.char
         string.char = function(...)
             local args = {...}
-            if #args > 10 then -- Если создают длинную строку из байтов
+            if #args > 10 then
                 local res = real_char(...)
-                log_string(res)
+                capture_str(res)
+                
+                -- Логируем потенциальные XOR ключи
+                if #args < 50 then
+                    table.insert(_G.DETECTED_KEYS, table.concat(args, ","))
+                end
                 return res
             end
             return real_char(...)
         end
-
-        local real_load = load
-        _G.load = function(chunk, name)
-            if type(chunk) == "string" and #chunk > 50 then
-                log_action("⚠️ load() called with " .. #chunk .. " bytes")
-                table.insert(_G.CAPTURED_CHUNKS, {data = chunk})
-            end
-            return real_load(chunk, name)
+        
+        -- Hook table.concat
+        local real_concat = table.concat
+        table.concat = function(t, sep, i, j)
+            local res = real_concat(t, sep, i, j)
+            capture_str(res)
+            return res
         end
-        _G.loadstring = _G.load
+        
+        -- Hook string.byte (для отслеживания XOR операций)
+        local real_byte = string.byte
+        string.byte = function(s, i, j)
+            if type(s) == "string" and #s > 20 and not i and not j then
+                log_action("🔑 Potential XOR key scan: " .. s:sub(1, 20))
+            end
+            return real_byte(s, i, j)
+        end
+        
+        -- RECURSIVE LOADSTRING HOOK (Критически важно!)
+        local real_load = load
+        local function hooked_load(chunk, name, mode, env)
+            _G.LOADSTRING_DEPTH = _G.LOADSTRING_DEPTH + 1
+            
+            if _G.LOADSTRING_DEPTH > _G.MAX_LOADSTRING_DEPTH then
+                log_action("⚠️ Max loadstring depth reached - preventing infinite recursion")
+                _G.LOADSTRING_DEPTH = _G.LOADSTRING_DEPTH - 1
+                return function() end
+            end
+            
+            if type(chunk) == "string" and #chunk > 50 then
+                table.insert(_G.CAPTURED_CHUNKS, {
+                    data = chunk, 
+                    size = #chunk, 
+                    type = "load_string",
+                    depth = _G.LOADSTRING_DEPTH
+                })
+                log_action("🔥 Captured Chunk [Depth " .. _G.LOADSTRING_DEPTH .. "] Size: " .. #chunk)
+                
+                -- Пробуем рекурсивно выполнить, чтобы распаковать вложенные loadstring
+                local func = real_load(chunk, name, mode, env or _G)
+                if func then
+                    pcall(func)  -- Выполняем, чтобы триггернуть следующий уровень
+                end
+            end
+            
+            _G.LOADSTRING_DEPTH = _G.LOADSTRING_DEPTH - 1
+            return real_load(chunk, name, mode, env)
+        end
+        
+        _G.load = hooked_load
+        _G.loadstring = hooked_load
+        
+        -- Функция финального дампа
+        function _G.dump_globals()
+            local ignore = {
+                string=1, math=1, table=1, bit=1, bit32=1, pairs=1, ipairs=1, next=1, _G=1, 
+                package=1, os=1, io=1, Instance=1, Vector3=1, CFrame=1, UDim2=1, Color3=1,
+                Enum=1, task=1, wait=1, spawn=1, delay=1, defer=1, game=1, workspace=1,
+                script=1, getgenv=1, getrenv=1, getreg=1, getgc=1, checkcaller=1,
+                islclosure=1, newcclosure=1, load=1, loadstring=1, print=1, warn=1, error=1,
+                tostring=1, tonumber=1, type=1, pcall=1, xpcall=1, select=1, unpack=1,
+                setmetatable=1, getmetatable=1, require=1, syn=1, request=1, http_request=1,
+                identifyexecutor=1, getexecutorname=1, hookfunction=1, writefile=1, readfile=1,
+                isfile=1, delfile=1, makefolder=1, PYTHON_HTTP_GET=1,
+                DETECTED_STRINGS=1, CAPTURED_CHUNKS=1, ACTION_LOG=1, FINAL_GLOBALS=1,
+                LOADSTRING_DEPTH=1, MAX_LOADSTRING_DEPTH=1, DETECTED_KEYS=1, DECODED_PAYLOADS=1,
+                base64_decode=1, hex_decode=1, xor_decrypt=1
+            }
+            for k, v in pairs(getfenv()) do
+                if not ignore[k] then
+                    if type(v) == "string" or type(v) == "number" or type(v) == "boolean" then
+                        table.insert(_G.FINAL_GLOBALS, tostring(k) .. " = " .. tostring(v))
+                    end
+                end
+            end
+        end
         """
 
+    def process(self, content, status_callback=None):
+        def update_status(msg):
+            if status_callback: status_callback(msg)
+            logger.info(f"[STATUS] {msg}")
+
+        if not self._check_java():
+            return b"-- [FATAL] Java is missing. Install Java to use unluac."
+
+        # === STAGE 1: PRE-PROCESSING ===
+        update_status("🔬 Анализ и декодирование...")
+        decoded_content, detection_log = self._detect_and_decode(content)
+        
+        for log_entry in detection_log:
+            update_status(log_entry)
+
+        update_status("🧠 Инициализация среды Roblox (V3 Enhanced)...")
+
+        # === STAGE 2: LUA VM SETUP ===
         try:
-            update_status("🌪️ Запуск скрипта (Tracing Active)...")
+            lua = LuaRuntime(unpack_returned_tuples=True, encoding=None)
+        except Exception as e:
+            return f"-- [FATAL] Lua start error: {e}".encode('utf-8')
+
+        # HTTP Bridge
+        def py_http_get(url):
+            try:
+                url = str(url).strip()
+                
+                # Whitelist check
+                allowed_domains = ['pastebin.com', 'raw.githubusercontent.com', 'rentry.co', 'hastebin.com']
+                if not any(domain in url for domain in allowed_domains):
+                    logger.warning(f"Blocked URL (not in whitelist): {url}")
+                    return ""
+                
+                # Cache check
+                url_hash = hashlib.md5(url.encode()).hexdigest()
+                if url_hash in self.http_cache:
+                    update_status(f"💾 Cache hit: {url[:40]}...")
+                    return self.http_cache[url_hash]
+                
+                headers = {
+                    "User-Agent": "Roblox/WinInet",
+                    "Accept": "text/plain"
+                }
+                update_status(f"🌐 GET: {url[:50]}...")
+                response = requests.get(url, headers=headers, timeout=10, allow_redirects=True)
+                
+                if response.status_code == 200:
+                    # Ограничение размера (защита от DoS)
+                    content = response.text[:500000]  # Max 500KB
+                    self.http_cache[url_hash] = content
+                    return content
+                return ""
+            except Exception as e:
+                logger.error(f"HTTP Error: {e}")
+                return ""
+
+        lua.globals().PYTHON_HTTP_GET = py_http_get
+
+        # === STAGE 3: EXECUTION ===
+        try:
+            update_status("🌪️ Запуск с трассировкой...")
             
-            lua.execute(lua_env_setup)
+            lua_env = self._create_lua_environment()
+            lua.execute(lua_env)
             
-            # Раннер
             runner = lua.eval("""
                 function(code)
                     local status, err = pcall(function()
-                        local f, lerr = load(code, "script", "t", _G)
-                        if not f then error(lerr) end
+                        local f, load_err = load(code, "script", "t", _G)
+                        if not f then error(load_err) end
                         f()
                     end)
                     
                     if not status then
                         table.insert(_G.ACTION_LOG, "❌ Script Error: " .. tostring(err))
                     end
+                    
+                    pcall(_G.dump_globals)
                     return true
                 end
             """)
             
-            runner(content)
+            runner(decoded_content)
 
-            # --- СБОР РЕЗУЛЬТАТОВ ---
-            detected_strings = []
+            # === STAGE 4: RESULTS COLLECTION ===
             strings_tbl = lua.globals().DETECTED_STRINGS
+            detected_strings = []
             if strings_tbl:
-                for k in strings_tbl: detected_strings.append(str(k))
+                for k in strings_tbl:
+                    detected_strings.append(str(k))
             
+            global_dump = list(lua.globals().FINAL_GLOBALS)
             action_log = list(lua.globals().ACTION_LOG)
-            
-            # Чанки (если скрипт распаковал сам себя)
             chunks = lua.globals().CAPTURED_CHUNKS
+            detected_keys = list(lua.globals().DETECTED_KEYS)
+            decoded_payloads = lua.globals().DECODED_PAYLOADS
+            
+            # Поиск лучшего чанка (приоритет: глубина loadstring > http_response > размер)
             best_chunk = None
+            max_score = 0
+            
             if len(chunks) > 0:
-                 # Берем последний распакованный чанк, обычно это и есть payload
-                 best_chunk = chunks[len(chunks)].data
-                 update_status(f"🎉 Перехвачен распакованный скрипт!")
+                for i in range(1, len(chunks) + 1):
+                    c = chunks[i]
+                    score = c.size
+                    
+                    # Приоритезация
+                    if c.type == "load_string":
+                        score *= (1.5 + c.depth * 0.2)  # Глубже = лучше
+                    elif c.type == "http_response":
+                        score *= 1.3
+                    
+                    if score > max_score:
+                        max_score = score
+                        best_chunk = c.data
+            
+            # Дополнительно проверяем decoded_payloads
+            if decoded_payloads and len(decoded_payloads) > 0:
+                for i in range(1, len(decoded_payloads) + 1):
+                    payload = decoded_payloads[i]
+                    if len(payload.data) > max_score:
+                        best_chunk = payload.data
+                        update_status(f"✨ Использован автодекодированный payload!")
+            
+            target_code = best_chunk if best_chunk else decoded_content
+            
+            if best_chunk:
+                update_status(f"🎉 Найден скрытый код ({len(str(best_chunk))} bytes)!")
 
-            target_code = best_chunk if best_chunk else content
-
-            return self._finalize_output(target_code, detected_strings, action_log, update_status)
+            return self._finalize_output(
+                target_code, 
+                detected_strings, 
+                global_dump, 
+                action_log, 
+                detected_keys,
+                detection_log,
+                update_status
+            )
 
         except Exception as e:
-            logger.error(f"Engine Crash: {e}")
+            logger.error(f"Engine Crash: {e}", exc_info=True)
             return f"-- [CRASH ERROR]: {str(e)}".encode('utf-8')
 
     def _check_java(self):
         try:
             subprocess.run(["java", "-version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             return True
-        except: return False
+        except: 
+            return False
 
-    def _clean_string(self, text):
-        if isinstance(text, bytes):
-            try: text = text.decode('utf-8', 'ignore')
-            except: return str(text)
-        return str(text).replace('\r', '').replace('\n', ' ')
+    def _clean_string(self, s):
+        if isinstance(s, bytes):
+            try: return s.decode('utf-8')
+            except: return str(s)
+        return str(s)
 
-    def _finalize_output(self, code_bytes, strings, logs, callback):
-        if callback: callback("🧬 Сборка финального отчета...")
+    def _finalize_output(self, code_bytes, strings, globals_dump, logs, keys, pre_log, callback):
+        if callback: callback("🧬 Финализация...")
         
-        final_text = "-- [[ DEOBFUSCATOR V4 (HYBRID) ]] --\n\n"
-        
-        # 1. Логи действий
-        final_text += "-- [[ 🕹 ACTION LOG ]] --\n"
-        if logs:
-            for l in logs: final_text += f"-- {self._clean_string(l)}\n"
-        else:
-            final_text += "-- (No actions recorded - script might be pure math or failed silently)\n"
-            
-        # 2. Строки (Мягкий фильтр)
-        final_text += "\n-- [[ 🔎 DETECTED STRINGS ]] --\n"
-        seen = set()
-        # Добавляем строки, найденные регуляркой в самом коде (на случай если Lua не отработал)
-        try:
-            raw_str = code_bytes.decode('utf-8', 'ignore')
-            regex_urls = re.findall(r'(https?://[^\s"]+)', raw_str)
-            for u in regex_urls: strings.append(u)
-        except: pass
+        if isinstance(code_bytes, str):
+            code_bytes = code_bytes.encode('utf-8', 'ignore')
 
-        for s in strings:
-            clean = self._clean_string(s)
-            # Фильтр: показываем, если длина > 4 И (есть буквы или это URL)
-            if len(clean) > 4 and clean not in seen:
-                # Если слишком много непечатных символов, скипаем (но не жестко)
-                if clean.count('\\') < len(clean) * 0.4: 
-                    final_text += f'-- "{clean}"\n'
-                    seen.add(clean)
-
-        final_text += "\n" + "="*50 + "\n\n"
-        
-        # 3. Декомпиляция
         decompiled = self._try_decompile(code_bytes)
+        
+        final_text = "-- " + "="*70 + "\n"
+        final_text += "-- ROBLOX DEOBFUSCATOR V3 - ENHANCED EDITION\n"
+        final_text += "-- " + "="*70 + "\n\n"
+        
+        # Pre-processing log
+        if pre_log:
+            final_text += "-- [[ PRE-PROCESSING ANALYSIS ]] --\n"
+            for entry in pre_log:
+                final_text += f"-- {entry}\n"
+            final_text += "\n"
+        
+        # Detected keys (XOR, etc.)
+        if keys:
+            final_text += "-- [[ DETECTED ENCRYPTION KEYS ]] --\n"
+            for key in keys[:10]:  # Лимит 10
+                final_text += f"-- {self._clean_string(key)}\n"
+            final_text += "\n"
+        
+        # Strings
+        final_text += "-- [[ DUMPED STRINGS ]] --\n"
+        sorted_strings = sorted(strings, key=lambda x: len(str(x)), reverse=True)
+        seen = set()
+        for s in sorted_strings[:100]:  # Лимит 100
+            clean = self._clean_string(s).replace('\n', ' ').replace('\r', '')
+            if clean not in seen and len(clean) > 3:
+                final_text += f'-- "{clean}"\n'
+                seen.add(clean)
+        
+        # Globals
+        if globals_dump:
+            final_text += "\n-- [[ GLOBALS ]] --\n"
+            for g in globals_dump:
+                final_text += f"-- {self._clean_string(g)}\n"
+        
+        # Execution log
+        if logs:
+            final_text += "\n-- [[ EXECUTION LOG ]] --\n"
+            for l in logs[-50:]:  # Последние 50
+                final_text += f"-- {self._clean_string(l)}\n"
+        
+        final_text += "\n" + "-- " + "="*70 + "\n"
+        final_text += "-- DECOMPILED SOURCE CODE\n"
+        final_text += "-- " + "="*70 + "\n\n"
+        
         if decompiled:
-            try: src = decompiled.decode('utf-8', 'ignore')
-            except: src = decompiled.decode('latin-1', 'ignore')
+            try: 
+                src = decompiled.decode('utf-8', 'ignore')
+            except: 
+                src = decompiled.decode('latin-1', 'ignore')
             final_text += self._beautify_lua(src)
         else:
-            final_text += "-- [WARNING] Unluac failed. Dumping raw bytes/text:\n"
-            try: final_text += code_bytes.decode('utf-8', 'ignore')
-            except: final_text += str(code_bytes[:1000])
+            final_text += "-- [INFO] Decompilation skipped (source is already readable)\n\n"
+            try: 
+                final_text += code_bytes.decode('utf-8')
+            except: 
+                final_text += "-- [Binary Data]\n"
+                final_text += str(binascii.hexlify(code_bytes[:500])) + "...\n"
 
         return final_text.encode('utf-8')
 
     def _try_decompile(self, bytecode):
-        # Если это текст, не мучаем Java
-        if bytecode.strip().startswith(b"--") or b"local " in bytecode:
-            return bytecode
+        # Если это текст, не декомпилируем
+        if bytecode.startswith(b"--") or b"local " in bytecode or b"function" in bytecode:
+            return None
 
-        if not os.path.exists(self.unluac_path): return None
+        if not os.path.exists(self.unluac_path): 
+            return None
+        
         try:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".lua", mode='wb') as tmp:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".luac", mode='wb') as tmp:
                 tmp.write(bytecode)
                 path = tmp.name
             
             res = subprocess.run(
                 ["java", "-Xmx1G", "-jar", self.unluac_path, path], 
-                capture_output=True, timeout=15
+                capture_output=True, 
+                timeout=15
             )
             os.remove(path)
-            if res.returncode == 0 and len(res.stdout) > 0: return res.stdout
+            
+            if res.returncode == 0 and len(res.stdout) > 0: 
+                return res.stdout
             return None
-        except: return None
+        except: 
+            return None
 
     def _beautify_lua(self, source_code):
+        # Простое форматирование
         source_code = re.sub(r'(\s)(local|return|if|for|while|repeat|function)(\s)', r'\n\2 ', source_code)
+        replacements = {
+            " then ": " then\n    ",
+            " do ": " do\n    ",
+            " end": "\nend",
+            " repeat ": "\nrepeat\n    ",
+            " until ": "\nuntil ",
+            ";": ";\n"
+        }
+        for k, v in replacements.items():
+            source_code = source_code.replace(k, v)
         return source_code
