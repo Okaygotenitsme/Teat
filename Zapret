@@ -1,25 +1,55 @@
-local JunkCode = {}
+-- =============================================
+-- Meloten Obfuscator Wrapper
+-- Главный файл для обфускации с нашими улучшениями
+-- =============================================
 
-local junk = {
-    "local _ = math.random(1, 999);",
-    "if false then local __meloten = 'protected' end",
-    "pcall(function() end)",
-    "local function _() return _G end _()",
-    "for _=1,math.random(1,3) do end",
-    "_G.__m = _G.__m or {}; __m[1] = 1;",
-}
+local Prometheus = require("src.prometheus.prometheus")
 
-function JunkCode:Apply(code)
-    local lines = {}
-    for line in code:gmatch("[^\r\n]+") do
-        table.insert(lines, line)
-        
-        -- Вставляем junk с вероятностью ~30%
-        if math.random() < 0.30 then
-            table.insert(lines, junk[math.random(#junk)])
-        end
+-- Подключаем наши шаги
+local ControlFlowFlatten = require("src.prometheus.steps.ControlFlowFlatten")
+local JunkCode           = require("src.prometheus.steps.JunkCode")
+local MelotenHeader      = require("src.prometheus.steps.MelotenHeader")
+
+-- Выбираем базовый пресет Prometheus (можно поменять на Medium или свой)
+local preset = Prometheus.Presets.Strong
+
+-- Основная функция обфускации
+local function MelotenObfuscate(inputPath, outputPath)
+    -- Читаем исходный код
+    local file = io.open(inputPath, "r")
+    if not file then
+        error("Не удалось открыть входной файл: " .. inputPath)
     end
-    return table.concat(lines, "\n")
+    local code = file:read("*all")
+    file:close()
+
+    print("[Meloten] Запуск обфускации...")
+
+    -- 1. Основная обфускация Prometheus
+    local pipeline = Prometheus.Pipeline:fromConfig(preset)
+    local obfuscated = pipeline:apply(code)
+
+    -- 2. Control Flow Flattening (самый мощный шаг)
+    obfuscated = ControlFlowFlatten:Apply(obfuscated)
+
+    -- 3. Junk Code Insertion
+    obfuscated = JunkCode:Apply(obfuscated)
+
+    -- 4. Meloten Header + Anti-Debug
+    obfuscated = MelotenHeader:Apply(obfuscated)
+
+    -- Сохраняем результат
+    local outFile = io.open(outputPath, "w")
+    outFile:write(obfuscated)
+    outFile:close()
+
+    print("[Meloten] Обфускация завершена! Файл сохранён: " .. outputPath)
 end
 
-return JunkCode
+-- Если запускаем через командную строку: lua meloten_obfuscate.lua input.lua output.lua
+if #arg >= 2 then
+    MelotenObfuscate(arg[1], arg[2])
+end
+
+-- Возвращаем функцию, чтобы можно было использовать как библиотеку
+return MelotenObfuscate
