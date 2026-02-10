@@ -1,55 +1,29 @@
 -- =============================================
--- Meloten Obfuscator Wrapper
--- Главный файл для обфускации с нашими улучшениями
+-- Control Flow Flattening для Meloten Obfuscator
 -- =============================================
 
-local Prometheus = require("src.prometheus.prometheus")
+local ControlFlowFlatten = {}
 
--- Подключаем наши шаги
-local ControlFlowFlatten = require("src.prometheus.steps.ControlFlowFlatten")
-local JunkCode           = require("src.prometheus.steps.JunkCode")
-local MelotenHeader      = require("src.prometheus.steps.MelotenHeader")
+function ControlFlowFlatten:Apply(code)
+    -- Генерируем случайный префикс, чтобы было сложнее деобфусцировать
+    local prefix = "__meloten_state_" .. math.random(10000, 99999)
 
--- Выбираем базовый пресет Prometheus (можно поменять на Medium или свой)
-local preset = Prometheus.Presets.Strong
+    local flattened = [[
+-- [Meloten Control Flow Flattening]
+local ]] .. prefix .. [[ = 0
 
--- Основная функция обфускации
-local function MelotenObfuscate(inputPath, outputPath)
-    -- Читаем исходный код
-    local file = io.open(inputPath, "r")
-    if not file then
-        error("Не удалось открыть входной файл: " .. inputPath)
+while true do
+    if ]] .. prefix .. [[ == 0 then
+]] .. code .. [[
+        ]] .. prefix .. [[ = 1
+    elseif ]] .. prefix .. [[ == 1 then
+        break
     end
-    local code = file:read("*all")
-    file:close()
+end
+]]
 
-    print("[Meloten] Запуск обфускации...")
-
-    -- 1. Основная обфускация Prometheus
-    local pipeline = Prometheus.Pipeline:fromConfig(preset)
-    local obfuscated = pipeline:apply(code)
-
-    -- 2. Control Flow Flattening (самый мощный шаг)
-    obfuscated = ControlFlowFlatten:Apply(obfuscated)
-
-    -- 3. Junk Code Insertion
-    obfuscated = JunkCode:Apply(obfuscated)
-
-    -- 4. Meloten Header + Anti-Debug
-    obfuscated = MelotenHeader:Apply(obfuscated)
-
-    -- Сохраняем результат
-    local outFile = io.open(outputPath, "w")
-    outFile:write(obfuscated)
-    outFile:close()
-
-    print("[Meloten] Обфускация завершена! Файл сохранён: " .. outputPath)
+    print("[Meloten] Control Flow Flattening применён")
+    return flattened
 end
 
--- Если запускаем через командную строку: lua meloten_obfuscate.lua input.lua output.lua
-if #arg >= 2 then
-    MelotenObfuscate(arg[1], arg[2])
-end
-
--- Возвращаем функцию, чтобы можно было использовать как библиотеку
-return MelotenObfuscate
+return ControlFlowFlatten
