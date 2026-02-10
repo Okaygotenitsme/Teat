@@ -1,29 +1,49 @@
 -- =============================================
--- Control Flow Flattening для Meloten Obfuscator
+-- Meloten Obfuscator — ИСПРАВЛЕННАЯ ВЕРСИЯ
 -- =============================================
 
-local ControlFlowFlatten = {}
+-- === ИСПРАВЛЕНИЕ ПУТЕЙ (самое важное) ===
+package.path = "./src/?.lua;" ..
+               "./src/?/init.lua;" ..
+               "./src/prometheus/?.lua;" ..
+               "./src/prometheus/?/?.lua;" ..
+               package.path
 
-function ControlFlowFlatten:Apply(code)
-    -- Генерируем случайный префикс, чтобы было сложнее деобфусцировать
-    local prefix = "__meloten_state_" .. math.random(10000, 99999)
+-- === ПОДКЛЮЧЕНИЕ МОДУЛЕЙ ===
+local Prometheus = require("prometheus.prometheus")
 
-    local flattened = [[
--- [Meloten Control Flow Flattening]
-local ]] .. prefix .. [[ = 0
+local ControlFlowFlatten = require("prometheus.steps.ControlFlowFlatten")
+local JunkCode           = require("prometheus.steps.JunkCode")
+local MelotenHeader      = require("prometheus.steps.MelotenHeader")
 
-while true do
-    if ]] .. prefix .. [[ == 0 then
-]] .. code .. [[
-        ]] .. prefix .. [[ = 1
-    elseif ]] .. prefix .. [[ == 1 then
-        break
-    end
+-- === НАСТРОЙКИ ===
+local preset = Prometheus.Presets.Strong   -- можно поменять на Medium
+
+-- === ГЛАВНАЯ ФУНКЦИЯ ===
+local function MelotenObfuscate(inputPath, outputPath)
+    local f = assert(io.open(inputPath, "r"))
+    local code = f:read("*all")
+    f:close()
+
+    print("[Meloten] Запуск обфускации...")
+
+    local pipeline = Prometheus.Pipeline:fromConfig(preset)
+    local obfuscated = pipeline:apply(code)
+
+    obfuscated = ControlFlowFlatten:Apply(obfuscated)
+    obfuscated = JunkCode:Apply(obfuscated)
+    obfuscated = MelotenHeader:Apply(obfuscated)
+
+    local out = assert(io.open(outputPath, "w"))
+    out:write(obfuscated)
+    out:close()
+
+    print("[Meloten] Готово! Файл сохранён → " .. outputPath)
 end
-]]
 
-    print("[Meloten] Control Flow Flattening применён")
-    return flattened
+-- Запуск через командную строку
+if #arg >= 2 then
+    MelotenObfuscate(arg[1], arg[2])
 end
 
-return ControlFlowFlatten
+return MelotenObfuscate
