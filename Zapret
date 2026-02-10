@@ -100,7 +100,6 @@ function Obfuscator:generateAntiTamper()
     }
     
     local antiTamper = string.format([[
--- Anti-Tamper Protection
 local %s = %d
 local %s = 0
 
@@ -168,15 +167,11 @@ end
 -- Генерация VM декодера
 function Obfuscator:generateVMDecoder()
     local vmVars = {
-        stack = randomString(),
-        pc = randomString(),
         key1 = randomString(),
-        key2 = randomString(),
         decoder = randomString(),
     }
     
     local vmCode = string.format([[
-local %s = "%s"
 local %s = "%s"
 
 local function %s(data)
@@ -219,7 +214,6 @@ end
 return %s
 ]], 
         vmVars.key1, self.primaryKey,
-        vmVars.key2, self.secondaryKey,
         vmVars.decoder,
         vmVars.key1, vmVars.key1,
         vmVars.decoder
@@ -327,8 +321,6 @@ end
     )
 end
 
-return Obfuscator
-
 -- CLI
 if arg and arg[1] then
     local inputFile = arg[1]
@@ -360,4 +352,6 @@ if arg and arg[1] then
     print(string.format("  Obfuscated size: %d bytes", #obfuscated))
     print(string.format("  Protection level: MAXIMUM"))
     print(string.format("  Anti-Tamper: ENABLED"))
+else
+    return Obfuscator
 end
