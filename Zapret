@@ -8,7 +8,7 @@ Obfuscator.__index = Obfuscator
 
 -- Утилиты для генерации случайных данных
 local function randomString(length)
-    local chars = "абвгдежзийклмнопрстуфхцчшщъыьэюяАБВГДЕЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ_"
+    local chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_"
     local result = ""
     for i = 1, length or math.random(10, 20) do
         local idx = math.random(1, #chars)
@@ -34,20 +34,18 @@ local function advancedXOR(data, key)
     return result
 end
 
--- Base93 кодирование (расширенный набор символов)
+-- Base93 кодирование
 local function toBase93(bytes)
-    local chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()*+,-./:;<=>?@[]^_`{|}~АБВГДЕЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯабвгдежзийклмнопрстуфхцчшщъыьэюя"
+    local chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()*+,-./:;<=>?@[]^_`{|}~"
     local result = ""
     
     local i = 1
     while i <= #bytes do
         local value = 0
-        local count = 0
         
         for j = 0, 3 do
             if bytes[i + j] then
                 value = value * 256 + bytes[i + j]
-                count = count + 1
             end
         end
         
@@ -81,21 +79,10 @@ function Obfuscator.new()
     -- Таблица инструкций VM
     self.instructions = {
         LOAD_CONST = 1,
-        LOAD_VAR = 2,
-        STORE_VAR = 3,
+        GET_GLOBAL = 2,
+        SET_GLOBAL = 3,
         CALL = 4,
-        ADD = 5,
-        SUB = 6,
-        MUL = 7,
-        DIV = 8,
-        CONCAT = 9,
-        RETURN = 10,
-        JUMP = 11,
-        JUMP_IF = 12,
-        GET_GLOBAL = 13,
-        SET_GLOBAL = 14,
-        GET_TABLE = 15,
-        SET_TABLE = 16,
+        RETURN = 5,
     }
     
     return self
@@ -131,50 +118,30 @@ if %s then
     if info and info.source then
         %s = %s(info.source)
         if %s ~= %s then
-            error("\\n\\n[ANTI-TAMPER] Code integrity check failed!\\nFile has been modified!\\n", 0)
+            error("Code integrity check failed!", 0)
         end
     end
 end
 
--- Runtime integrity check
 local function %s()
     if %s then
         local info = %s(1, "S")
         if info and info.source then
             local %s = %s(info.source)
             if %s ~= %s then
-                error("\\n\\n[ANTI-TAMPER] Runtime tampering detected!\\n", 0)
+                error("Runtime tampering detected!", 0)
             end
         end
     end
 end
 
--- Anti-debug checks
 local function antiDebug()
-    -- Check for debug library
     if debug and (debug.getinfo or debug.getlocal or debug.getupvalue) then
         local start = os.clock()
         for i = 1, 1000000 do end
         local elapsed = os.clock() - start
         if elapsed > 0.5 then
-            error("\\n\\n[ANTI-DEBUG] Debugger detected!\\n", 0)
-        end
-    end
-    
-    -- Check for common debugging functions
-    local blocked = {
-        "debug", "getfenv", "setfenv", "loadstring", 
-        "dofile", "loadfile"
-    }
-    
-    for _, name in ipairs(blocked) do
-        if _G[name] and type(_G[name]) == "function" then
-            local info = debug and debug.getinfo and debug.getinfo(_G[name])
-            if info and info.what == "C" then
-                -- Allow native functions
-            else
-                -- Block suspicious functions
-            end
+            error("Debugger detected!", 0)
         end
     end
 end
@@ -203,14 +170,9 @@ function Obfuscator:generateVMDecoder()
     local vmVars = {
         stack = randomString(),
         pc = randomString(),
-        instructions = randomString(),
-        constants = randomString(),
-        env = randomString(),
-        decoder = randomString(),
         key1 = randomString(),
         key2 = randomString(),
-        push = randomString(),
-        pop = randomString(),
+        decoder = randomString(),
     }
     
     local vmCode = string.format([[
@@ -219,7 +181,7 @@ local %s = "%s"
 
 local function %s(data)
     local result = {}
-    local chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%%&()*+,-./:;<=>?@[]^_`{|}~АБВГДЕЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯабвгдежзийклмнопрстуфхцчшщъыьэюя"
+    local chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%%&()*+,-./:;<=>?@[]^_`{|}~"
     local bytes = {}
     
     local i = 1
@@ -254,79 +216,12 @@ local function %s(data)
     return table.concat(result)
 end
 
-local function createVM()
-    local %s = {}
-    local %s = 1
-    
-    local function %s(val)
-        table.insert(%s, val)
-    end
-    
-    local function %s()
-        return table.remove(%s)
-    end
-    
-    return {
-        exec = function(self, ops, consts)
-            local %s = ops
-            local %s = consts
-            local %s = getfenv and getfenv() or _ENV
-            
-            while %s <= #%s do
-                local op = %s[%s]
-                local opcode = op[1]
-                local operand = op[2]
-                
-                if opcode == %d then
-                    %s(%s[operand])
-                elseif opcode == %d then
-                    %s(%s[%s[operand]])
-                elseif opcode == %d then
-                    %s[%s[operand]] = %s()
-                elseif opcode == %d then
-                    local args = {}
-                    for i = 1, operand do
-                        table.insert(args, 1, %s())
-                    end
-                    local func = %s()
-                    local results = {pcall(func, table.unpack(args))}
-                    if results[1] then
-                        for i = 2, #results do
-                            %s(results[i])
-                        end
-                    end
-                elseif opcode == %d then
-                    return %s()
-                end
-                
-                %s = %s + 1
-            end
-        end
-    }
-end
-
-return {decoder = %s, vm = createVM}
+return %s
 ]], 
         vmVars.key1, self.primaryKey,
         vmVars.key2, self.secondaryKey,
         vmVars.decoder,
         vmVars.key1, vmVars.key1,
-        vmVars.stack, vmVars.pc,
-        vmVars.push, vmVars.stack,
-        vmVars.pop, vmVars.stack,
-        vmVars.instructions, vmVars.constants, vmVars.env,
-        vmVars.pc, vmVars.instructions, vmVars.instructions, vmVars.pc,
-        self.opcodes[self.instructions.LOAD_CONST],
-        vmVars.push, vmVars.constants,
-        self.opcodes[self.instructions.GET_GLOBAL],
-        vmVars.push, vmVars.env, vmVars.constants,
-        self.opcodes[self.instructions.SET_GLOBAL],
-        vmVars.env, vmVars.constants, vmVars.pop,
-        self.opcodes[self.instructions.CALL],
-        vmVars.pop, vmVars.pop, vmVars.push,
-        self.opcodes[self.instructions.RETURN],
-        vmVars.pop,
-        vmVars.pc, vmVars.pc,
         vmVars.decoder
     )
     
@@ -383,8 +278,8 @@ function Obfuscator:obfuscate(sourceCode)
 
 %s
 
-local runtime = %s()
-local decoded = runtime.decoder("%s")
+local decoder = %s
+local decoded = decoder("%s")
 local executor = loadstring or load
 local func = executor(decoded)
 if func then func() end
@@ -460,7 +355,7 @@ if arg and arg[1] then
     file:write(obfuscated)
     file:close()
     
-    print(string.format("✓ Successfully obfuscated! Output: %s", outputFile))
+    print(string.format("Successfully obfuscated! Output: %s", outputFile))
     print(string.format("  Original size: %d bytes", #sourceCode))
     print(string.format("  Obfuscated size: %d bytes", #obfuscated))
     print(string.format("  Protection level: MAXIMUM"))
