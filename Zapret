@@ -1,49 +1,43 @@
--- =============================================
--- Meloten Obfuscator — ИСПРАВЛЕННАЯ ВЕРСИЯ
--- =============================================
+-- Meloten Obfuscator — FIX 2025
+package.path = package.path .. ";./src/?.lua;./src/prometheus/?.lua;./src/prometheus/steps/?.lua"
 
--- === ИСПРАВЛЕНИЕ ПУТЕЙ (самое важное) ===
-package.path = "./src/?.lua;" ..
-               "./src/?/init.lua;" ..
-               "./src/prometheus/?.lua;" ..
-               "./src/prometheus/?/?.lua;" ..
-               package.path
-
--- === ПОДКЛЮЧЕНИЕ МОДУЛЕЙ ===
-local Prometheus = require("prometheus.prometheus")
+local success, Prometheus = pcall(require, "prometheus.prometheus")
+if not success then
+    print("Ошибка: Prometheus не найден. Проверь, лежит ли src/prometheus/prometheus.lua")
+    print("Текущий package.path: " .. package.path)
+    os.exit(1)
+end
 
 local ControlFlowFlatten = require("prometheus.steps.ControlFlowFlatten")
 local JunkCode           = require("prometheus.steps.JunkCode")
 local MelotenHeader      = require("prometheus.steps.MelotenHeader")
 
--- === НАСТРОЙКИ ===
-local preset = Prometheus.Presets.Strong   -- можно поменять на Medium
+local preset = Prometheus.Presets.Strong
 
--- === ГЛАВНАЯ ФУНКЦИЯ ===
-local function MelotenObfuscate(inputPath, outputPath)
-    local f = assert(io.open(inputPath, "r"))
+local function obfuscate(input, output)
+    local f = io.open(input, "r")
+    if not f then error("Не открывается " .. input) end
     local code = f:read("*all")
     f:close()
 
-    print("[Meloten] Запуск обфускации...")
+    print("[Meloten] Обрабатываю...")
 
     local pipeline = Prometheus.Pipeline:fromConfig(preset)
-    local obfuscated = pipeline:apply(code)
+    local obf = pipeline:apply(code)
 
-    obfuscated = ControlFlowFlatten:Apply(obfuscated)
-    obfuscated = JunkCode:Apply(obfuscated)
-    obfuscated = MelotenHeader:Apply(obfuscated)
+    obf = ControlFlowFlatten:Apply(obf)
+    obf = JunkCode:Apply(obf)
+    obf = MelotenHeader:Apply(obf)
 
-    local out = assert(io.open(outputPath, "w"))
-    out:write(obfuscated)
+    local out = io.open(output, "w")
+    out:write(obf)
     out:close()
 
-    print("[Meloten] Готово! Файл сохранён → " .. outputPath)
+    print("[Meloten] Готово → " .. output)
 end
 
--- Запуск через командную строку
-if #arg >= 2 then
-    MelotenObfuscate(arg[1], arg[2])
+if arg[1] and arg[2] then
+    obfuscate(arg[1], arg[2])
+else
+    print("Использование: lua meloten_obfuscate.lua input.lua output.lua")
 end
-
-return MelotenObfuscate
