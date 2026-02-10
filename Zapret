@@ -1,27 +1,25 @@
-local MelotenHeader = {}
+local JunkCode = {}
 
-local HEADER = [[--[[This file was protected using Meloten Obfuscator
-v0.0.1]]
-]]
+local junk = {
+    "local _ = math.random(1, 999);",
+    "if false then local __meloten = 'protected' end",
+    "pcall(function() end)",
+    "local function _() return _G end _()",
+    "for _=1,math.random(1,3) do end",
+    "_G.__m = _G.__m or {}; __m[1] = 1;",
+}
 
-local ANTI_DEBUG = [[
--- Meloten Anti-Debug & Anti-Tamper
-do
-    local function crash() while true do end end
-    local dbg = debug
-    if dbg then
-        if dbg.getinfo(3) or dbg.getregistry() ~= _G or type(dbg.gethook) == "function" then
-            crash()
+function JunkCode:Apply(code)
+    local lines = {}
+    for line in code:gmatch("[^\r\n]+") do
+        table.insert(lines, line)
+        
+        -- Вставляем junk с вероятностью ~30%
+        if math.random() < 0.30 then
+            table.insert(lines, junk[math.random(#junk)])
         end
     end
-    if getfenv and getfenv(0) ~= _G then crash() end
-    if loadstring and loadstring("return 1") == nil then crash() end
-end
-]]
-
-function MelotenHeader:Apply(code, config)
-    -- code здесь уже после всех основных шагов (строка)
-    return HEADER .. "\n" .. ANTI_DEBUG .. "\n\n" .. code
+    return table.concat(lines, "\n")
 end
 
-return MelotenHeader
+return JunkCode
