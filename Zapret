@@ -1,264 +1,227 @@
--- Meloten Obfuscator v0.0.1 (ИСПРАВЛЕННАЯ ВЕРСИЯ для Windows)
--- Enhanced version based on Prometheus with advanced protections
+-- Упрощённый Telegram Bot для Meloten (использует lua-telegram-bot)
+-- Установка: luarocks install lua-telegram-bot
 
--- Настройка путей для Windows
-local function setupPaths()
-    -- Получаем текущую директорию
-    local currentDir = io.popen("cd"):read("*l"):gsub("\\", "/")
-    
-    -- Добавляем пути к Prometheus
-    package.path = package.path .. ";" .. currentDir .. "/src/?.lua"
-    package.path = package.path .. ";" .. currentDir .. "/src/?/init.lua"
-    package.path = package.path .. ";./src/?.lua"
-    package.path = package.path .. ";./src/?/init.lua"
+local telegram = require("telegram-bot-api")
+local Meloten = require("meloten")
+
+-- ============================================
+-- КОНФИГУРАЦИЯ
+-- ============================================
+
+local BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"  -- ← ЗАМЕНИТЕ НА ВАШ ТОКЕН
+
+-- Создаём бота
+local bot = telegram.new(BOT_TOKEN)
+
+-- Папки для временных файлов
+local TEMP_DIR = "./temp_bot_files/"
+os.execute("mkdir -p " .. TEMP_DIR)
+
+-- Хранилище состояний пользователей
+local users = {}
+
+-- ============================================
+-- УТИЛИТЫ
+-- ============================================
+
+local function log(msg)
+    print(string.format("[%s] %s", os.date("%H:%M:%S"), msg))
 end
 
-setupPaths()
+local function cleanupUser(userId)
+    if users[userId] then
+        -- Удаляем файлы
+        if users[userId].inputFile then
+            os.remove(users[userId].inputFile)
+        end
+        if users[userId].outputFile then
+            os.remove(users[userId].outputFile)
+        end
+        -- Очищаем состояние
+        users[userId] = nil
+        log("Очищены файлы пользователя: " .. userId)
+    end
+end
 
--- Теперь загружаем Prometheus
-local Prometheus = require("prometheus")
+local function getFileSize(path)
+    local file = io.open(path, "r")
+    if not file then return 0 end
+    local size = file:seek("end")
+    file:close()
+    return size
+end
 
-local Meloten = {}
-Meloten.VERSION = "0.0.1"
-Meloten.HEADER = [[--[[This file was protected using Meloten Obfuscator
-v]] .. Meloten.VERSION .. [[]]
+-- ============================================
+-- КОМАНДЫ
+-- ============================================
 
--- Custom preset configurations
-Meloten.Presets = {
-    -- Light obfuscation - fast, basic protection
-    Light = {
-        LuaVersion = "Lua51",
-        VarNamePrefix = "",
-        NameGenerator = "MangledShuffled",
-        PrettyPrint = false,
-        Seed = 0,
-        Steps = {
-            {
-                Name = "Vmify",
-                Settings = {
-                    IntensityIndex = 20,
-                }
-            },
-            {
-                Name = "ConstantArray",
-                Settings = {
-                    Treshold = 1,
-                    StringsOnly = true,
-                    Shuffle = true,
-                    Rotate = true,
-                }
-            },
-        }
-    },
-    
-    -- Medium obfuscation - balanced
-    Medium = {
-        LuaVersion = "Lua51",
-        VarNamePrefix = "",
-        NameGenerator = "MangledShuffled",
-        PrettyPrint = false,
-        Seed = 0,
-        Steps = {
-            {
-                Name = "Vmify",
-                Settings = {
-                    IntensityIndex = 50,
-                }
-            },
-            {
-                Name = "ConstantArray",
-                Settings = {
-                    Treshold = 1,
-                    StringsOnly = false,
-                    Shuffle = true,
-                    Rotate = true,
-                    LocalWrapperTreshold = 1,
-                }
-            },
-            {
-                Name = "ProxifyLocals",
-                Settings = {
-                    Treshold = 1,
-                }
-            },
-            {
-                Name = "WrapInFunction",
-            },
-        }
-    },
-    
-    -- Strong obfuscation - maximum protection
-    Strong = {
-        LuaVersion = "Lua51",
-        VarNamePrefix = "",
-        NameGenerator = "MangledShuffled",
-        PrettyPrint = false,
-        Seed = 0,
-        Steps = {
-            {
-                Name = "Vmify",
-                Settings = {
-                    IntensityIndex = 100,
-                }
-            },
-            {
-                Name = "ConstantArray",
-                Settings = {
-                    Treshold = 1,
-                    StringsOnly = false,
-                    Shuffle = true,
-                    Rotate = true,
-                    LocalWrapperTreshold = 1,
-                }
-            },
-            {
-                Name = "ProxifyLocals",
-                Settings = {
-                    Treshold = 1,
-                }
-            },
-            {
-                Name = "SplitStrings",
-                Settings = {
-                    Treshold = 1,
-                }
-            },
-            {
-                Name = "NumbersToExpressions",
-            },
-            {
-                Name = "WrapInFunction",
-            },
-            {
-                Name = "EncryptStrings",
-            },
-        }
-    },
-    
-    -- Meloten Extreme - custom advanced protection
-    -- ОТКЛЮЧЕНЫ кастомные steps пока не подключены
-    Extreme = {
-        LuaVersion = "Lua51",
-        VarNamePrefix = "_MLT_",
-        NameGenerator = "MangledShuffled",
-        PrettyPrint = false,
-        Seed = math.random(1, 999999),
-        Steps = {
-            -- Закомментированы кастомные steps
-            -- {
-            --     Name = "AntiDebug",
-            --     Settings = {
-            --         snippetCount = 3,
-            --     }
-            -- },
-            -- {
-            --     Name = "MultiLayerStringEncrypt",
-            --     Settings = {}
-            -- },
-            {
-                Name = "Vmify",
-                Settings = {
-                    IntensityIndex = 200,
-                }
-            },
-            {
-                Name = "ConstantArray",
-                Settings = {
-                    Treshold = 1,
-                    StringsOnly = false,
-                    Shuffle = true,
-                    Rotate = true,
-                    LocalWrapperTreshold = 1,
-                    LocalWrapperArgCount = 3,
-                }
-            },
-            {
-                Name = "ProxifyLocals",
-                Settings = {
-                    Treshold = 1,
-                }
-            },
-            {
-                Name = "SplitStrings",
-                Settings = {
-                    Treshold = 1,
-                }
-            },
-            {
-                Name = "NumbersToExpressions",
-            },
-            -- {
-            --     Name = "ControlFlowFlatten",
-            --     Settings = {
-            --         complexity = 5,
-            --     }
-            -- },
-            {
-                Name = "WrapInFunction",
-            },
-            {
-                Name = "EncryptStrings",
-            },
-        }
-    },
+bot:onCommand("start", function(msg)
+    bot:sendMessage(msg.chat.id, [[
+🔐 *Meloten Obfuscator Bot*
+
+Привет! Я обфусцирую твой Lua код.
+
+*Инструкция:*
+1. Отправь мне .lua файл
+2. Выбери пресет (/light, /medium, /strong, /extreme)
+3. Получи защищённый файл
+
+*Команды:*
+/start - Это сообщение
+/help - Подробная справка
+/cancel - Отменить операцию
+
+Отправляй файл! 🚀
+]], {parse_mode = "Markdown"})
+end)
+
+bot:onCommand("help", function(msg)
+    bot:sendMessage(msg.chat.id, [[
+📖 *Справка*
+
+*Пресеты:*
+
+*Light* ⚡ - /light
+Быстро, размер +60%
+
+*Medium* ⭐ - /medium
+Сбалансированно, +200%
+
+*Strong* 🔒 - /strong
+Сильная защита, +500%
+
+*Extreme* 🛡️ - /extreme
+• Максимум защиты
+• Анти-отладка
+• 3-слойное шифрование
+• +900% размера
+
+Все файлы автоматически удаляются!
+]], {parse_mode = "Markdown"})
+end)
+
+bot:onCommand("cancel", function(msg)
+    cleanupUser(msg.from.id)
+    bot:sendMessage(msg.chat.id, "❌ Операция отменена")
+end)
+
+-- Обработчики пресетов
+local presets = {
+    light = "Light",
+    medium = "Medium", 
+    strong = "Strong",
+    extreme = "Extreme"
 }
 
--- Obfuscate code with Meloten
-function Meloten.obfuscate(code, preset)
-    preset = preset or "Medium"
-    
-    -- Get preset configuration
-    local config = Meloten.Presets[preset]
-    if not config then
-        error("Invalid preset: " .. preset)
-    end
-    
-    -- Set random seed if configured
-    if config.Seed > 0 then
-        math.randomseed(config.Seed)
-    else
-        math.randomseed(os.time())
-    end
-    
-    -- Disable console output
-    Prometheus.Logger.logLevel = Prometheus.Logger.LogLevel.Error
-    
-    -- Create pipeline
-    local pipeline = Prometheus.Pipeline:fromConfig(config)
-    
-    -- Apply obfuscation
-    local obfuscated = pipeline:apply(code)
-    
-    -- Add Meloten header
-    local result = Meloten.HEADER .. "\n\n" .. obfuscated
-    
-    return result
+for cmd, preset in pairs(presets) do
+    bot:onCommand(cmd, function(msg)
+        local userId = msg.from.id
+        local chatId = msg.chat.id
+        
+        if not users[userId] or not users[userId].inputFile then
+            bot:sendMessage(chatId, "❌ Сначала отправь .lua файл")
+            return
+        end
+        
+        bot:sendMessage(chatId, "⚙️ Обфусцирую с пресетом *" .. preset .. "*...", {parse_mode = "Markdown"})
+        
+        -- Обфускация
+        local inputPath = users[userId].inputFile
+        local outputPath = TEMP_DIR .. userId .. "_obfuscated.lua"
+        
+        local ok, err = pcall(function()
+            Meloten.obfuscateFile(inputPath, outputPath, preset)
+        end)
+        
+        if not ok then
+            bot:sendMessage(chatId, "❌ Ошибка:\n`" .. tostring(err) .. "`", {parse_mode = "Markdown"})
+            cleanupUser(userId)
+            return
+        end
+        
+        -- Статистика
+        local inSize = getFileSize(inputPath)
+        local outSize = getFileSize(outputPath)
+        local ratio = inSize > 0 and (outSize / inSize * 100) or 0
+        
+        -- Отправляем файл
+        bot:sendDocument(chatId, {
+            document = outputPath,
+            caption = string.format(
+                "✅ Готово!\n\nПресет: %s\nРазмер: %d → %d байт (%.1f%%)",
+                preset, inSize, outSize, ratio
+            )
+        })
+        
+        bot:sendMessage(chatId, "✨ Файлы удалены из памяти")
+        
+        -- Сохраняем путь к output для удаления
+        users[userId].outputFile = outputPath
+        
+        -- Удаляем через 5 секунд
+        os.execute("(sleep 5; rm -f " .. outputPath .. ") &")
+        cleanupUser(userId)
+    end)
 end
 
--- Obfuscate file
-function Meloten.obfuscateFile(inputPath, outputPath, preset)
-    -- Read input file
-    local file = io.open(inputPath, "r")
-    if not file then
-        error("Cannot open input file: " .. inputPath)
-    end
-    
-    local code = file:read("*all")
-    file:close()
-    
-    -- Obfuscate
-    local obfuscated = Meloten.obfuscate(code, preset)
-    
-    -- Write output file
-    file = io.open(outputPath, "w")
-    if not file then
-        error("Cannot open output file: " .. outputPath)
-    end
-    
-    file:write(obfuscated)
-    file:close()
-    
-    print("✓ Successfully obfuscated: " .. inputPath .. " -> " .. outputPath)
-end
+-- ============================================
+-- ОБРАБОТКА ДОКУМЕНТОВ
+-- ============================================
 
-return Meloten
+bot:onDocument(function(msg)
+    local chatId = msg.chat.id
+    local userId = msg.from.id
+    local doc = msg.document
+    
+    -- Проверяем расширение
+    if not doc.file_name:match("%.lua$") then
+        bot:sendMessage(chatId, "❌ Нужен .lua файл")
+        return
+    end
+    
+    bot:sendMessage(chatId, "📥 Получаю файл...")
+    
+    -- Скачиваем файл
+    local filePath = TEMP_DIR .. userId .. "_" .. doc.file_name
+    local ok, err = pcall(function()
+        local file = bot:getFile(doc.file_id)
+        bot:downloadFile(file.file_path, filePath)
+    end)
+    
+    if not ok then
+        bot:sendMessage(chatId, "❌ Ошибка скачивания")
+        return
+    end
+    
+    -- Сохраняем состояние
+    users[userId] = {
+        inputFile = filePath,
+        fileName = doc.file_name
+    }
+    
+    bot:sendMessage(chatId, [[
+✅ Файл получен!
+
+Выбери пресет:
+/light - Лёгкий ⚡
+/medium - Средний ⭐
+/strong - Сильный 🔒
+/extreme - Экстремальный 🛡️
+
+/cancel - Отмена
+]], {parse_mode = "Markdown"})
+    
+    log("Файл от " .. userId .. ": " .. doc.file_name)
+end)
+
+-- ============================================
+-- ЗАПУСК
+-- ============================================
+
+log("🚀 Meloten Bot запущен!")
+
+-- Очистка при запуске
+os.execute("rm -f " .. TEMP_DIR .. "*")
+
+-- Запускаем бота
+bot:run()
