@@ -1,4 +1,264 @@
--- Meloten Custom Steps (Вставляем сюда)
-Steps.AntiDebug = require("prometheus.steps.AntiDebug");
-Steps.MultiLayerStringEncrypt = require("prometheus.steps.MultiLayerStringEncrypt");
-Steps.ControlFlowFlatten = require("prometheus.steps.ControlFlowFlatten");
+-- Meloten Obfuscator v0.0.1 (ИСПРАВЛЕННАЯ ВЕРСИЯ для Windows)
+-- Enhanced version based on Prometheus with advanced protections
+
+-- Настройка путей для Windows
+local function setupPaths()
+    -- Получаем текущую директорию
+    local currentDir = io.popen("cd"):read("*l"):gsub("\\", "/")
+    
+    -- Добавляем пути к Prometheus
+    package.path = package.path .. ";" .. currentDir .. "/src/?.lua"
+    package.path = package.path .. ";" .. currentDir .. "/src/?/init.lua"
+    package.path = package.path .. ";./src/?.lua"
+    package.path = package.path .. ";./src/?/init.lua"
+end
+
+setupPaths()
+
+-- Теперь загружаем Prometheus
+local Prometheus = require("prometheus")
+
+local Meloten = {}
+Meloten.VERSION = "0.0.1"
+Meloten.HEADER = [[--[[This file was protected using Meloten Obfuscator
+v]] .. Meloten.VERSION .. [[]]
+
+-- Custom preset configurations
+Meloten.Presets = {
+    -- Light obfuscation - fast, basic protection
+    Light = {
+        LuaVersion = "Lua51",
+        VarNamePrefix = "",
+        NameGenerator = "MangledShuffled",
+        PrettyPrint = false,
+        Seed = 0,
+        Steps = {
+            {
+                Name = "Vmify",
+                Settings = {
+                    IntensityIndex = 20,
+                }
+            },
+            {
+                Name = "ConstantArray",
+                Settings = {
+                    Treshold = 1,
+                    StringsOnly = true,
+                    Shuffle = true,
+                    Rotate = true,
+                }
+            },
+        }
+    },
+    
+    -- Medium obfuscation - balanced
+    Medium = {
+        LuaVersion = "Lua51",
+        VarNamePrefix = "",
+        NameGenerator = "MangledShuffled",
+        PrettyPrint = false,
+        Seed = 0,
+        Steps = {
+            {
+                Name = "Vmify",
+                Settings = {
+                    IntensityIndex = 50,
+                }
+            },
+            {
+                Name = "ConstantArray",
+                Settings = {
+                    Treshold = 1,
+                    StringsOnly = false,
+                    Shuffle = true,
+                    Rotate = true,
+                    LocalWrapperTreshold = 1,
+                }
+            },
+            {
+                Name = "ProxifyLocals",
+                Settings = {
+                    Treshold = 1,
+                }
+            },
+            {
+                Name = "WrapInFunction",
+            },
+        }
+    },
+    
+    -- Strong obfuscation - maximum protection
+    Strong = {
+        LuaVersion = "Lua51",
+        VarNamePrefix = "",
+        NameGenerator = "MangledShuffled",
+        PrettyPrint = false,
+        Seed = 0,
+        Steps = {
+            {
+                Name = "Vmify",
+                Settings = {
+                    IntensityIndex = 100,
+                }
+            },
+            {
+                Name = "ConstantArray",
+                Settings = {
+                    Treshold = 1,
+                    StringsOnly = false,
+                    Shuffle = true,
+                    Rotate = true,
+                    LocalWrapperTreshold = 1,
+                }
+            },
+            {
+                Name = "ProxifyLocals",
+                Settings = {
+                    Treshold = 1,
+                }
+            },
+            {
+                Name = "SplitStrings",
+                Settings = {
+                    Treshold = 1,
+                }
+            },
+            {
+                Name = "NumbersToExpressions",
+            },
+            {
+                Name = "WrapInFunction",
+            },
+            {
+                Name = "EncryptStrings",
+            },
+        }
+    },
+    
+    -- Meloten Extreme - custom advanced protection
+    -- ОТКЛЮЧЕНЫ кастомные steps пока не подключены
+    Extreme = {
+        LuaVersion = "Lua51",
+        VarNamePrefix = "_MLT_",
+        NameGenerator = "MangledShuffled",
+        PrettyPrint = false,
+        Seed = math.random(1, 999999),
+        Steps = {
+            -- Закомментированы кастомные steps
+            -- {
+            --     Name = "AntiDebug",
+            --     Settings = {
+            --         snippetCount = 3,
+            --     }
+            -- },
+            -- {
+            --     Name = "MultiLayerStringEncrypt",
+            --     Settings = {}
+            -- },
+            {
+                Name = "Vmify",
+                Settings = {
+                    IntensityIndex = 200,
+                }
+            },
+            {
+                Name = "ConstantArray",
+                Settings = {
+                    Treshold = 1,
+                    StringsOnly = false,
+                    Shuffle = true,
+                    Rotate = true,
+                    LocalWrapperTreshold = 1,
+                    LocalWrapperArgCount = 3,
+                }
+            },
+            {
+                Name = "ProxifyLocals",
+                Settings = {
+                    Treshold = 1,
+                }
+            },
+            {
+                Name = "SplitStrings",
+                Settings = {
+                    Treshold = 1,
+                }
+            },
+            {
+                Name = "NumbersToExpressions",
+            },
+            -- {
+            --     Name = "ControlFlowFlatten",
+            --     Settings = {
+            --         complexity = 5,
+            --     }
+            -- },
+            {
+                Name = "WrapInFunction",
+            },
+            {
+                Name = "EncryptStrings",
+            },
+        }
+    },
+}
+
+-- Obfuscate code with Meloten
+function Meloten.obfuscate(code, preset)
+    preset = preset or "Medium"
+    
+    -- Get preset configuration
+    local config = Meloten.Presets[preset]
+    if not config then
+        error("Invalid preset: " .. preset)
+    end
+    
+    -- Set random seed if configured
+    if config.Seed > 0 then
+        math.randomseed(config.Seed)
+    else
+        math.randomseed(os.time())
+    end
+    
+    -- Disable console output
+    Prometheus.Logger.logLevel = Prometheus.Logger.LogLevel.Error
+    
+    -- Create pipeline
+    local pipeline = Prometheus.Pipeline:fromConfig(config)
+    
+    -- Apply obfuscation
+    local obfuscated = pipeline:apply(code)
+    
+    -- Add Meloten header
+    local result = Meloten.HEADER .. "\n\n" .. obfuscated
+    
+    return result
+end
+
+-- Obfuscate file
+function Meloten.obfuscateFile(inputPath, outputPath, preset)
+    -- Read input file
+    local file = io.open(inputPath, "r")
+    if not file then
+        error("Cannot open input file: " .. inputPath)
+    end
+    
+    local code = file:read("*all")
+    file:close()
+    
+    -- Obfuscate
+    local obfuscated = Meloten.obfuscate(code, preset)
+    
+    -- Write output file
+    file = io.open(outputPath, "w")
+    if not file then
+        error("Cannot open output file: " .. outputPath)
+    end
+    
+    file:write(obfuscated)
+    file:close()
+    
+    print("✓ Successfully obfuscated: " .. inputPath .. " -> " .. outputPath)
+end
+
+return Meloten
