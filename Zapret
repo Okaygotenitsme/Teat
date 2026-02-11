@@ -1,84 +1,169 @@
-import telebot
-import subprocess
+import asyncio
 import os
-import time
+import subprocess
+from aiogram import Bot, Dispatcher, F, types
+from aiogram.filters import Command
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
 
-# === КОНФИГУРАЦИЯ ===
+# ================= КОНФИГУРАЦИЯ =================
+
 TOKEN = "ТВОЙ_ТОКЕН_ЗДЕСЬ"
-bot = telebot.TeleBot(TOKEN)
 
-# Папка для временных файлов
+# ❗ ВАЖНО: Если снова будет ошибка [WinError 2],
+# найди где у тебя лежит lua.exe и впиши полный путь сюда.
+# Например: r"C:\Program Files\Lua\lua.exe"
+# Если Lua добавлена в PATH, можно оставить просто "lua"
+LUA_PATH = "lua" 
+
 TEMP_DIR = "temp_files"
+
+# Создаем папку для файлов, если нет
 if not os.path.exists(TEMP_DIR):
     os.makedirs(TEMP_DIR)
 
-# === ОБРАБОТКА КОМАНД ===
+# Инициализация бота
+bot = Bot(token=TOKEN)
+dp = Dispatcher()
 
-@bot.message_handler(commands=['start'])
-def send_welcome(message):
-    bot.reply_to(message, "👋 Привет! Отправь мне .lua файл, и я его зашифрую через Meloten.")
+# Словарь для запоминания, какой файл отправил юзер
+# Формат: { user_id: "путь_к_файлу" }
+user_files = {}
 
-# === ОБРАБОТКА ФАЙЛОВ ===
+# ================= КЛАВИАТУРЫ =================
 
-@bot.message_handler(content_types=['document'])
-def handle_docs(message):
+def get_presets_keyboard():
+    """Создает кнопки с выбором пресета"""
+    buttons = [
+        [
+            InlineKeyboardButton(text="⚡ Light", callback_data="preset_Light"),
+            InlineKeyboardButton(text="⭐ Medium", callback_data="preset_Medium")
+        ],
+        [
+            InlineKeyboardButton(text="🔒 Strong", callback_data="preset_Strong"),
+            InlineKeyboardButton(text="🛡️ Extreme", callback_data="preset_Extreme")
+        ]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+# ================= ХЕНДЛЕРЫ (ОБРАБОТЧИКИ) =================
+
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message):
+    await message.answer(
+        "👋 **Привет! Я Meloten Obfuscator Bot.**\n\n"
+        "Просто отправь мне `.lua` файл, и я предложу выбрать степень защиты.",
+        parse_mode="Markdown"
+    )
+
+@dp.message(F.document)
+async def handle_document(message: types.Message):
+    document = message.document
+    file_name = document.file_name
+
+    # 1. Проверка расширения
+    if not file_name.endswith(".lua"):
+        await message.answer("❌ Пожалуйста, отправь файл с расширением `.lua`")
+        return
+
+    # 2. Скачивание файла
+    file_id = document.file_id
+    file = await bot.get_file(file_id)
+    file_path = file.file_path
+    
+    # Формируем локальный путь: temp_files/user_id_filename.lua
+    local_filename = f"{message.from_user.id}_{file_name}"
+    local_path = os.path.join(TEMP_DIR, local_filename)
+
+    await bot.download_file(file_path, local_path)
+
+    # 3. Запоминаем файл за пользователем
+    user_files[message.from_user.id] = local_path
+
+    # 4. Предлагаем выбрать пресет
+    await message.answer(
+        f"📂 Файл `{file_name}` получен!\nВыберите уровень защиты:",
+        reply_markup=get_presets_keyboard(),
+        parse_mode="Markdown"
+    )
+
+@dp.callback_query(F.data.startswith("preset_"))
+async def process_obfuscation(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    preset = callback.data.split("_")[1] # Получаем "Light", "Medium" и т.д.
+
+    # Проверяем, есть ли у пользователя загруженный файл
+    if user_id not in user_files:
+        await callback.message.answer("❌ Файл не найден. Отправьте его снова.")
+        await callback.answer()
+        return
+
+    input_path = user_files[user_id]
+    output_filename = os.path.basename(input_path).replace(".lua", "_obf.lua")
+    output_path = os.path.join(TEMP_DIR, output_filename)
+
+    await callback.message.edit_text(f"⚙️ Применяю пресет **{preset}**...", parse_mode="Markdown")
+
+    # ================= ЗАПУСК LUA =================
     try:
-        # 1. Проверяем, что это Lua файл
-        file_name = message.document.file_name
-        if not file_name.endswith('.lua'):
-            bot.reply_to(message, "❌ Это не Lua файл. Пожалуйста, отправь файл с расширением .lua")
-            return
-
-        status_msg = bot.reply_to(message, "📥 Скачиваю файл...")
-
-        # 2. Скачиваем файл
-        file_info = bot.get_file(message.document.file_id)
-        downloaded_file = bot.download_file(file_info.file_path)
-
-        # Формируем пути
-        user_id = message.from_user.id
-        input_path = os.path.join(TEMP_DIR, f"{user_id}_input.lua")
-        output_path = os.path.join(TEMP_DIR, f"{user_id}_obfuscated.lua")
-
-        # Сохраняем входящий файл
-        with open(input_path, 'wb') as new_file:
-            new_file.write(downloaded_file)
-
-        # 3. ЗАПУСКАЕМ LUA ЧЕРЕЗ PYTHON
-        bot.edit_message_text(f"⚙️ Обфускация (Medium)...", chat_id=message.chat.id, message_id=status_msg.message_id)
-        
-        # Вот здесь магия: Python вызывает команду консоли
-        # "lua run_obfuscator.lua входной_файл выходной_файл Medium"
-        process = subprocess.run(
-            ["lua", "run_obfuscator.lua", input_path, output_path, "Medium"],
-            capture_output=True,
-            text=True
+        # Запускаем Lua в отдельном потоке, чтобы бот не завис
+        # Команда: lua run_obfuscator.lua вход выход пресет
+        process = await asyncio.create_subprocess_exec(
+            LUA_PATH, 
+            "run_obfuscator.lua", 
+            input_path, 
+            output_path, 
+            preset,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
         )
 
-        # Проверяем, успешно ли отработал Lua скрипт
+        stdout, stderr = await process.communicate()
+
         if process.returncode != 0:
-            # Если ошибка
-            error_text = process.stderr or process.stdout # Читаем ошибку из консоли Lua
-            bot.reply_to(message, f"❌ Ошибка в Lua скрипте:\n{error_text}")
+            error_msg = stderr.decode().strip() or stdout.decode().strip()
+            await callback.message.edit_text(f"❌ Ошибка Lua:\n`{error_msg}`", parse_mode="Markdown")
             return
 
-        # 4. Отправляем результат обратно
+        # ================= ОТПРАВКА РЕЗУЛЬТАТА =================
         if os.path.exists(output_path):
-            bot.edit_message_text(f"📤 Отправляю результат...", chat_id=message.chat.id, message_id=status_msg.message_id)
+            await callback.message.edit_text("📤 Загружаю результат...")
             
-            with open(output_path, 'rb') as doc:
-                bot.send_document(message.chat.id, doc, caption="✅ Готово! Зашифровано Meloten.")
+            result_file = FSInputFile(output_path)
+            await bot.send_document(
+                chat_id=callback.message.chat.id,
+                document=result_file,
+                caption=f"✅ Готово! Пресет: {preset}"
+            )
+            
+            # Удаляем файл из памяти бота
+            del user_files[user_id]
         else:
-            bot.reply_to(message, "❌ Файл не был создан. Что-то пошло не так.")
+            await callback.message.edit_text("❌ Файл не был создан скриптом.")
 
+    except FileNotFoundError:
+        # Вот обработка твоей ошибки WinError 2
+        await callback.message.edit_text(
+            f"❌ **Ошибка системы:** Не найден Lua!\n"
+            f"Проверь переменную `LUA_PATH` в коде бота.\n"
+            f"Текущее значение: `{LUA_PATH}`",
+            parse_mode="Markdown"
+        )
     except Exception as e:
-        bot.reply_to(message, f"❌ Произошла ошибка бота: {e}")
-
+        await callback.message.edit_text(f"❌ Критическая ошибка: {str(e)}")
+    
     finally:
-        # 5. Уборка мусора (удаляем временные файлы)
+        # Чистим мусор
         if os.path.exists(input_path): os.remove(input_path)
         if os.path.exists(output_path): os.remove(output_path)
 
-# === ЗАПУСК ===
-print("Бот запущен...")
-bot.polling(none_stop=True)
+
+# ================= ЗАПУСК =================
+async def main():
+    print("🚀 Бот запущен на aiogram!")
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("Бот остановлен")
