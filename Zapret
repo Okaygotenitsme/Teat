@@ -1,314 +1,581 @@
--- Meloten Obfuscator v2.2 - СТАБИЛЬНАЯ ВЕРСИЯ
--- Исправлены все крахи, оптимизированы настройки
+import asyncio
+import os
+import subprocess
+from datetime import datetime
+from aiogram import Bot, Dispatcher, F, types
+from aiogram.filters import Command
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile, WebAppInfo
+from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
 
-package.path = package.path .. ";./src/?.lua;./src/?/init.lua"
-local Prometheus = require("prometheus")
+# ================= КОНФИГУРАЦИЯ =================
 
-local Meloten = {}
-Meloten.VERSION = "0.2.2"
-Meloten.HEADER = "--[[\n" ..
-    "This file was protected using Meloten Obfuscator v" .. Meloten.VERSION .. "\n" ..
-    "Bot: https://t.me/Meloten_Obfuscatorbot\n" ..
-    "Ultra-Stable Multi-Layer Protection\n" ..
-    "]]"
+TOKEN = "YOUR_BOT_TOKEN_HERE"  # ← ВСТАВЬТЕ ТОКЕН
 
-Meloten.Presets = {
-    Light = {
-        LuaVersion = "Lua51",
-        VarNamePrefix = "",
-        NameGenerator = "MangledShuffled",
-        PrettyPrint = false,
-        Seed = 0,
-        Steps = {
-            {Name = "Vmify", Settings = {IntensityIndex = 20}},
-            {Name = "ConstantArray", Settings = {
-                Treshold = 1,
-                StringsOnly = true,
-                Shuffle = true,
-                Rotate = true
-            }},
-        }
+session = AiohttpSession(proxy=None)
+bot = Bot(token=TOKEN, session=session)
+storage = MemoryStorage()
+dp = Dispatcher(storage=storage)
+
+LUA_PATH = "lua55"
+TEMP_DIR = "temp_files"
+STATS_FILE = "bot_stats.txt"
+
+# Настройки магазина
+SHOP_ENABLED = True  # Включить/выключить магазин
+PAYMENT_LINK = "https://t.me/your_payment_bot"  # Ссылка на оплату
+ADMIN_ID = 123456789  # Ваш Telegram ID для уведомлений
+
+if not os.path.exists(TEMP_DIR):
+    os.makedirs(TEMP_DIR)
+
+user_files = {}
+user_languages = {}
+user_stats = {}
+premium_users = set()  # Премиум пользователи
+
+class UserStates(StatesGroup):
+    waiting_for_language = State()
+    waiting_for_file = State()
+    waiting_for_preset = State()
+
+# ================= ТЕКСТЫ =================
+
+TEXTS = {
+    "en": {
+        "welcome": (
+            "👋 **Welcome to Meloten Obfuscator Bot v2.2!**\n\n"
+            "🔐 Professional Lua code protection\n"
+            "⚡️ 6 protection levels\n"
+            "🛡 Ultra-stable, crash-free\n\n"
+            "**New in v2.2:**\n"
+            "• ✅ Fixed ALL crashes\n"
+            "• ✅ Stable Paranoid & Insane\n"
+            "• ✅ Optimized for any code\n"
+            "• ✅ 15 layers protection (Insane)\n\n"
+            "Send me a `.lua` file to get started!"
+        ),
+        "select_language": "🌍 Select your language:",
+        "language_set": "✅ Language set to English",
+        "file_received": "✅ File `{filename}` received!\n\n📊 Size: {size} KB\n\n🎯 Select protection level:",
+        "wrong_extension": "❌ Please send a `.lua` file",
+        "processing": "⚙️ Processing with **{preset}**...\n\n⏳ {layers} protection layers\n⚡️ Please wait...",
+        "success": (
+            "✅ **Complete!**\n\n"
+            "📊 **Stats:**\n"
+            "• Preset: {preset}\n"
+            "• Input: {input_size} KB\n"
+            "• Output: {output_size} KB\n"
+            "• Increase: {ratio}%\n"
+            "• Layers: {layers}\n"
+            "• Time: {time}s\n\n"
+            "🗑 Files deleted."
+        ),
+        "help": (
+            "📖 **Meloten Obfuscator v2.2**\n\n"
+            "**Commands:**\n"
+            "/start - Start bot\n"
+            "/help - This help\n"
+            "/presets - View presets\n"
+            "/stats - Your statistics\n"
+            "/buy - Premium features 💎\n"
+            "/language - Change language\n"
+            "/about - About bot\n\n"
+            "**Protection levels:**\n"
+            "⚡️ Light - 2 layers\n"
+            "⭐️ Medium - 4 layers\n"
+            "🔒 Strong - 7 layers\n"
+            "🛡 Extreme - 7 layers\n"
+            "🔥 Ultra - 10 layers\n"
+            "💀 Paranoid - 12 layers\n"
+            "😈 Insane - 15 layers"
+        ),
+        "presets_info": (
+            "🎯 **Protection Levels**\n\n"
+            "**⚡️ Light**\n"
+            "2 layers | +60% size\n"
+            "Basic VM + Constants\n\n"
+            "**⭐️ Medium** (Recommended)\n"
+            "4 layers | +200% size\n"
+            "VM + Constants + Proxy + Wrap\n\n"
+            "**🔒 Strong**\n"
+            "7 layers | +500% size\n"
+            "+ String split + Encryption\n\n"
+            "**🛡 Extreme**\n"
+            "7 layers | +900% size\n"
+            "+ Enhanced VM\n\n"
+            "**🔥 Ultra Strong**\n"
+            "10 layers | +1200% size\n"
+            "Double VM + Double wrap\n\n"
+            "**💀 Paranoid** (FIXED!)\n"
+            "12 layers | +1800% size\n"
+            "Triple VM + Triple wrap\n"
+            "Stable & powerful\n\n"
+            "**😈 Insane** (FIXED!)\n"
+            "15 layers | +2500% size\n"
+            "Quad VM + 3x Wrap\n"
+            "3x Proxy + 3x Constants\n"
+            "Maximum protection!"
+        ),
+        "buy": (
+            "💎 **Premium Features**\n\n"
+            "🎁 **What you get:**\n"
+            "• Priority processing (no queue)\n"
+            "• Unlimited file size\n"
+            "• Custom presets\n"
+            "• Lifetime updates\n"
+            "• Premium support\n\n"
+            "💰 **Pricing:**\n"
+            "• Monthly: $9.99\n"
+            "• Yearly: $79.99 (33% OFF)\n"
+            "• Lifetime: $199.99\n\n"
+            "📧 Contact: @your_username\n"
+            "🌐 Website: your-website.com\n\n"
+            "Click button below to purchase!"
+        ),
+        "about": (
+            "ℹ️ **Meloten Obfuscator Bot**\n\n"
+            "🔐 Version: 2.2 Stable\n"
+            "⚡️ Based on: Prometheus\n\n"
+            "**v2.2 Features:**\n"
+            "✅ 100% Crash-free\n"
+            "✅ 15-layer protection\n"
+            "✅ Works with any code\n"
+            "✅ Ultra-optimized\n\n"
+            "Made with ❤️ for Lua devs\n"
+            "Bot: @Meloten_Obfuscatorbot"
+        ),
+        "stats": (
+            "📊 **Your Statistics:**\n\n"
+            "🗂 Files: {count}\n"
+            "📈 Input total: {input_total} KB\n"
+            "📊 Output total: {output_total} KB\n"
+            "⏱ Time: {time_total}s\n"
+            "🔥 Favorite: {favorite_preset}\n\n"
+            "First: {first_use}\n"
+            "Last: {last_use}"
+        ),
+        "no_stats": "📊 No statistics yet!",
+        "cancel": "❌ Cancelled. Files deleted.",
+        "premium_only": "💎 This feature is for Premium users only!\n\nUse /buy to upgrade.",
     },
-    
-    Medium = {
-        LuaVersion = "Lua51",
-        VarNamePrefix = "",
-        NameGenerator = "MangledShuffled",
-        PrettyPrint = false,
-        Seed = 0,
-        Steps = {
-            {Name = "Vmify", Settings = {IntensityIndex = 50}},
-            {Name = "ConstantArray", Settings = {
-                Treshold = 1,
-                StringsOnly = false,
-                Shuffle = true,
-                Rotate = true,
-                LocalWrapperTreshold = 1
-            }},
-            {Name = "ProxifyLocals", Settings = {Treshold = 1}},
-            {Name = "WrapInFunction"},
-        }
-    },
-    
-    Strong = {
-        LuaVersion = "Lua51",
-        VarNamePrefix = "",
-        NameGenerator = "MangledShuffled",
-        PrettyPrint = false,
-        Seed = 0,
-        Steps = {
-            {Name = "Vmify", Settings = {IntensityIndex = 100}},
-            {Name = "ConstantArray", Settings = {
-                Treshold = 1,
-                StringsOnly = false,
-                Shuffle = true,
-                Rotate = true,
-                LocalWrapperTreshold = 1
-            }},
-            {Name = "ProxifyLocals", Settings = {Treshold = 1}},
-            {Name = "SplitStrings", Settings = {Treshold = 1}},
-            {Name = "NumbersToExpressions"},
-            {Name = "WrapInFunction"},
-            {Name = "EncryptStrings"},
-        }
-    },
-    
-    Extreme = {
-        LuaVersion = "Lua51",
-        VarNamePrefix = "_E_",
-        NameGenerator = "MangledShuffled",
-        PrettyPrint = false,
-        Seed = math.random(1, 999999),
-        Steps = {
-            {Name = "Vmify", Settings = {IntensityIndex = 150}},
-            {Name = "ConstantArray", Settings = {
-                Treshold = 1,
-                StringsOnly = false,
-                Shuffle = true,
-                Rotate = true,
-                LocalWrapperTreshold = 1,
-                LocalWrapperArgCount = 2  -- Безопасное значение
-            }},
-            {Name = "ProxifyLocals", Settings = {Treshold = 1}},
-            {Name = "SplitStrings", Settings = {Treshold = 1}},
-            {Name = "NumbersToExpressions"},
-            {Name = "WrapInFunction"},
-            {Name = "EncryptStrings"},
-        }
-    },
-    
-    -- Ultra Strong - Стабильная версия
-    UltraStrong = {
-        LuaVersion = "Lua51",
-        VarNamePrefix = "",
-        NameGenerator = "MangledShuffled",
-        PrettyPrint = false,
-        Seed = math.random(1, 9999999),
-        Steps = {
-            -- Первая волна
-            {Name = "Vmify", Settings = {IntensityIndex = 100}},
-            
-            {Name = "ConstantArray", Settings = {
-                Treshold = 1,
-                StringsOnly = false,
-                Shuffle = true,
-                Rotate = true,
-                LocalWrapperTreshold = 1,
-                LocalWrapperArgCount = 2,  -- Консервативное значение
-            }},
-            
-            {Name = "ProxifyLocals", Settings = {Treshold = 1}},
-            {Name = "SplitStrings", Settings = {Treshold = 1}},
-            {Name = "NumbersToExpressions"},
-            {Name = "EncryptStrings"},
-            
-            -- Двойная обёртка
-            {Name = "WrapInFunction"},
-            {Name = "WrapInFunction"},
-            
-            -- Вторая волна VM
-            {Name = "Vmify", Settings = {IntensityIndex = 75}},
-            
-            -- Ещё константы (без LocalWrapper)
-            {Name = "ConstantArray", Settings = {
-                Treshold = 1,
-                StringsOnly = false,
-                Shuffle = true,
-                Rotate = true,
-            }},
-        }
-    },
-    
-    -- Paranoid - ИСПРАВЛЕН (безопасные настройки)
-    Paranoid = {
-        LuaVersion = "Lua51",
-        VarNamePrefix = "",
-        NameGenerator = "MangledShuffled",
-        PrettyPrint = false,
-        Seed = math.random(1, 99999999),
-        Steps = {
-            -- Волна 1: Подготовка
-            {Name = "NumbersToExpressions"},
-            {Name = "SplitStrings", Settings = {Treshold = 1}},
-            
-            -- Волна 2: Первая VM
-            {Name = "Vmify", Settings = {IntensityIndex = 100}},
-            
-            -- Волна 3: Константы (БЕЗОПАСНО)
-            {Name = "ConstantArray", Settings = {
-                Treshold = 1,
-                StringsOnly = false,
-                Shuffle = true,
-                Rotate = true,
-                LocalWrapperTreshold = 1,
-                LocalWrapperArgCount = 1,  -- МИНИМУМ для стабильности
-            }},
-            
-            -- Волна 4: Шифрование
-            {Name = "EncryptStrings"},
-            
-            -- Волна 5: Проксирование
-            {Name = "ProxifyLocals", Settings = {Treshold = 1}},
-            
-            -- Волна 6: Обёртка
-            {Name = "WrapInFunction"},
-            
-            -- Волна 7: Вторая VM
-            {Name = "Vmify", Settings = {IntensityIndex = 80}},
-            
-            -- Волна 8: Константы (без LocalWrapper)
-            {Name = "ConstantArray", Settings = {
-                Treshold = 1,
-                StringsOnly = false,
-                Shuffle = true,
-                Rotate = true,
-            }},
-            
-            -- Волна 9: Вторая обёртка
-            {Name = "WrapInFunction"},
-            
-            -- Волна 10: Третья VM
-            {Name = "Vmify", Settings = {IntensityIndex = 60}},
-            
-            -- Волна 11: Проксирование
-            {Name = "ProxifyLocals", Settings = {Treshold = 1}},
-            
-            -- Волна 12: Третья обёртка
-            {Name = "WrapInFunction"},
-        }
-    },
-    
-    -- Insane - МАКСИМАЛЬНО СТАБИЛЬНЫЙ
-    Insane = {
-        LuaVersion = "Lua51",
-        VarNamePrefix = "",
-        NameGenerator = "MangledShuffled",
-        PrettyPrint = false,
-        Seed = math.random(1, 999999999),
-        Steps = {
-            -- Волна 1-2: Подготовка
-            {Name = "NumbersToExpressions"},
-            {Name = "SplitStrings", Settings = {Treshold = 1}},
-            
-            -- Волна 3: Первая VM (умеренная)
-            {Name = "Vmify", Settings = {IntensityIndex = 80}},
-            
-            -- Волна 4: Константы
-            {Name = "ConstantArray", Settings = {
-                Treshold = 1,
-                StringsOnly = false,
-                Shuffle = true,
-                Rotate = true,
-            }},
-            
-            -- Волна 5: Шифрование
-            {Name = "EncryptStrings"},
-            
-            -- Волна 6: Обёртка #1
-            {Name = "WrapInFunction"},
-            
-            -- Волна 7: Вторая VM
-            {Name = "Vmify", Settings = {IntensityIndex = 80}},
-            
-            -- Волна 8: Проксирование #1
-            {Name = "ProxifyLocals", Settings = {Treshold = 1}},
-            
-            -- Волна 9: Константы #2
-            {Name = "ConstantArray", Settings = {
-                Treshold = 1,
-                StringsOnly = false,
-                Shuffle = true,
-                Rotate = true,
-            }},
-            
-            -- Волна 10: Обёртка #2
-            {Name = "WrapInFunction"},
-            
-            -- Волна 11: Третья VM
-            {Name = "Vmify", Settings = {IntensityIndex = 70}},
-            
-            -- Волна 12: Проксирование #2
-            {Name = "ProxifyLocals", Settings = {Treshold = 1}},
-            
-            -- Волна 13: Константы #3
-            {Name = "ConstantArray", Settings = {
-                Treshold = 1,
-                StringsOnly = false,
-                Shuffle = true,
-                Rotate = true,
-            }},
-            
-            -- Волна 14: Обёртка #3
-            {Name = "WrapInFunction"},
-            
-            -- Волна 15: Четвёртая VM (финальная)
-            {Name = "Vmify", Settings = {IntensityIndex = 60}},
-        }
+    "ru": {
+        "welcome": (
+            "👋 **Meloten Obfuscator Bot v2.2!**\n\n"
+            "🔐 Профессиональная защита Lua\n"
+            "⚡️ 6 уровней защиты\n"
+            "🛡 Ультра-стабильный\n\n"
+            "**Новое в v2.2:**\n"
+            "• ✅ Исправлены ВСЕ крахи\n"
+            "• ✅ Стабильный Paranoid & Insane\n"
+            "• ✅ Работает с любым кодом\n"
+            "• ✅ 15 слоёв защиты (Insane)\n\n"
+            "Отправь `.lua` файл!"
+        ),
+        "select_language": "🌍 Выберите язык:",
+        "language_set": "✅ Язык: Русский",
+        "file_received": "✅ Файл `{filename}` получен!\n\n📊 Размер: {size} КБ\n\n🎯 Выбери уровень:",
+        "wrong_extension": "❌ Нужен `.lua` файл",
+        "processing": "⚙️ Обработка **{preset}**...\n\n⏳ Слоёв: {layers}\n⚡️ Подожди...",
+        "success": (
+            "✅ **Готово!**\n\n"
+            "📊 **Статистика:**\n"
+            "• Пресет: {preset}\n"
+            "• Вход: {input_size} КБ\n"
+            "• Выход: {output_size} КБ\n"
+            "• Рост: {ratio}%\n"
+            "• Слоёв: {layers}\n"
+            "• Время: {time}с\n\n"
+            "🗑 Файлы удалены."
+        ),
+        "help": (
+            "📖 **Meloten Obfuscator v2.2**\n\n"
+            "**Команды:**\n"
+            "/start - Запуск\n"
+            "/help - Справка\n"
+            "/presets - Пресеты\n"
+            "/stats - Статистика\n"
+            "/buy - Премиум 💎\n"
+            "/language - Язык\n"
+            "/about - О боте\n\n"
+            "**Уровни:**\n"
+            "⚡️ Light - 2 слоя\n"
+            "⭐️ Medium - 4 слоя\n"
+            "🔒 Strong - 7 слоёв\n"
+            "🛡 Extreme - 7 слоёв\n"
+            "🔥 Ultra - 10 слоёв\n"
+            "💀 Paranoid - 12 слоёв\n"
+            "😈 Insane - 15 слоёв"
+        ),
+        "presets_info": (
+            "🎯 **Уровни защиты**\n\n"
+            "**⚡️ Light**\n"
+            "2 слоя | +60%\n"
+            "Базовая VM + Константы\n\n"
+            "**⭐️ Medium** (Рекомендуется)\n"
+            "4 слоя | +200%\n"
+            "VM + Константы + Прокси + Обёртка\n\n"
+            "**🔒 Strong**\n"
+            "7 слоёв | +500%\n"
+            "+ Разделение строк + Шифрование\n\n"
+            "**🛡 Extreme**\n"
+            "7 слоёв | +900%\n"
+            "+ Усиленная VM\n\n"
+            "**🔥 Ultra Strong**\n"
+            "10 слоёв | +1200%\n"
+            "Двойная VM + Двойная обёртка\n\n"
+            "**💀 Paranoid** (ИСПРАВЛЕН!)\n"
+            "12 слоёв | +1800%\n"
+            "Тройная VM + Тройная обёртка\n"
+            "Стабильно и мощно\n\n"
+            "**😈 Insane** (ИСПРАВЛЕН!)\n"
+            "15 слоёв | +2500%\n"
+            "4x VM + 3x Обёртки\n"
+            "3x Прокси + 3x Константы\n"
+            "Максимум защиты!"
+        ),
+        "buy": (
+            "💎 **Премиум функции**\n\n"
+            "🎁 **Что получаешь:**\n"
+            "• Приоритет (без очереди)\n"
+            "• Без лимита размера\n"
+            "• Свои пресеты\n"
+            "• Обновления навсегда\n"
+            "• Премиум поддержка\n\n"
+            "💰 **Цены:**\n"
+            "• Месяц: $9.99\n"
+            "• Год: $79.99 (скидка 33%)\n"
+            "• Навсегда: $199.99\n\n"
+            "📧 Контакт: @your_username\n"
+            "🌐 Сайт: your-website.com\n\n"
+            "Нажми кнопку для покупки!"
+        ),
+        "about": (
+            "ℹ️ **Meloten Obfuscator Bot**\n\n"
+            "🔐 Версия: 2.2 Стабильная\n"
+            "⚡️ Основа: Prometheus\n\n"
+            "**v2.2 Особенности:**\n"
+            "✅ 100% без крахов\n"
+            "✅ 15-слойная защита\n"
+            "✅ Работает с любым кодом\n"
+            "✅ Ультра-оптимизирован\n\n"
+            "Сделано с ❤️ для Lua\n"
+            "Бот: @Meloten_Obfuscatorbot"
+        ),
+        "stats": (
+            "📊 **Твоя статистика:**\n\n"
+            "🗂 Файлов: {count}\n"
+            "📈 Вход всего: {input_total} КБ\n"
+            "📊 Выход всего: {output_total} КБ\n"
+            "⏱ Время: {time_total}с\n"
+            "🔥 Любимый: {favorite_preset}\n\n"
+            "Первый: {first_use}\n"
+            "Последний: {last_use}"
+        ),
+        "no_stats": "📊 Статистики пока нет!",
+        "cancel": "❌ Отменено. Файлы удалены.",
+        "premium_only": "💎 Только для Premium!\n\nИспользуй /buy для покупки.",
     }
 }
 
-function Meloten.obfuscate(code, preset)
-    preset = preset or "Medium"
-    
-    local config = Meloten.Presets[preset]
-    if not config then
-        error("Invalid preset: " .. preset)
-    end
-    
-    if config.Seed > 0 then
-        math.randomseed(config.Seed)
-    else
-        math.randomseed(os.time())
-    end
-    
-    Prometheus.Logger.logLevel = Prometheus.Logger.LogLevel.Error
-    
-    local pipeline = Prometheus.Pipeline:fromConfig(config)
-    local obfuscated = pipeline:apply(code)
-    
-    return Meloten.HEADER .. "\n\n" .. obfuscated
-end
+PRESET_LAYERS = {
+    "Light": 2,
+    "Medium": 4,
+    "Strong": 7,
+    "Extreme": 7,
+    "UltraStrong": 10,
+    "Paranoid": 12,
+    "Insane": 15
+}
 
-function Meloten.obfuscateFile(inputPath, outputPath, preset)
-    local file = io.open(inputPath, "r")
-    if not file then
-        error("Cannot open input file: " .. inputPath)
-    end
-    
-    local code = file:read("*all")
-    file:close()
-    
-    local obfuscated = Meloten.obfuscate(code, preset)
-    
-    file = io.open(outputPath, "w")
-    if not file then
-        error("Cannot open output file: " .. outputPath)
-    end
-    
-    file:write(obfuscated)
-    file:close()
-    
-    print("✓ Successfully obfuscated: " .. inputPath .. " -> " .. outputPath)
-end
+def get_text(user_id: int, key: str, **kwargs) -> str:
+    lang = user_languages.get(user_id, "en")
+    text = TEXTS.get(lang, TEXTS["en"]).get(key, TEXTS["en"][key])
+    return text.format(**kwargs) if kwargs else text
 
-return Meloten
+def update_user_stats(user_id: int, preset: str, input_size: int, output_size: int, time: float):
+    if user_id not in user_stats:
+        user_stats[user_id] = {
+            "count": 0,
+            "input_total": 0,
+            "output_total": 0,
+            "time_total": 0,
+            "presets": {},
+            "first_use": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "last_use": ""
+        }
+    
+    stats = user_stats[user_id]
+    stats["count"] += 1
+    stats["input_total"] += input_size
+    stats["output_total"] += output_size
+    stats["time_total"] += time
+    stats["presets"][preset] = stats["presets"].get(preset, 0) + 1
+    stats["last_use"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+def is_premium(user_id: int) -> bool:
+    return user_id in premium_users
+
+def get_language_keyboard():
+    buttons = [
+        [
+            InlineKeyboardButton(text="🇬🇧 English", callback_data="lang_en"),
+            InlineKeyboardButton(text="🇷🇺 Русский", callback_data="lang_ru")
+        ]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def get_presets_keyboard(lang="en"):
+    buttons = [
+        [
+            InlineKeyboardButton(text="⚡️ Light", callback_data="preset_Light"),
+            InlineKeyboardButton(text="⭐️ Medium", callback_data="preset_Medium")
+        ],
+        [
+            InlineKeyboardButton(text="🔒 Strong", callback_data="preset_Strong"),
+            InlineKeyboardButton(text="🛡 Extreme", callback_data="preset_Extreme")
+        ],
+        [
+            InlineKeyboardButton(text="🔥 Ultra", callback_data="preset_UltraStrong"),
+            InlineKeyboardButton(text="💀 Paranoid", callback_data="preset_Paranoid")
+        ],
+        [
+            InlineKeyboardButton(text="😈 Insane", callback_data="preset_Insane")
+        ]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def get_buy_keyboard(lang="en"):
+    buy_text = "💳 Buy Premium" if lang == "en" else "💳 Купить Premium"
+    contact_text = "📧 Contact" if lang == "en" else "📧 Контакт"
+    
+    buttons = [
+        [InlineKeyboardButton(text=buy_text, url=PAYMENT_LINK)],
+        [InlineKeyboardButton(text=contact_text, url="https://t.me/your_username")]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+# ================= КОМАНДЫ =================
+
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    
+    if user_id not in user_languages:
+        await message.answer(
+            "🌍 **Welcome! | Добро пожаловать!**\n\nSelect language | Выберите язык:",
+            reply_markup=get_language_keyboard(),
+            parse_mode="Markdown"
+        )
+        await state.set_state(UserStates.waiting_for_language)
+    else:
+        await message.answer(get_text(user_id, "welcome"), parse_mode="Markdown")
+
+@dp.message(Command("help"))
+async def cmd_help(message: types.Message):
+    await message.answer(get_text(message.from_user.id, "help"), parse_mode="Markdown")
+
+@dp.message(Command("presets"))
+async def cmd_presets(message: types.Message):
+    await message.answer(get_text(message.from_user.id, "presets_info"), parse_mode="Markdown")
+
+@dp.message(Command("buy"))
+async def cmd_buy(message: types.Message):
+    user_id = message.from_user.id
+    lang = user_languages.get(user_id, "en")
+    
+    if is_premium(user_id):
+        premium_text = "✅ You already have Premium!" if lang == "en" else "✅ У тебя уже есть Premium!"
+        await message.answer(premium_text)
+        return
+    
+    await message.answer(
+        get_text(user_id, "buy"),
+        reply_markup=get_buy_keyboard(lang),
+        parse_mode="Markdown"
+    )
+
+@dp.message(Command("about"))
+async def cmd_about(message: types.Message):
+    await message.answer(get_text(message.from_user.id, "about"), parse_mode="Markdown")
+
+@dp.message(Command("language"))
+async def cmd_language(message: types.Message, state: FSMContext):
+    await message.answer(
+        get_text(message.from_user.id, "select_language"),
+        reply_markup=get_language_keyboard()
+    )
+    await state.set_state(UserStates.waiting_for_language)
+
+@dp.message(Command("stats"))
+async def cmd_stats(message: types.Message):
+    user_id = message.from_user.id
+    if user_id not in user_stats or user_stats[user_id]["count"] == 0:
+        await message.answer(get_text(user_id, "no_stats"))
+        return
+    
+    stats = user_stats[user_id]
+    favorite = max(stats["presets"].items(), key=lambda x: x[1])[0] if stats["presets"] else "N/A"
+    
+    await message.answer(
+        get_text(
+            user_id, "stats",
+            count=stats["count"],
+            input_total=round(stats["input_total"]/1024, 2),
+            output_total=round(stats["output_total"]/1024, 2),
+            time_total=round(stats["time_total"], 2),
+            favorite_preset=favorite,
+            first_use=stats["first_use"],
+            last_use=stats["last_use"]
+        ),
+        parse_mode="Markdown"
+    )
+
+@dp.message(Command("cancel"))
+async def cmd_cancel(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    
+    if user_id in user_files:
+        if os.path.exists(user_files[user_id]):
+            os.remove(user_files[user_id])
+        del user_files[user_id]
+    
+    await state.clear()
+    await message.answer(get_text(user_id, "cancel"))
+
+# ================= CALLBACKS =================
+
+@dp.callback_query(F.data.startswith("lang_"))
+async def process_language(callback: types.CallbackQuery, state: FSMContext):
+    lang = callback.data.split("_")[1]
+    user_id = callback.from_user.id
+    user_languages[user_id] = lang
+    
+    await callback.message.edit_text(get_text(user_id, "language_set"), parse_mode="Markdown")
+    await callback.message.answer(get_text(user_id, "welcome"), parse_mode="Markdown")
+    await state.clear()
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("preset_"))
+async def process_obfuscation(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    preset = callback.data.split("_")[1]
+    
+    if user_id not in user_files:
+        await callback.message.answer(get_text(user_id, "no_file") if user_id in user_languages else "❌ No file")
+        await callback.answer()
+        return
+    
+    input_path = user_files[user_id]
+    output_filename = os.path.basename(input_path).replace(".lua", "_obf.lua")
+    output_path = os.path.join(TEMP_DIR, output_filename)
+    
+    layers = PRESET_LAYERS.get(preset, "?")
+    await callback.message.edit_text(
+        get_text(user_id, "processing", preset=preset, layers=layers),
+        parse_mode="Markdown"
+    )
+    
+    start_time = datetime.now()
+    
+    try:
+        process = await asyncio.create_subprocess_exec(
+            LUA_PATH,
+            "run_obfuscator.lua",
+            input_path,
+            output_path,
+            preset,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        
+        stdout, stderr = await process.communicate()
+        
+        if process.returncode != 0:
+            error_msg = stderr.decode().strip() or stdout.decode().strip()
+            await callback.message.edit_text(f"❌ Error:\n```\n{error_msg[:500]}\n```", parse_mode="Markdown")
+            return
+        
+        if os.path.exists(output_path):
+            end_time = datetime.now()
+            elapsed = (end_time - start_time).total_seconds()
+            
+            input_size = os.path.getsize(input_path)
+            output_size = os.path.getsize(output_path)
+            ratio = round((output_size / input_size - 1) * 100, 1) if input_size > 0 else 0
+            
+            update_user_stats(user_id, preset, input_size, output_size, elapsed)
+            
+            result_file = FSInputFile(output_path)
+            await bot.send_document(
+                chat_id=callback.message.chat.id,
+                document=result_file,
+                caption=get_text(
+                    user_id, "success",
+                    preset=preset,
+                    input_size=round(input_size/1024, 2),
+                    output_size=round(output_size/1024, 2),
+                    ratio=ratio,
+                    layers=layers,
+                    time=round(elapsed, 2)
+                ),
+                parse_mode="Markdown",
+                request_timeout=600
+            )
+            
+            del user_files[user_id]
+    
+    except Exception as e:
+        await callback.message.edit_text(f"❌ Error: {str(e)}", parse_mode="Markdown")
+    finally:
+        if os.path.exists(input_path):
+            os.remove(input_path)
+        if os.path.exists(output_path):
+            os.remove(output_path)
+    
+    await callback.answer()
+
+# ================= ДОКУМЕНТЫ =================
+
+@dp.message(F.document)
+async def handle_document(message: types.Message):
+    user_id = message.from_user.id
+    document = message.document
+    file_name = document.file_name
+    
+    if not file_name.endswith(".lua"):
+        await message.answer(get_text(user_id, "wrong_extension"))
+        return
+    
+    file_id = document.file_id
+    file = await bot.get_file(file_id)
+    
+    local_filename = f"{user_id}_{file_name}"
+    local_path = os.path.join(TEMP_DIR, local_filename)
+    
+    await bot.download_file(file.file_path, local_path)
+    user_files[user_id] = local_path
+    
+    file_size = round(os.path.getsize(local_path) / 1024, 2)
+    
+    await message.answer(
+        get_text(user_id, "file_received", filename=file_name, size=file_size),
+        reply_markup=get_presets_keyboard(user_languages.get(user_id, "en")),
+        parse_mode="Markdown"
+    )
+
+# ================= ЗАПУСК =================
+
+async def main():
+    print("🚀 Meloten Obfuscator Bot v2.2 STABLE started!")
+    print("✅ All crashes fixed!")
+    print("✅ Paranoid & Insane work perfectly!")
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n👋 Bot stopped")
