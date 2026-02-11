@@ -1,119 +1,143 @@
--- Meloten Obfuscator v2.0 - ОБНОВЛЁННАЯ ВЕРСИЯ
--- Новые пресеты: UltraStrong и Paranoid
+-- Meloten Ultra - Максимальная защита от деобфускации
+-- Добавьте этот пресет в meloten.lua
 
--- Настройка путей
-package.path = package.path .. ";./src/?.lua;./src/?/init.lua"
-local Prometheus = require("prometheus")
-
-local Meloten = {}
-Meloten.VERSION = "2.0"
-Meloten.HEADER = [[--[[This file was protected using Meloten Obfuscator
-v]] .. Meloten.VERSION .. [[
-Advanced Anti-Deobfuscation Protection Enabled
-]]
-
-Meloten.Presets = {
-    Light = {
-        LuaVersion = "Lua51",
-        VarNamePrefix = "",
-        NameGenerator = "MangledShuffled",
-        PrettyPrint = false,
-        Seed = 0,
-        Steps = {
-            {Name = "Vmify", Settings = {IntensityIndex = 20}},
-            {Name = "ConstantArray", Settings = {Treshold = 1, StringsOnly = true, Shuffle = true, Rotate = true}},
-        }
-    },
-    
-    Medium = {
-        LuaVersion = "Lua51",
-        VarNamePrefix = "",
-        NameGenerator = "MangledShuffled",
-        PrettyPrint = false,
-        Seed = 0,
-        Steps = {
-            {Name = "Vmify", Settings = {IntensityIndex = 50}},
-            {Name = "ConstantArray", Settings = {Treshold = 1, StringsOnly = false, Shuffle = true, Rotate = true, LocalWrapperTreshold = 1}},
-            {Name = "ProxifyLocals", Settings = {Treshold = 1}},
-            {Name = "WrapInFunction"},
-        }
-    },
-    
-    Strong = {
-        LuaVersion = "Lua51",
-        VarNamePrefix = "",
-        NameGenerator = "MangledShuffled",
-        PrettyPrint = false,
-        Seed = 0,
-        Steps = {
-            {Name = "Vmify", Settings = {IntensityIndex = 100}},
-            {Name = "ConstantArray", Settings = {Treshold = 1, StringsOnly = false, Shuffle = true, Rotate = true, LocalWrapperTreshold = 1}},
-            {Name = "ProxifyLocals", Settings = {Treshold = 1}},
-            {Name = "SplitStrings", Settings = {Treshold = 1}},
-            {Name = "NumbersToExpressions"},
-            {Name = "WrapInFunction"},
-            {Name = "EncryptStrings"},
-        }
-    },
-    
-    Extreme = {
-        LuaVersion = "Lua51",
-        VarNamePrefix = "_MLT_",
-        NameGenerator = "MangledShuffled",
-        PrettyPrint = false,
-        Seed = math.random(1, 999999),
-        Steps = {
-            {Name = "Vmify", Settings = {IntensityIndex = 200}},
-            {Name = "ConstantArray", Settings = {Treshold = 1, StringsOnly = false, Shuffle = true, Rotate = true, LocalWrapperTreshold = 1, LocalWrapperArgCount = 3}},
-            {Name = "ProxifyLocals", Settings = {Treshold = 1}},
-            {Name = "SplitStrings", Settings = {Treshold = 1}},
-            {Name = "NumbersToExpressions"},
-            {Name = "WrapInFunction"},
-            {Name = "EncryptStrings"},
-        }
-    },
-    
-    -- НОВЫЙ: Ultra Strong - с анти-деобфускацией
-    UltraStrong = {
-        LuaVersion = "Lua51",
-        VarNamePrefix = "",
-        NameGenerator = "MangledShuffled",
-        PrettyPrint = false,
-        Seed = math.random(1, 9999999),
-        Steps = {
-            -- Анти-деобфускация (если подключён step)
-            -- {Name = "AntiDeobfuscation", Settings = {deadCodeCount = 10, trapCount = 5, antiPatternCount = 4}},
-            {Name = "Vmify", Settings = {IntensityIndex = 250}},
-            {Name = "ConstantArray", Settings = {
+UltraStrong = {
+    LuaVersion = "Lua51",
+    VarNamePrefix = "",
+    NameGenerator = "MangledShuffled",
+    PrettyPrint = false,
+    Seed = math.random(1, 9999999),
+    Steps = {
+        -- 1. Анти-деобфускация (новый step)
+        {
+            Name = "AntiDeobfuscation",
+            Settings = {
+                deadCodeCount = 10,      -- Много мусорного кода
+                trapCount = 5,           -- Много ловушек
+                antiPatternCount = 4,    -- Анти-паттерны
+            }
+        },
+        
+        -- 2. Анти-отладка
+        {
+            Name = "AntiDebug",
+            Settings = {
+                snippetCount = 4,
+            }
+        },
+        
+        -- 3. Многослойное шифрование строк
+        {
+            Name = "MultiLayerStringEncrypt",
+            Settings = {}
+        },
+        
+        -- 4. Максимальная VM виртуализация
+        {
+            Name = "Vmify",
+            Settings = {
+                IntensityIndex = 250,  -- ЕЩЁ СИЛЬНЕЕ
+            }
+        },
+        
+        -- 5. Константный массив
+        {
+            Name = "ConstantArray",
+            Settings = {
                 Treshold = 1,
                 StringsOnly = false,
                 Shuffle = true,
                 Rotate = true,
                 LocalWrapperTreshold = 1,
-                LocalWrapperArgCount = 5,
-                LocalWrapperCount = 3,
-            }},
-            {Name = "ProxifyLocals", Settings = {Treshold = 1}},
-            {Name = "SplitStrings", Settings = {Treshold = 1}},
-            {Name = "NumbersToExpressions"},
-            {Name = "WrapInFunction"},
-            {Name = "WrapInFunction"},  -- Двойная обёртка
-            {Name = "EncryptStrings"},
-        }
-    },
-    
-    -- НОВЫЙ: Paranoid - максимальная защита
-    Paranoid = {
-        LuaVersion = "Lua51",
-        VarNamePrefix = "",
-        NameGenerator = "MangledShuffled",
-        PrettyPrint = false,
-        Seed = math.random(1, 99999999),
-        Steps = {
-            -- Анти-деобфускация на максимум (если подключён)
-            -- {Name = "AntiDeobfuscation", Settings = {deadCodeCount = 20, trapCount = 10, antiPatternCount = 8}},
-            {Name = "Vmify", Settings = {IntensityIndex = 300}},
-            {Name = "ConstantArray", Settings = {
+                LocalWrapperArgCount = 5,  -- Больше аргументов
+                LocalWrapperCount = 3,     -- Больше обёрток
+            }
+        },
+        
+        -- 6. Проксирование локальных переменных
+        {
+            Name = "ProxifyLocals",
+            Settings = {
+                Treshold = 1,
+            }
+        },
+        
+        -- 7. Разделение строк
+        {
+            Name = "SplitStrings",
+            Settings = {
+                Treshold = 1,
+            }
+        },
+        
+        -- 8. Числа в выражения
+        {
+            Name = "NumbersToExpressions",
+        },
+        
+        -- 9. Обфускация потока управления
+        {
+            Name = "ControlFlowFlatten",
+            Settings = {
+                complexity = 8,  -- Максимальная сложность
+            }
+        },
+        
+        -- 10. Обёртка в функции (несколько раз)
+        {
+            Name = "WrapInFunction",
+        },
+        {
+            Name = "WrapInFunction",  -- Двойная обёртка
+        },
+        
+        -- 11. Финальное шифрование строк
+        {
+            Name = "EncryptStrings",
+        },
+    }
+}
+
+-- Meloten Paranoid - Для абсолютной защиты (медленный)
+Paranoid = {
+    LuaVersion = "Lua51",
+    VarNamePrefix = "",
+    NameGenerator = "MangledShuffled",
+    PrettyPrint = false,
+    Seed = math.random(1, 99999999),
+    Steps = {
+        -- Анти-деобфускация с максимальными настройками
+        {
+            Name = "AntiDeobfuscation",
+            Settings = {
+                deadCodeCount = 20,
+                trapCount = 10,
+                antiPatternCount = 8,
+            }
+        },
+        
+        -- Тройная анти-отладка
+        {
+            Name = "AntiDebug",
+            Settings = {snippetCount = 4}
+        },
+        
+        -- Многослойное шифрование
+        {
+            Name = "MultiLayerStringEncrypt",
+            Settings = {}
+        },
+        
+        -- МАКСИМАЛЬНАЯ виртуализация
+        {
+            Name = "Vmify",
+            Settings = {IntensityIndex = 300}
+        },
+        
+        -- Константный массив
+        {
+            Name = "ConstantArray",
+            Settings = {
                 Treshold = 1,
                 StringsOnly = false,
                 Shuffle = true,
@@ -121,61 +145,52 @@ Meloten.Presets = {
                 LocalWrapperTreshold = 1,
                 LocalWrapperArgCount = 7,
                 LocalWrapperCount = 5,
-            }},
-            {Name = "ProxifyLocals", Settings = {Treshold = 1}},
-            {Name = "SplitStrings", Settings = {Treshold = 1}},
-            {Name = "NumbersToExpressions"},
-            {Name = "WrapInFunction"},
-            {Name = "WrapInFunction"},
-            {Name = "WrapInFunction"},  -- Тройная обёртка!
-            {Name = "EncryptStrings"},
-            {Name = "Vmify", Settings = {IntensityIndex = 100}},  -- Ещё раз VM!
-        }
-    },
+            }
+        },
+        
+        -- Проксирование
+        {
+            Name = "ProxifyLocals",
+            Settings = {Treshold = 1}
+        },
+        
+        -- Разделение строк
+        {
+            Name = "SplitStrings",
+            Settings = {Treshold = 1}
+        },
+        
+        -- Числа в выражения
+        {
+            Name = "NumbersToExpressions",
+        },
+        
+        -- Control flow
+        {
+            Name = "ControlFlowFlatten",
+            Settings = {complexity = 10}  -- МАКСИМУМ
+        },
+        
+        -- ТРОЙНАЯ обёртка
+        {
+            Name = "WrapInFunction",
+        },
+        {
+            Name = "WrapInFunction",
+        },
+        {
+            Name = "WrapInFunction",
+        },
+        
+        -- Финальное шифрование
+        {
+            Name = "EncryptStrings",
+        },
+        
+        -- Ещё раз виртуализация для усиления
+        {
+            Name = "Vmify",
+            Settings = {IntensityIndex = 100}
+        },
+    }
 }
-
-function Meloten.obfuscate(code, preset)
-    preset = preset or "Medium"
-    
-    local config = Meloten.Presets[preset]
-    if not config then
-        error("Invalid preset: " .. preset)
-    end
-    
-    if config.Seed > 0 then
-        math.randomseed(config.Seed)
-    else
-        math.randomseed(os.time())
-    end
-    
-    Prometheus.Logger.logLevel = Prometheus.Logger.LogLevel.Error
-    
-    local pipeline = Prometheus.Pipeline:fromConfig(config)
-    local obfuscated = pipeline:apply(code)
-    
-    return Meloten.HEADER .. "\n\n" .. obfuscated
-end
-
-function Meloten.obfuscateFile(inputPath, outputPath, preset)
-    local file = io.open(inputPath, "r")
-    if not file then
-        error("Cannot open input file: " .. inputPath)
-    end
-    
-    local code = file:read("*all")
-    file:close()
-    
-    local obfuscated = Meloten.obfuscate(code, preset)
-    
-    file = io.open(outputPath, "w")
-    if not file then
-        error("Cannot open output file: " .. outputPath)
-    end
-    
-    file:write(obfuscated)
-    file:close()
-    
-    print("✓ Successfully obfuscated: " .. inputPath .. " -> " .. outputPath)
-end
-
-return Meloten
