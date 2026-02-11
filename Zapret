@@ -1,227 +1,26 @@
--- Упрощённый Telegram Bot для Meloten (использует lua-telegram-bot)
--- Установка: luarocks install lua-telegram-bot
+-- run_obfuscator.lua
+-- Этот скрипт запускается Питоном
 
-local telegram = require("telegram-bot-api")
-local Meloten = require("meloten")
+local Meloten = require("meloten") -- Подключаем твое ядро
 
--- ============================================
--- КОНФИГУРАЦИЯ
--- ============================================
+-- Получаем аргументы от Python (из командной строки)
+local input_file = arg[1]
+local output_file = arg[2]
+local preset = arg[3] or "Medium" -- Если пресет не передан, ставим Medium
 
-local BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"  -- ← ЗАМЕНИТЕ НА ВАШ ТОКЕН
+print("Lua: Начинаю обработку...")
+print("Вход: " .. input_file)
+print("Пресет: " .. preset)
 
--- Создаём бота
-local bot = telegram.new(BOT_TOKEN)
-
--- Папки для временных файлов
-local TEMP_DIR = "./temp_bot_files/"
-os.execute("mkdir -p " .. TEMP_DIR)
-
--- Хранилище состояний пользователей
-local users = {}
-
--- ============================================
--- УТИЛИТЫ
--- ============================================
-
-local function log(msg)
-    print(string.format("[%s] %s", os.date("%H:%M:%S"), msg))
-end
-
-local function cleanupUser(userId)
-    if users[userId] then
-        -- Удаляем файлы
-        if users[userId].inputFile then
-            os.remove(users[userId].inputFile)
-        end
-        if users[userId].outputFile then
-            os.remove(users[userId].outputFile)
-        end
-        -- Очищаем состояние
-        users[userId] = nil
-        log("Очищены файлы пользователя: " .. userId)
-    end
-end
-
-local function getFileSize(path)
-    local file = io.open(path, "r")
-    if not file then return 0 end
-    local size = file:seek("end")
-    file:close()
-    return size
-end
-
--- ============================================
--- КОМАНДЫ
--- ============================================
-
-bot:onCommand("start", function(msg)
-    bot:sendMessage(msg.chat.id, [[
-🔐 *Meloten Obfuscator Bot*
-
-Привет! Я обфусцирую твой Lua код.
-
-*Инструкция:*
-1. Отправь мне .lua файл
-2. Выбери пресет (/light, /medium, /strong, /extreme)
-3. Получи защищённый файл
-
-*Команды:*
-/start - Это сообщение
-/help - Подробная справка
-/cancel - Отменить операцию
-
-Отправляй файл! 🚀
-]], {parse_mode = "Markdown"})
+-- Запускаем обфускацию
+-- (Убедись, что функция называется именно так, как в твоем модуле)
+local success, err = pcall(function()
+    Meloten.obfuscateFile(input_file, output_file, preset)
 end)
 
-bot:onCommand("help", function(msg)
-    bot:sendMessage(msg.chat.id, [[
-📖 *Справка*
-
-*Пресеты:*
-
-*Light* ⚡ - /light
-Быстро, размер +60%
-
-*Medium* ⭐ - /medium
-Сбалансированно, +200%
-
-*Strong* 🔒 - /strong
-Сильная защита, +500%
-
-*Extreme* 🛡️ - /extreme
-• Максимум защиты
-• Анти-отладка
-• 3-слойное шифрование
-• +900% размера
-
-Все файлы автоматически удаляются!
-]], {parse_mode = "Markdown"})
-end)
-
-bot:onCommand("cancel", function(msg)
-    cleanupUser(msg.from.id)
-    bot:sendMessage(msg.chat.id, "❌ Операция отменена")
-end)
-
--- Обработчики пресетов
-local presets = {
-    light = "Light",
-    medium = "Medium", 
-    strong = "Strong",
-    extreme = "Extreme"
-}
-
-for cmd, preset in pairs(presets) do
-    bot:onCommand(cmd, function(msg)
-        local userId = msg.from.id
-        local chatId = msg.chat.id
-        
-        if not users[userId] or not users[userId].inputFile then
-            bot:sendMessage(chatId, "❌ Сначала отправь .lua файл")
-            return
-        end
-        
-        bot:sendMessage(chatId, "⚙️ Обфусцирую с пресетом *" .. preset .. "*...", {parse_mode = "Markdown"})
-        
-        -- Обфускация
-        local inputPath = users[userId].inputFile
-        local outputPath = TEMP_DIR .. userId .. "_obfuscated.lua"
-        
-        local ok, err = pcall(function()
-            Meloten.obfuscateFile(inputPath, outputPath, preset)
-        end)
-        
-        if not ok then
-            bot:sendMessage(chatId, "❌ Ошибка:\n`" .. tostring(err) .. "`", {parse_mode = "Markdown"})
-            cleanupUser(userId)
-            return
-        end
-        
-        -- Статистика
-        local inSize = getFileSize(inputPath)
-        local outSize = getFileSize(outputPath)
-        local ratio = inSize > 0 and (outSize / inSize * 100) or 0
-        
-        -- Отправляем файл
-        bot:sendDocument(chatId, {
-            document = outputPath,
-            caption = string.format(
-                "✅ Готово!\n\nПресет: %s\nРазмер: %d → %d байт (%.1f%%)",
-                preset, inSize, outSize, ratio
-            )
-        })
-        
-        bot:sendMessage(chatId, "✨ Файлы удалены из памяти")
-        
-        -- Сохраняем путь к output для удаления
-        users[userId].outputFile = outputPath
-        
-        -- Удаляем через 5 секунд
-        os.execute("(sleep 5; rm -f " .. outputPath .. ") &")
-        cleanupUser(userId)
-    end)
+if success then
+    print("Lua: Готово!")
+else
+    print("Lua: Ошибка - " .. tostring(err))
+    os.exit(1) -- Сообщаем Питону, что произошла ошибка
 end
-
--- ============================================
--- ОБРАБОТКА ДОКУМЕНТОВ
--- ============================================
-
-bot:onDocument(function(msg)
-    local chatId = msg.chat.id
-    local userId = msg.from.id
-    local doc = msg.document
-    
-    -- Проверяем расширение
-    if not doc.file_name:match("%.lua$") then
-        bot:sendMessage(chatId, "❌ Нужен .lua файл")
-        return
-    end
-    
-    bot:sendMessage(chatId, "📥 Получаю файл...")
-    
-    -- Скачиваем файл
-    local filePath = TEMP_DIR .. userId .. "_" .. doc.file_name
-    local ok, err = pcall(function()
-        local file = bot:getFile(doc.file_id)
-        bot:downloadFile(file.file_path, filePath)
-    end)
-    
-    if not ok then
-        bot:sendMessage(chatId, "❌ Ошибка скачивания")
-        return
-    end
-    
-    -- Сохраняем состояние
-    users[userId] = {
-        inputFile = filePath,
-        fileName = doc.file_name
-    }
-    
-    bot:sendMessage(chatId, [[
-✅ Файл получен!
-
-Выбери пресет:
-/light - Лёгкий ⚡
-/medium - Средний ⭐
-/strong - Сильный 🔒
-/extreme - Экстремальный 🛡️
-
-/cancel - Отмена
-]], {parse_mode = "Markdown"})
-    
-    log("Файл от " .. userId .. ": " .. doc.file_name)
-end)
-
--- ============================================
--- ЗАПУСК
--- ============================================
-
-log("🚀 Meloten Bot запущен!")
-
--- Очистка при запуске
-os.execute("rm -f " .. TEMP_DIR .. "*")
-
--- Запускаем бота
-bot:run()
