@@ -1,6 +1,161 @@
--- Находим эту строку в начале meloten.lua и заменяем:
+-- Advanced Anti-Deobfuscation Protection Step
+-- Защита от популярных деобфускаторов
 
-Meloten.HEADER = "--[[\n" ..
-    "This file was protected using Meloten Obfuscator v" .. Meloten.VERSION .. "\n" ..
-    "Bot: https://t.me/Meloten_Obfuscator_bot\n" ..
-    "]]"
+local Step = require("prometheus.step");
+local Ast = require("prometheus.ast");
+
+local AntiDeobfuscation = Step:extend();
+AntiDeobfuscation.Description = "Advanced Anti-Deobfuscation Protection";
+AntiDeobfuscation.Name = "AntiDeobfuscation";
+
+-- Генератор случайных имён
+local function randomName(len)
+    local chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_"
+    local name = ""
+    for i = 1, len or math.random(8, 20) do
+        name = name .. chars:sub(math.random(1, #chars), math.random(1, #chars))
+    end
+    return name
+end
+
+-- Генератор мусорного кода (Dead Code Injection)
+local function generateDeadCode()
+    local deadCodeSnippets = {
+        -- Fake математические операции
+        [[
+local ]] .. randomName() .. [[ = function()
+    local ]] .. randomName() .. [[ = math.random(1, 100)
+    for ]] .. randomName() .. [[ = 1, 1000 do
+        ]] .. randomName() .. [[ = (]] .. randomName() .. [[ * 2 + 1) % 256
+    end
+    return ]] .. randomName() .. [[
+end
+]],
+        -- Fake string operations
+        [[
+local ]] .. randomName() .. [[ = ""
+for ]] .. randomName() .. [[ = 1, math.random(50, 100) do
+    ]] .. randomName() .. [[ = ]] .. randomName() .. [[ .. string.char(math.random(65, 90))
+end
+]],
+        -- Fake table operations
+        [[
+local ]] .. randomName() .. [[ = {}
+for ]] .. randomName() .. [[ = 1, math.random(20, 50) do
+    ]] .. randomName() .. [[[]] .. randomName() .. [[] = math.random()
+end
+]],
+        -- Fake function calls
+        [[
+local ]] .. randomName() .. [[ = function(]] .. randomName() .. [[)
+    if type(]] .. randomName() .. [[) == "number" then
+        return ]] .. randomName() .. [[ * 2
+    end
+    return ]] .. randomName() .. [[
+end
+]] .. randomName() .. [[(math.random())
+]]
+    }
+    
+    return deadCodeSnippets[math.random(1, #deadCodeSnippets)]
+end
+
+-- Генератор анти-паттернов для деобфускаторов
+local function generateAntiPattern()
+    local patterns = {
+        -- Запутывание метатаблиц
+        [[
+local ]] .. randomName("_MT") .. [[ = {}
+setmetatable({}, {
+    __index = function(t, k)
+        return rawget(t, k) or ]] .. randomName("_MT") .. [[[k]
+    end,
+    __newindex = function(t, k, v)
+        rawset(]] .. randomName("_MT") .. [[, k, v)
+    end
+})
+]],
+        -- Fake error handlers
+        [[
+local ]] .. randomName("_ERR") .. [[ = function()
+    local ]] .. randomName() .. [[ = pcall(function()
+        error("fake error " .. math.random())
+    end)
+end
+]],
+        -- Environment pollution
+        [[
+local ]] .. randomName("_ENV") .. [[ = getfenv and getfenv() or _ENV
+for ]] .. randomName() .. [[ = 1, 10 do
+    ]] .. randomName("_ENV") .. [[[tostring(math.random())] = math.random()
+end
+]],
+    }
+    
+    return patterns[math.random(1, #patterns)]
+end
+
+-- Вставка ловушек для деобфускаторов
+local function generateTrap()
+    local traps = {
+        -- Проверка на популярные деобфускаторы
+        [[
+do
+    local ]] .. randomName("_CHECK") .. [[ = function()
+        local ]] .. randomName() .. [[ = debug and debug.getinfo(1, "S").source or ""
+        if ]] .. randomName() .. [[:match("deobf") or ]] .. randomName() .. [[:match("beautif") then
+            while true do end
+        end
+    end
+    ]] .. randomName("_CHECK") .. [[()
+end
+]],
+        -- Проверка целостности кода
+        [[
+local ]] .. randomName("_HASH") .. [[ = ]] .. math.random(100000, 999999) .. [[
+if type(]] .. randomName("_HASH") .. [[) ~= "number" then
+    error("integrity check failed")
+end
+]],
+    }
+    
+    return traps[math.random(1, #traps)]
+end
+
+function AntiDeobfuscation:init(options)
+    self.options = options or {}
+    self.options.deadCodeCount = self.options.deadCodeCount or 5
+    self.options.trapCount = self.options.trapCount or 3
+    self.options.antiPatternCount = self.options.antiPatternCount or 2
+end
+
+function AntiDeobfuscation:apply(ast, pipeline)
+    local insertedCode = ""
+    
+    -- Вставляем мусорный код
+    for i = 1, self.options.deadCodeCount do
+        insertedCode = insertedCode .. generateDeadCode() .. "\n"
+    end
+    
+    -- Вставляем анти-паттерны
+    for i = 1, self.options.antiPatternCount do
+        insertedCode = insertedCode .. generateAntiPattern() .. "\n"
+    end
+    
+    -- Вставляем ловушки
+    for i = 1, self.options.trapCount do
+        insertedCode = insertedCode .. generateTrap() .. "\n"
+    end
+    
+    -- Парсим и добавляем в начало AST
+    if insertedCode ~= "" then
+        local parser = require("prometheus.parser")
+        local antiDeobfAst = parser:new({LuaVersion = "Lua51"}):parse(insertedCode)
+        
+        for i = #antiDeobfAst.body, 1, -1 do
+            table.insert(ast.body, 1, antiDeobfAst.body[i])
+        end
+    end
+end
+
+return AntiDeobfuscation;
