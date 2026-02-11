@@ -1,43 +1,4 @@
--- Meloten Obfuscator — FIX 2025
-package.path = package.path .. ";./src/?.lua;./src/prometheus/?.lua;./src/prometheus/steps/?.lua"
-
-local success, Prometheus = pcall(require, "prometheus.prometheus")
-if not success then
-    print("Ошибка: Prometheus не найден. Проверь, лежит ли src/prometheus/prometheus.lua")
-    print("Текущий package.path: " .. package.path)
-    os.exit(1)
-end
-
-local ControlFlowFlatten = require("prometheus.steps.ControlFlowFlatten")
-local JunkCode           = require("prometheus.steps.JunkCode")
-local MelotenHeader      = require("prometheus.steps.MelotenHeader")
-
-local preset = Prometheus.Presets.Strong
-
-local function obfuscate(input, output)
-    local f = io.open(input, "r")
-    if not f then error("Не открывается " .. input) end
-    local code = f:read("*all")
-    f:close()
-
-    print("[Meloten] Обрабатываю...")
-
-    local pipeline = Prometheus.Pipeline:fromConfig(preset)
-    local obf = pipeline:apply(code)
-
-    obf = ControlFlowFlatten:Apply(obf)
-    obf = JunkCode:Apply(obf)
-    obf = MelotenHeader:Apply(obf)
-
-    local out = io.open(output, "w")
-    out:write(obf)
-    out:close()
-
-    print("[Meloten] Готово → " .. output)
-end
-
-if arg[1] and arg[2] then
-    obfuscate(arg[1], arg[2])
-else
-    print("Использование: lua meloten_obfuscate.lua input.lua output.lua")
-end
+-- Meloten Custom Steps (Вставляем сюда)
+Steps.AntiDebug = require("prometheus.steps.AntiDebug");
+Steps.MultiLayerStringEncrypt = require("prometheus.steps.MultiLayerStringEncrypt");
+Steps.ControlFlowFlatten = require("prometheus.steps.ControlFlowFlatten");
