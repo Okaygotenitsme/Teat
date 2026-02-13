@@ -1,638 +1,523 @@
-import asyncio
 import os
+import tempfile
 import subprocess
+import logging
 from datetime import datetime
-from aiogram import Bot, Dispatcher, F, types
-from aiogram.filters import Command
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
-from aiogram.client.session.aiohttp import AiohttpSession
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.storage.memory import MemoryStorage
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    filters,
+    ConversationHandler
+)
 
-# ================= КОНФИГУРАЦИЯ =================
+# Настройка логирования
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
-TOKEN = "YOUR_BOT_TOKEN_HERE"  # ← ВСТАВЬТЕ ТОКЕН
-
-session = AiohttpSession(proxy=None)
-bot = Bot(token=TOKEN, session=session)
-storage = MemoryStorage()
-dp = Dispatcher(storage=storage)
-
-LUA_PATH = "lua55"  # или полный путь к lua.exe
+# Константы
+TOKEN = "YOUR_BOT_TOKEN_HERE"  # Замените на ваш токен
+LUA_OBFUSCATOR_PATH = "./meloten_cli.lua"  # Путь к CLI обфускатора
 TEMP_DIR = "temp_files"
-STATS_FILE = "bot_stats.txt"
 
-if not os.path.exists(TEMP_DIR):
-    os.makedirs(TEMP_DIR)
+# Состояния для ConversationHandler
+WAITING_FOR_FILE, WAITING_FOR_PRESET, WAITING_FOR_URL = range(3)
 
-# Хранилище данных пользователей
-user_files = {}
-user_languages = {}  # Язык каждого пользователя
-user_stats = {}  # Статистика использования
+# Словарь для хранения статистики пользователей
+user_stats = {}
 
-# Состояния для FSM
-class UserStates(StatesGroup):
-    waiting_for_language = State()
-    waiting_for_file = State()
-    waiting_for_preset = State()
+# Языки
+LANGUAGES = {
+    'ru': {
+        'start': '🔥 *Meloten Obfuscator Bot*\n\nДобро пожаловать! Я помогу защитить ваш Lua код.\n\nИспользуйте /help для просмотра всех команд.',
+        'help': '''📚 *Доступные команды:*
 
-# ================= ТЕКСТЫ НА РАЗНЫХ ЯЗЫКАХ =================
+/start - Перезапустить бота
+/help - Показать все команды
+/about - Информация о боте
+/presets - Просмотр пресетов обфускации
+/stats - Ваша статистика
+/loadstring - Создать loadstring с вашей ссылкой
+/buy - Купить Premium версию
+/language - Сменить язык
+/cancel - Отменить текущую обфускацию
 
-TEXTS = {
-    "en": {
-        "welcome": (
-            "👋 **Welcome to Meloten Obfuscator Bot!**\n\n"
-            "🔐 Professional Lua code protection\n"
-            "⚡️ Multiple obfuscation levels\n"
-            "🛡 Anti-debugging & anti-deobfuscation\n\n"
-            "**Features:**\n"
-            "• VM-based virtualization\n"
-            "• Multi-layer string encryption\n"
-            "• Control flow flattening\n"
-            "• Dead code injection\n"
-            "• Anti-pattern protection\n\n"
-            "Send me a `.lua` file to get started!"
-        ),
-        "select_language": "🌍 Select your language:",
-        "language_set": "✅ Language set to English",
-        "send_file": "📂 Send me a `.lua` file to obfuscate",
-        "file_received": "✅ File `{filename}` received!\n\n📊 File size: {size} KB\n\nSelect protection level:",
-        "wrong_extension": "❌ Please send a `.lua` file",
-        "processing": "⚙️ Processing with **{preset}** preset...\n\n⏳ This may take a while...",
-        "success": (
-            "✅ **Obfuscation complete!**\n\n"
-            "📊 **Statistics:**\n"
-            "• Input size: {input_size} KB\n"
-            "• Output size: {output_size} KB\n"
-            "• Size increase: {ratio}%\n"
-            "• Preset: {preset}\n"
-            "• Time: {time}s\n\n"
-            "🗑 Files automatically deleted from bot memory."
-        ),
-        "error_lua": "❌ **Lua Error:**\n```\n{error}\n```",
-        "error_not_found": "❌ Lua interpreter not found!\nCheck LUA_PATH configuration.",
-        "error_critical": "❌ Critical error: {error}",
-        "no_file": "❌ No file found. Send a file first!",
-        "help": (
-            "📖 **Help - Meloten Obfuscator**\n\n"
-            "**Commands:**\n"
-            "/start - Start bot\n"
-            "/help - Show this help\n"
-            "/presets - View all presets\n"
-            "/stats - Your statistics\n"
-            "/language - Change language\n"
-            "/about - About bot\n"
-            "/cancel - Cancel operation\n\n"
-            "**How to use:**\n"
-            "1. Send `.lua` file\n"
-            "2. Choose preset\n"
-            "3. Get protected file\n\n"
-            "**Protection levels:**\n"
-            "⚡️ Light - Fast, +60% size\n"
-            "⭐️ Medium - Balanced, +200% size\n"
-            "🔒 Strong - High protection, +500% size\n"
-            "🛡 Extreme - Maximum, +900% size\n"
-            "🔥 Ultra - Anti-deobfuscation, +1200% size\n"
-            "💀 Paranoid - Absolute protection, +2000% size"
-        ),
-        "presets_info": (
-            "🎯 **Available Presets:**\n\n"
-            "**⚡️ Light**\n"
-            "• Basic VM virtualization (20)\n"
-            "• String-only constant array\n"
-            "• Size: +60% | Speed: 1.1x\n"
-            "• Use: Development, testing\n\n"
-            "**⭐️ Medium** (Recommended)\n"
-            "• VM virtualization (50)\n"
-            "• Full constant array\n"
-            "• Local proxifying\n"
-            "• Function wrapping\n"
-            "• Size: +200% | Speed: 1.5x\n"
-            "• Use: Regular projects\n\n"
-            "**🔒 Strong**\n"
-            "• VM virtualization (100)\n"
-            "• All Medium features\n"
-            "• String splitting\n"
-            "• Number expressions\n"
-            "• String encryption\n"
-            "• Size: +500% | Speed: 2.5x\n"
-            "• Use: Commercial projects\n\n"
-            "**🛡 Extreme**\n"
-            "• VM virtualization (200)\n"
-            "• All Strong features\n"
-            "• Anti-debugging\n"
-            "• Multi-layer encryption\n"
-            "• Control flow flattening\n"
-            "• Size: +900% | Speed: 4x\n"
-            "• Use: Critical code\n\n"
-            "**🔥 Ultra Strong** (NEW!)\n"
-            "• VM virtualization (250)\n"
-            "• All Extreme features\n"
-            "• Anti-deobfuscation\n"
-            "• Dead code injection\n"
-            "• Deobfuscator traps\n"
-            "• Size: +1200% | Speed: 6x\n"
-            "• Use: Premium products\n\n"
-            "**💀 Paranoid** (NEW!)\n"
-            "• VM virtualization (300+100)\n"
-            "• All Ultra features MAXED\n"
-            "• Triple wrapping\n"
-            "• 20+ dead code injections\n"
-            "• 10+ traps\n"
-            "• Size: +2000% | Speed: 10x\n"
-            "• Use: Absolute protection"
-        ),
-        "stats": (
-            "📊 **Your Statistics:**\n\n"
-            "🗂 Files processed: {count}\n"
-            "📈 Total input size: {input_total} KB\n"
-            "📊 Total output size: {output_total} KB\n"
-            "⏱ Total processing time: {time_total}s\n"
-            "🔥 Most used preset: {favorite_preset}\n\n"
-            "First use: {first_use}\n"
-            "Last use: {last_use}"
-        ),
-        "about": (
-            "ℹ️ **About Meloten Obfuscator Bot**\n\n"
-            "🔐 Version: 2.0\n"
-            "⚡️ Based on: Prometheus\n"
-            "🛡 Enhanced by: Meloten Team\n\n"
-            "**Features:**\n"
-            "• 6 protection levels\n"
-            "• Anti-debugging\n"
-            "• Anti-deobfuscation\n"
-            "• Multi-layer encryption\n"
-            "• VM virtualization\n"
-            "• Control flow flattening\n"
-            "• Dead code injection\n\n"
-            "**Support:**\n"
-            "📧 Contact: @your_username\n"
-            "🌐 GitHub: github.com/your/repo\n\n"
-            "Made with ❤️ for Lua developers"
-        ),
-        "cancel": "❌ Operation cancelled. Files deleted.",
-        "no_stats": "📊 No statistics yet. Process some files first!",
+*Как использовать:*
+1. Отправьте .lua файл
+2. Выберите пресет обфускации
+3. Получите защищённый файл!''',
+        'about': '''ℹ️ *О Meloten Obfuscator*
+
+Версия: 2.1.0
+Основан на: Prometheus
+
+*Возможности:*
+✅ 8 уровней защиты
+✅ VM-based обфускация
+✅ Anti-Debug защита
+✅ Anti-Deobfuscation
+✅ Шифрование строк
+✅ Control Flow запутывание
+
+Создано с ❤️ для защиты вашего кода''',
+        'presets': '''🎯 *Доступные пресеты:*
+
+🟢 *Light* - Базовая защита
+⚡ Быстро | Размер: ~2-3x
+
+🟢 *Medium* - Сбалансированная
+⚡⚡ Средне | Размер: ~3-5x
+
+🟡 *Strong* - Высокая защита
+⚡⚡⚡ Медленнее | Размер: ~5-10x
+
+🟡 *Extreme* - Очень высокая
+⚡⚡⚡⚡ Медленно | Размер: ~10-20x
+
+🟠 *UltraStrong* - С Anti-Debug
+⚡⚡⚡⚡⚡ Очень медленно | Размер: ~20-50x
+
+🔴 *Paranoid* - Максимум
+🐌 Крайне медленно | Размер: ~50-100x
+
+🔴 *Insane* - Безумная защита
+🐌🐌 Очень долго | Размер: ~100-300x
+
+🔴 *Nightmare* - Кошмар (Premium)
+🐌🐌🐌 Критически медленно | Размер: ~300-500x''',
+        'choose_preset': '🎯 Выберите пресет обфускации:',
+        'send_file': '📤 Отправьте .lua файл для обфускации',
+        'processing': '⚙️ Обрабатываю файл...\nПресет: {preset}\nЭто может занять некоторое время...',
+        'success': '✅ *Обфускация завершена!*\n\n📊 Статистика:\n• Входной размер: {input_size}\n• Выходной размер: {output_size}\n• Соотношение: {ratio}%\n• Время: {time:.2f} сек',
+        'error': '❌ Произошла ошибка:\n`{error}`',
+        'cancelled': '❌ Операция отменена',
+        'premium_required': '⭐ Эта функция доступна только для Premium пользователей!\n\nИспользуйте /buy для покупки',
+        'stats': '''📊 *Ваша статистика:*
+
+Обработано файлов: {files}
+Всего байт: {bytes}
+Присоединились: {joined}
+Статус: {status}''',
+        'loadstring_prompt': '🔗 Отправьте ссылку для создания loadstring команды:',
+        'loadstring_result': '```lua\nloadstring(game:HttpGet("{url}"))()```\n\n📋 Скопируйте и используйте!',
+        'buy': '''⭐ *Premium подписка*
+
+*Преимущества Premium:*
+✅ Пресеты Insane и Nightmare
+✅ Приоритетная обработка
+✅ Увеличенный лимит файлов (50MB)
+✅ Без рекламы
+✅ Расширенная статистика
+✅ API доступ
+
+*Цена:* $9.99/месяц
+
+Свяжитесь с @YourSupport для оплаты''',
+        'language_changed': '✅ Язык изменён на Русский'
     },
-    "ru": {
-        "welcome": (
-            "👋 **Добро пожаловать в Meloten Obfuscator Bot!**\n\n"
-            "🔐 Профессиональная защита Lua кода\n"
-            "⚡️ Множество уровней обфускации\n"
-            "🛡 Анти-отладка & анти-деобфускация\n\n"
-            "**Возможности:**\n"
-            "• VM виртуализация\n"
-            "• Многослойное шифрование строк\n"
-            "• Обфускация потока управления\n"
-            "• Вставка мусорного кода\n"
-            "• Защита от деобфускаторов\n\n"
-            "Отправьте мне `.lua` файл для начала!"
-        ),
-        "select_language": "🌍 Выберите язык:",
-        "language_set": "✅ Язык установлен: Русский",
-        "send_file": "📂 Отправьте мне `.lua` файл для обфускации",
-        "file_received": "✅ Файл `{filename}` получен!\n\n📊 Размер: {size} КБ\n\nВыберите уровень защиты:",
-        "wrong_extension": "❌ Пожалуйста, отправьте `.lua` файл",
-        "processing": "⚙️ Обработка с пресетом **{preset}**...\n\n⏳ Это может занять время...",
-        "success": (
-            "✅ **Обфускация завершена!**\n\n"
-            "📊 **Статистика:**\n"
-            "• Размер входа: {input_size} КБ\n"
-            "• Размер выхода: {output_size} КБ\n"
-            "• Увеличение: {ratio}%\n"
-            "• Пресет: {preset}\n"
-            "• Время: {time}с\n\n"
-            "🗑 Файлы автоматически удалены из памяти бота."
-        ),
-        "error_lua": "❌ **Ошибка Lua:**\n```\n{error}\n```",
-        "error_not_found": "❌ Интерпретатор Lua не найден!\nПроверьте настройку LUA_PATH.",
-        "error_critical": "❌ Критическая ошибка: {error}",
-        "no_file": "❌ Файл не найден. Сначала отправьте файл!",
-        "help": (
-            "📖 **Справка - Meloten Obfuscator**\n\n"
-            "**Команды:**\n"
-            "/start - Запустить бота\n"
-            "/help - Показать справку\n"
-            "/presets - Посмотреть пресеты\n"
-            "/stats - Ваша статистика\n"
-            "/language - Сменить язык\n"
-            "/about - О боте\n"
-            "/cancel - Отменить операцию\n\n"
-            "**Как использовать:**\n"
-            "1. Отправьте `.lua` файл\n"
-            "2. Выберите пресет\n"
-            "3. Получите защищённый файл\n\n"
-            "**Уровни защиты:**\n"
-            "⚡️ Light - Быстро, +60% размера\n"
-            "⭐️ Medium - Сбалансированно, +200%\n"
-            "🔒 Strong - Высокая защита, +500%\n"
-            "🛡 Extreme - Максимум, +900%\n"
-            "🔥 Ultra - Анти-деобфускация, +1200%\n"
-            "💀 Paranoid - Абсолютная защита, +2000%"
-        ),
-        "presets_info": (
-            "🎯 **Доступные пресеты:**\n\n"
-            "**⚡️ Light**\n"
-            "• Базовая VM виртуализация (20)\n"
-            "• Массив констант только для строк\n"
-            "• Размер: +60% | Скорость: 1.1x\n"
-            "• Применение: Разработка, тесты\n\n"
-            "**⭐️ Medium** (Рекомендуется)\n"
-            "• VM виртуализация (50)\n"
-            "• Полный массив констант\n"
-            "• Проксирование локальных\n"
-            "• Обёртка в функции\n"
-            "• Размер: +200% | Скорость: 1.5x\n"
-            "• Применение: Обычные проекты\n\n"
-            "**🔒 Strong**\n"
-            "• VM виртуализация (100)\n"
-            "• Все фичи Medium\n"
-            "• Разделение строк\n"
-            "• Числа в выражения\n"
-            "• Шифрование строк\n"
-            "• Размер: +500% | Скорость: 2.5x\n"
-            "• Применение: Коммерция\n\n"
-            "**🛡 Extreme**\n"
-            "• VM виртуализация (200)\n"
-            "• Все фичи Strong\n"
-            "• Анти-отладка\n"
-            "• Многослойное шифрование\n"
-            "• Control flow flattening\n"
-            "• Размер: +900% | Скорость: 4x\n"
-            "• Применение: Критический код\n\n"
-            "**🔥 Ultra Strong** (НОВЫЙ!)\n"
-            "• VM виртуализация (250)\n"
-            "• Все фичи Extreme\n"
-            "• Анти-деобфускация\n"
-            "• Вставка мусорного кода\n"
-            "• Ловушки для деобфускаторов\n"
-            "• Размер: +1200% | Скорость: 6x\n"
-            "• Применение: Премиум продукты\n\n"
-            "**💀 Paranoid** (НОВЫЙ!)\n"
-            "• VM виртуализация (300+100)\n"
-            "• Все фичи Ultra на МАКСИМУМ\n"
-            "• Тройная обёртка\n"
-            "• 20+ вставок мусорного кода\n"
-            "• 10+ ловушек\n"
-            "• Размер: +2000% | Скорость: 10x\n"
-            "• Применение: Абсолютная защита"
-        ),
-        "stats": (
-            "📊 **Ваша статистика:**\n\n"
-            "🗂 Обработано файлов: {count}\n"
-            "📈 Общий размер входа: {input_total} КБ\n"
-            "📊 Общий размер выхода: {output_total} КБ\n"
-            "⏱ Общее время: {time_total}с\n"
-            "🔥 Любимый пресет: {favorite_preset}\n\n"
-            "Первое использование: {first_use}\n"
-            "Последнее: {last_use}"
-        ),
-        "about": (
-            "ℹ️ **О Meloten Obfuscator Bot**\n\n"
-            "🔐 Версия: 2.0\n"
-            "⚡️ Основан на: Prometheus\n"
-            "🛡 Улучшен: Meloten Team\n\n"
-            "**Возможности:**\n"
-            "• 6 уровней защиты\n"
-            "• Анти-отладка\n"
-            "• Анти-деобфускация\n"
-            "• Многослойное шифрование\n"
-            "• VM виртуализация\n"
-            "• Control flow flattening\n"
-            "• Вставка мусорного кода\n\n"
-            "**Поддержка:**\n"
-            "📧 Контакт: @your_username\n"
-            "🌐 GitHub: github.com/your/repo\n\n"
-            "Сделано с ❤️ для Lua разработчиков"
-        ),
-        "cancel": "❌ Операция отменена. Файлы удалены.",
-        "no_stats": "📊 Статистики пока нет. Обработайте файлы!",
+    'en': {
+        'start': '🔥 *Meloten Obfuscator Bot*\n\nWelcome! I will help protect your Lua code.\n\nUse /help to see all commands.',
+        'help': '''📚 *Available commands:*
+
+/start - Restart the bot
+/help - See all bot commands
+/about - Information about the bot
+/presets - View presets
+/stats - See your statistics
+/loadstring - Send a link to create loadstring
+/buy - Buy premium
+/language - Change language
+/cancel - Cancel current obfuscation
+
+*How to use:*
+1. Send a .lua file
+2. Choose obfuscation preset
+3. Get your protected file!''',
+        'about': '''ℹ️ *About Meloten Obfuscator*
+
+Version: 2.1.0
+Based on: Prometheus
+
+*Features:*
+✅ 8 protection levels
+✅ VM-based obfuscation
+✅ Anti-Debug protection
+✅ Anti-Deobfuscation
+✅ String encryption
+✅ Control Flow flattening
+
+Made with ❤️ to protect your code''',
+        'presets': '''🎯 *Available presets:*
+
+🟢 *Light* - Basic protection
+⚡ Fast | Size: ~2-3x
+
+🟢 *Medium* - Balanced
+⚡⚡ Medium | Size: ~3-5x
+
+🟡 *Strong* - High protection
+⚡⚡⚡ Slower | Size: ~5-10x
+
+🟡 *Extreme* - Very high
+⚡⚡⚡⚡ Slow | Size: ~10-20x
+
+🟠 *UltraStrong* - With Anti-Debug
+⚡⚡⚡⚡⚡ Very slow | Size: ~20-50x
+
+🔴 *Paranoid* - Maximum
+🐌 Extremely slow | Size: ~50-100x
+
+🔴 *Insane* - Insane protection
+🐌🐌 Very long | Size: ~100-300x
+
+🔴 *Nightmare* - Nightmare (Premium)
+🐌🐌🐌 Critically slow | Size: ~300-500x''',
+        'choose_preset': '🎯 Choose obfuscation preset:',
+        'send_file': '📤 Send a .lua file to obfuscate',
+        'processing': '⚙️ Processing file...\nPreset: {preset}\nThis may take a while...',
+        'success': '✅ *Obfuscation complete!*\n\n📊 Statistics:\n• Input size: {input_size}\n• Output size: {output_size}\n• Ratio: {ratio}%\n• Time: {time:.2f} sec',
+        'error': '❌ An error occurred:\n`{error}`',
+        'cancelled': '❌ Operation cancelled',
+        'premium_required': '⭐ This feature is available only for Premium users!\n\nUse /buy to purchase',
+        'stats': '''📊 *Your statistics:*
+
+Files processed: {files}
+Total bytes: {bytes}
+Joined: {joined}
+Status: {status}''',
+        'loadstring_prompt': '🔗 Send a link to create loadstring command:',
+        'loadstring_result': '```lua\nloadstring(game:HttpGet("{url}"))()```\n\n📋 Copy and use!',
+        'buy': '''⭐ *Premium subscription*
+
+*Premium benefits:*
+✅ Insane and Nightmare presets
+✅ Priority processing
+✅ Increased file limit (50MB)
+✅ No ads
+✅ Extended statistics
+✅ API access
+
+*Price:* $9.99/month
+
+Contact @YourSupport for payment''',
+        'language_changed': '✅ Language changed to English'
     }
 }
 
-# ================= ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =================
-
-def get_text(user_id: int, key: str, **kwargs) -> str:
-    """Получить текст на языке пользователя"""
-    lang = user_languages.get(user_id, "en")
-    text = TEXTS.get(lang, TEXTS["en"]).get(key, TEXTS["en"][key])
-    return text.format(**kwargs) if kwargs else text
-
-def save_stats():
-    """Сохранить статистику в файл"""
-    with open(STATS_FILE, "w", encoding="utf-8") as f:
-        for user_id, stats in user_stats.items():
-            f.write(f"{user_id}:{stats}\n")
-
-def load_stats():
-    """Загрузить статистику из файла"""
-    global user_stats
-    if os.path.exists(STATS_FILE):
-        with open(STATS_FILE, "r", encoding="utf-8") as f:
-            for line in f:
-                user_id, stats = line.strip().split(":", 1)
-                user_stats[int(user_id)] = eval(stats)
-
-def update_user_stats(user_id: int, preset: str, input_size: int, output_size: int, time: float):
-    """Обновить статистику пользователя"""
+# Инициализация статистики пользователя
+def init_user_stats(user_id):
     if user_id not in user_stats:
         user_stats[user_id] = {
-            "count": 0,
-            "input_total": 0,
-            "output_total": 0,
-            "time_total": 0,
-            "presets": {},
-            "first_use": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "last_use": ""
+            'files_processed': 0,
+            'total_bytes': 0,
+            'joined_date': datetime.now().strftime('%Y-%m-%d'),
+            'is_premium': False,
+            'language': 'en'
         }
+
+def get_text(user_id, key):
+    """Получить текст на языке пользователя"""
+    init_user_stats(user_id)
+    lang = user_stats[user_id].get('language', 'en')
+    return LANGUAGES.get(lang, LANGUAGES['en']).get(key, key)
+
+# Команда /start
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    init_user_stats(user_id)
     
-    stats = user_stats[user_id]
-    stats["count"] += 1
-    stats["input_total"] += input_size
-    stats["output_total"] += output_size
-    stats["time_total"] += time
-    stats["presets"][preset] = stats["presets"].get(preset, 0) + 1
-    stats["last_use"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
-    save_stats()
-
-# ================= КЛАВИАТУРЫ =================
-
-def get_language_keyboard():
-    """Клавиатура выбора языка"""
-    buttons = [
-        [
-            InlineKeyboardButton(text="🇬🇧 English", callback_data="lang_en"),
-            InlineKeyboardButton(text="🇷🇺 Русский", callback_data="lang_ru")
-        ]
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-def get_presets_keyboard(lang="en"):
-    """Клавиатура выбора пресета"""
-    buttons = [
-        [
-            InlineKeyboardButton(text="⚡️ Light", callback_data="preset_Light"),
-            InlineKeyboardButton(text="⭐️ Medium", callback_data="preset_Medium")
-        ],
-        [
-            InlineKeyboardButton(text="🔒 Strong", callback_data="preset_Strong"),
-            InlineKeyboardButton(text="🛡 Extreme", callback_data="preset_Extreme")
-        ],
-        [
-            InlineKeyboardButton(text="🔥 Ultra Strong", callback_data="preset_UltraStrong"),
-        ],
-        [
-            InlineKeyboardButton(text="💀 Paranoid", callback_data="preset_Paranoid")
-        ]
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-# ================= ОБРАБОТЧИКИ КОМАНД =================
-
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message, state: FSMContext):
-    user_id = message.from_user.id
-    
-    # Если язык не выбран, спрашиваем
-    if user_id not in user_languages:
-        await message.answer(
-            "🌍 **Welcome! | Добро пожаловать!**\n\nSelect your language | Выберите язык:",
-            reply_markup=get_language_keyboard(),
-            parse_mode="Markdown"
-        )
-        await state.set_state(UserStates.waiting_for_language)
-    else:
-        await message.answer(
-            get_text(user_id, "welcome"),
-            parse_mode="Markdown"
-        )
-
-@dp.message(Command("help"))
-async def cmd_help(message: types.Message):
-    await message.answer(
-        get_text(message.from_user.id, "help"),
-        parse_mode="Markdown"
+    await update.message.reply_text(
+        get_text(user_id, 'start'),
+        parse_mode='Markdown'
     )
 
-@dp.message(Command("presets"))
-async def cmd_presets(message: types.Message):
-    await message.answer(
-        get_text(message.from_user.id, "presets_info"),
-        parse_mode="Markdown"
+# Команда /help
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    await update.message.reply_text(
+        get_text(user_id, 'help'),
+        parse_mode='Markdown'
     )
 
-@dp.message(Command("stats"))
-async def cmd_stats(message: types.Message):
-    user_id = message.from_user.id
-    
-    if user_id not in user_stats or user_stats[user_id]["count"] == 0:
-        await message.answer(get_text(user_id, "no_stats"))
-        return
+# Команда /about
+async def about_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    await update.message.reply_text(
+        get_text(user_id, 'about'),
+        parse_mode='Markdown'
+    )
+
+# Команда /presets
+async def presets_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    await update.message.reply_text(
+        get_text(user_id, 'presets'),
+        parse_mode='Markdown'
+    )
+
+# Команда /stats
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    init_user_stats(user_id)
     
     stats = user_stats[user_id]
-    favorite = max(stats["presets"].items(), key=lambda x: x[1])[0] if stats["presets"] else "N/A"
+    status = "⭐ Premium" if stats['is_premium'] else "🆓 Free"
     
-    await message.answer(
-        get_text(
-            user_id, "stats",
-            count=stats["count"],
-            input_total=round(stats["input_total"] / 1024, 2),
-            output_total=round(stats["output_total"] / 1024, 2),
-            time_total=round(stats["time_total"], 2),
-            favorite_preset=favorite,
-            first_use=stats["first_use"],
-            last_use=stats["last_use"]
+    await update.message.reply_text(
+        get_text(user_id, 'stats').format(
+            files=stats['files_processed'],
+            bytes=stats['total_bytes'],
+            joined=stats['joined_date'],
+            status=status
         ),
-        parse_mode="Markdown"
+        parse_mode='Markdown'
     )
 
-@dp.message(Command("about"))
-async def cmd_about(message: types.Message):
-    await message.answer(
-        get_text(message.from_user.id, "about"),
-        parse_mode="Markdown"
+# Команда /buy
+async def buy_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    await update.message.reply_text(
+        get_text(user_id, 'buy'),
+        parse_mode='Markdown'
     )
 
-@dp.message(Command("language"))
-async def cmd_language(message: types.Message, state: FSMContext):
-    await message.answer(
-        get_text(message.from_user.id, "select_language"),
-        reply_markup=get_language_keyboard()
+# Команда /language
+async def language_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [
+            InlineKeyboardButton("🇷🇺 Русский", callback_data='lang_ru'),
+            InlineKeyboardButton("🇬🇧 English", callback_data='lang_en')
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        "🌍 Choose your language / Выберите язык:",
+        reply_markup=reply_markup
     )
-    await state.set_state(UserStates.waiting_for_language)
 
-@dp.message(Command("cancel"))
-async def cmd_cancel(message: types.Message, state: FSMContext):
-    user_id = message.from_user.id
+# Обработчик выбора языка
+async def language_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
     
-    # Удаляем файлы
-    if user_id in user_files:
-        if os.path.exists(user_files[user_id]):
-            os.remove(user_files[user_id])
-        del user_files[user_id]
+    user_id = update.effective_user.id
+    init_user_stats(user_id)
     
-    await state.clear()
-    await message.answer(get_text(user_id, "cancel"))
+    if query.data == 'lang_ru':
+        user_stats[user_id]['language'] = 'ru'
+        await query.edit_message_text(
+            LANGUAGES['ru']['language_changed'],
+            parse_mode='Markdown'
+        )
+    elif query.data == 'lang_en':
+        user_stats[user_id]['language'] = 'en'
+        await query.edit_message_text(
+            LANGUAGES['en']['language_changed'],
+            parse_mode='Markdown'
+        )
 
-# ================= ОБРАБОТЧИКИ CALLBACK =================
+# Команда /loadstring
+async def loadstring_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    await update.message.reply_text(get_text(user_id, 'loadstring_prompt'))
+    return WAITING_FOR_URL
 
-@dp.callback_query(F.data.startswith("lang_"))
-async def process_language(callback: types.CallbackQuery, state: FSMContext):
-    lang = callback.data.split("_")[1]
-    user_id = callback.from_user.id
-    user_languages[user_id] = lang
+async def loadstring_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    url = update.message.text.strip()
     
-    await callback.message.edit_text(
-        get_text(user_id, "language_set"),
-        parse_mode="Markdown"
-    )
+    # Создаём loadstring команду
+    loadstring_code = f'loadstring(game:HttpGet("{url}"))()'
     
-    await callback.message.answer(
-        get_text(user_id, "welcome"),
-        parse_mode="Markdown"
-    )
-    
-    await state.clear()
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("preset_"))
-async def process_obfuscation(callback: types.CallbackQuery, state: FSMContext):
-    user_id = callback.from_user.id
-    preset = callback.data.split("_")[1]
-    
-    if user_id not in user_files:
-        await callback.message.answer(get_text(user_id, "no_file"))
-        await callback.answer()
-        return
-    
-    input_path = user_files[user_id]
-    output_filename = os.path.basename(input_path).replace(".lua", "_obf.lua")
-    output_path = os.path.join(TEMP_DIR, output_filename)
-    
-    await callback.message.edit_text(
-        get_text(user_id, "processing", preset=preset),
-        parse_mode="Markdown"
+    await update.message.reply_text(
+        get_text(user_id, 'loadstring_result').format(url=url),
+        parse_mode='Markdown'
     )
     
-    start_time = datetime.now()
+    return ConversationHandler.END
+
+# Обработчик отправки файла
+async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    init_user_stats(user_id)
+    
+    # Проверка на .lua файл
+    if not update.message.document.file_name.endswith('.lua'):
+        await update.message.reply_text(
+            "❌ Пожалуйста, отправьте .lua файл"
+        )
+        return ConversationHandler.END
+    
+    # Сохраняем информацию о файле
+    context.user_data['file_id'] = update.message.document.file_id
+    context.user_data['file_name'] = update.message.document.file_name
+    context.user_data['file_size'] = update.message.document.file_size
+    
+    # Клавиатура с пресетами
+    keyboard = [
+        [InlineKeyboardButton("🟢 Light", callback_data='preset_Light')],
+        [InlineKeyboardButton("🟢 Medium", callback_data='preset_Medium')],
+        [InlineKeyboardButton("🟡 Strong", callback_data='preset_Strong')],
+        [InlineKeyboardButton("🟡 Extreme", callback_data='preset_Extreme')],
+        [InlineKeyboardButton("🟠 UltraStrong", callback_data='preset_UltraStrong')],
+        [InlineKeyboardButton("🔴 Paranoid", callback_data='preset_Paranoid')],
+    ]
+    
+    # Добавляем премиум пресеты если есть подписка
+    if user_stats[user_id]['is_premium']:
+        keyboard.append([InlineKeyboardButton("🔴 Insane", callback_data='preset_Insane')])
+        keyboard.append([InlineKeyboardButton("🔴 Nightmare", callback_data='preset_Nightmare')])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        get_text(user_id, 'choose_preset'),
+        reply_markup=reply_markup
+    )
+    
+    return WAITING_FOR_PRESET
+
+# Обработчик выбора пресета
+async def preset_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = update.effective_user.id
+    preset = query.data.replace('preset_', '')
+    
+    # Проверка на премиум пресеты
+    if preset in ['Insane', 'Nightmare'] and not user_stats[user_id]['is_premium']:
+        await query.edit_message_text(get_text(user_id, 'premium_required'))
+        return ConversationHandler.END
+    
+    # Сообщение о начале обработки
+    await query.edit_message_text(
+        get_text(user_id, 'processing').format(preset=preset)
+    )
+    
+    # Создаём временные директории
+    os.makedirs(TEMP_DIR, exist_ok=True)
     
     try:
-        # Запуск Lua обфускатора
-        process = await asyncio.create_subprocess_exec(
-            LUA_PATH,
-            "run_obfuscator.lua",
-            input_path,
-            output_path,
-            preset,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
+        # Скачиваем файл
+        file = await context.bot.get_file(context.user_data['file_id'])
+        input_path = os.path.join(TEMP_DIR, f"{user_id}_{context.user_data['file_name']}")
+        await file.download_to_drive(input_path)
+        
+        # Путь для выходного файла
+        output_path = input_path.replace('.lua', '_obfuscated.lua')
+        
+        # Запускаем обфускатор
+        start_time = datetime.now()
+        
+        result = subprocess.run(
+            ['lua', LUA_OBFUSCATOR_PATH, '--preset', preset, input_path, output_path],
+            capture_output=True,
+            text=True,
+            timeout=300  # 5 минут максимум
         )
         
-        stdout, stderr = await process.communicate()
+        end_time = datetime.now()
+        processing_time = (end_time - start_time).total_seconds()
         
-        if process.returncode != 0:
-            error_msg = stderr.decode().strip() or stdout.decode().strip()
-            await callback.message.edit_text(
-                get_text(user_id, "error_lua", error=error_msg[:500]),
-                parse_mode="Markdown"
-            )
-            return
+        if result.returncode != 0:
+            raise Exception(result.stderr or "Unknown error")
         
-        # Отправка результата
-        if os.path.exists(output_path):
-            end_time = datetime.now()
-            elapsed = (end_time - start_time).total_seconds()
-            
-            input_size = os.path.getsize(input_path)
-            output_size = os.path.getsize(output_path)
-            ratio = round((output_size / input_size - 1) * 100, 1) if input_size > 0 else 0
-            
-            # Обновляем статистику
-            update_user_stats(user_id, preset, input_size, output_size, elapsed)
-            
-            result_file = FSInputFile(output_path)
-            await bot.send_document(
-                chat_id=callback.message.chat.id,
-                document=result_file,
-                caption=get_text(
-                    user_id, "success",
-                    input_size=round(input_size / 1024, 2),
-                    output_size=round(output_size / 1024, 2),
-                    ratio=ratio,
-                    preset=preset,
-                    time=round(elapsed, 2)
+        # Получаем размеры файлов
+        input_size = os.path.getsize(input_path)
+        output_size = os.path.getsize(output_path)
+        ratio = (output_size / input_size * 100) if input_size > 0 else 0
+        
+        # Обновляем статистику
+        user_stats[user_id]['files_processed'] += 1
+        user_stats[user_id]['total_bytes'] += output_size
+        
+        # Отправляем результат
+        with open(output_path, 'rb') as f:
+            await context.bot.send_document(
+                chat_id=update.effective_chat.id,
+                document=f,
+                filename=context.user_data['file_name'].replace('.lua', '_obfuscated.lua'),
+                caption=get_text(user_id, 'success').format(
+                    input_size=f"{input_size/1024:.2f} KB",
+                    output_size=f"{output_size/1024:.2f} KB",
+                    ratio=f"{ratio:.1f}",
+                    time=processing_time
                 ),
-                parse_mode="Markdown",
-                request_timeout=600
+                parse_mode='Markdown'
             )
-            
-            del user_files[user_id]
-        else:
-            await callback.message.edit_text(get_text(user_id, "error_critical", error="Output file not created"))
-    
-    except FileNotFoundError:
-        await callback.message.edit_text(
-            get_text(user_id, "error_not_found"),
-            parse_mode="Markdown"
-        )
+        
+        # Удаляем временные файлы
+        os.remove(input_path)
+        os.remove(output_path)
+        
     except Exception as e:
-        await callback.message.edit_text(
-            get_text(user_id, "error_critical", error=str(e)),
-            parse_mode="Markdown"
+        logger.error(f"Error processing file: {e}")
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=get_text(user_id, 'error').format(error=str(e)),
+            parse_mode='Markdown'
         )
-    finally:
-        # Очистка
+        
+        # Очистка при ошибке
         if os.path.exists(input_path):
             os.remove(input_path)
         if os.path.exists(output_path):
             os.remove(output_path)
     
-    await callback.answer()
+    return ConversationHandler.END
 
-# ================= ОБРАБОТЧИК ДОКУМЕНТОВ =================
+# Команда /cancel
+async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    await update.message.reply_text(get_text(user_id, 'cancelled'))
+    return ConversationHandler.END
 
-@dp.message(F.document)
-async def handle_document(message: types.Message):
-    user_id = message.from_user.id
-    document = message.document
-    file_name = document.file_name
+def main():
+    # Создаём приложение
+    application = Application.builder().token(TOKEN).build()
     
-    # Проверка расширения
-    if not file_name.endswith(".lua"):
-        await message.answer(get_text(user_id, "wrong_extension"))
-        return
-    
-    # Скачивание
-    file_id = document.file_id
-    file = await bot.get_file(file_id)
-    file_path = file.file_path
-    
-    local_filename = f"{user_id}_{file_name}"
-    local_path = os.path.join(TEMP_DIR, local_filename)
-    
-    await bot.download_file(file_path, local_path)
-    
-    user_files[user_id] = local_path
-    
-    file_size = round(os.path.getsize(local_path) / 1024, 2)
-    
-    await message.answer(
-        get_text(user_id, "file_received", filename=file_name, size=file_size),
-        reply_markup=get_presets_keyboard(user_languages.get(user_id, "en")),
-        parse_mode="Markdown"
+    # Conversation handler для обфускации файлов
+    obfuscation_handler = ConversationHandler(
+        entry_points=[MessageHandler(filters.Document.ALL, handle_file)],
+        states={
+            WAITING_FOR_PRESET: [CallbackQueryHandler(preset_callback, pattern='^preset_')],
+        },
+        fallbacks=[CommandHandler('cancel', cancel_command)],
     )
+    
+    # Conversation handler для loadstring
+    loadstring_handler = ConversationHandler(
+        entry_points=[CommandHandler('loadstring', loadstring_command)],
+        states={
+            WAITING_FOR_URL: [MessageHandler(filters.TEXT & ~filters.COMMAND, loadstring_url)],
+        },
+        fallbacks=[CommandHandler('cancel', cancel_command)],
+    )
+    
+    # Регистрация handlers
+    application.add_handler(CommandHandler('start', start_command))
+    application.add_handler(CommandHandler('help', help_command))
+    application.add_handler(CommandHandler('about', about_command))
+    application.add_handler(CommandHandler('presets', presets_command))
+    application.add_handler(CommandHandler('stats', stats_command))
+    application.add_handler(CommandHandler('buy', buy_command))
+    application.add_handler(CommandHandler('language', language_command))
+    application.add_handler(CallbackQueryHandler(language_callback, pattern='^lang_'))
+    
+    application.add_handler(obfuscation_handler)
+    application.add_handler(loadstring_handler)
+    
+    # Запуск бота
+    logger.info("Bot started!")
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
-# ================= ЗАПУСК =================
-
-async def main():
-    print("🚀 Meloten Obfuscator Bot v2.0 started!")
-    load_stats()
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\n👋 Bot stopped")
-        save_stats()
+if __name__ == '__main__':
+    main()
